@@ -58,6 +58,8 @@ pub enum SetCommand {
     Stay(bool),
     MsgLine(usize),
     Verify(usize, usize),
+    /// SET PFn command_text (1-24)
+    Pf(usize, String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -349,6 +351,20 @@ fn parse_set_args(args: &str) -> Result<Command, String> {
         Ok(Command::Set(SetCommand::Hex(parse_on_off(subargs)?)))
     } else if matches_abbrev(&subcmd_upper, "STAY", 2) {
         Ok(Command::Set(SetCommand::Stay(parse_on_off(subargs)?)))
+    } else if subcmd_upper.starts_with("PF") {
+        // SET PFn command_text
+        let num_str = &subcmd_upper[2..];
+        let num = num_str
+            .parse::<usize>()
+            .map_err(|_| format!("Invalid PF key number: {}", num_str))?;
+        if num < 1 || num > 24 {
+            return Err(format!("PF key must be 1-24, got: {}", num));
+        }
+        if subargs.is_empty() || subargs.to_uppercase() == "OFF" {
+            Ok(Command::Set(SetCommand::Pf(num, String::new())))
+        } else {
+            Ok(Command::Set(SetCommand::Pf(num, subargs.to_string())))
+        }
     } else {
         Err(format!("Unknown SET subcommand: {}", subcmd))
     }

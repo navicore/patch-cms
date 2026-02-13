@@ -42,6 +42,9 @@ pub struct Editor {
     verify_start: usize,
     verify_end: usize,
 
+    // PF key assignments: PF1..PF24 stored as index 0..23
+    pf_keys: [Option<String>; 24],
+
     // Operational state
     alt_count: usize,
     message: Option<String>,
@@ -49,6 +52,24 @@ pub struct Editor {
     pending_operation: Option<PendingOperation>,
     /// Number of lines per page (set by TUI based on screen size)
     page_size: usize,
+}
+
+/// Classic VM/CMS XEDIT default PF key assignments
+fn default_pf_keys() -> [Option<String>; 24] {
+    let mut keys: [Option<String>; 24] = Default::default();
+    keys[0] = Some("HELP".to_string());         // PF1
+    keys[2] = Some("QUIT".to_string());          // PF3
+    keys[3] = Some("TOP".to_string());           // PF4 (TAB in some configs)
+    keys[4] = Some("BOTTOM".to_string());        // PF5
+    keys[5] = Some("?".to_string());             // PF6 (repeat last command placeholder)
+    keys[6] = Some("BACKWARD".to_string());      // PF7
+    keys[7] = Some("FORWARD".to_string());       // PF8
+    keys[8] = Some("=".to_string());             // PF9 (repeat last command placeholder)
+    keys[9] = Some("LOCATE".to_string());        // PF10 (cursor-locate placeholder)
+    keys[10] = Some("SAVE".to_string());         // PF11
+    keys[11] = Some("FILE".to_string());         // PF12
+    // PF13-PF24: unassigned by default (mirrored in some configs)
+    keys
 }
 
 impl Editor {
@@ -75,6 +96,7 @@ impl Editor {
             curline: CurLinePosition::Middle,
             verify_start: 1,
             verify_end: 80,
+            pf_keys: default_pf_keys(),
             alt_count: 0,
             message: None,
             pending_block: None,
@@ -115,6 +137,22 @@ impl Editor {
 
     pub fn alt_count(&self) -> usize {
         self.alt_count
+    }
+
+    /// Get the command string assigned to a PF key (1-based: PF1..PF24)
+    pub fn pf_key(&self, num: usize) -> Option<&str> {
+        if num >= 1 && num <= 24 {
+            self.pf_keys[num - 1].as_deref()
+        } else {
+            None
+        }
+    }
+
+    /// Set a PF key assignment (1-based)
+    pub fn set_pf_key(&mut self, num: usize, command: Option<String>) {
+        if num >= 1 && num <= 24 {
+            self.pf_keys[num - 1] = command;
+        }
     }
 
     pub fn show_number(&self) -> bool {
@@ -603,6 +641,13 @@ impl Editor {
             SetCommand::Verify(start, end) => {
                 self.verify_start = *start;
                 self.verify_end = *end;
+            }
+            SetCommand::Pf(num, cmd) => {
+                if cmd.is_empty() {
+                    self.set_pf_key(*num, None);
+                } else {
+                    self.set_pf_key(*num, Some(cmd.clone()));
+                }
             }
         }
         Ok(CommandResult::ok())

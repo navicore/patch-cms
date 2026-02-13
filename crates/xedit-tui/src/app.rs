@@ -137,6 +137,11 @@ impl App {
                 return;
             }
             Action::None => return,
+            // PF keys work regardless of focus — just like a real 3270
+            Action::PfKey(num) => {
+                self.handle_pf_key(num);
+                return;
+            }
             _ => {}
         }
 
@@ -485,6 +490,29 @@ impl App {
                 self.input_text.clear();
             }
             _ => {}
+        }
+    }
+
+    // -- PF key handling --
+
+    fn handle_pf_key(&mut self, num: usize) {
+        // If in input mode, PF keys exit input mode first
+        if self.in_input_mode {
+            self.in_input_mode = false;
+            self.input_text.clear();
+        }
+
+        // Process any pending prefix commands first (like pressing Enter)
+        if self.focus == CursorFocus::FileArea && !self.prefix_inputs.is_empty() {
+            self.process_enter();
+        }
+
+        if let Some(cmd_text) = self.editor.pf_key(num) {
+            let cmd_text = cmd_text.to_string();
+            self.execute_command_text(&cmd_text);
+        } else {
+            self.editor
+                .set_message(format!("PF{} is not defined", num));
         }
     }
 
