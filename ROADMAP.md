@@ -65,38 +65,31 @@ genuinely embeddable standalone.
 - [ ] Command history (recall previous commands)
 - [ ] Undo (at minimum single-level)
 
-## Phase 2: Screen Editing (3270 Block-Mode Simulation)
+## Phase 2: Screen Editing (3270 Block-Mode Simulation) — DONE
 
-This is what makes XEDIT feel like XEDIT. On a real 3270, the entire screen
-was a form — you'd cursor freely, overtype anywhere, and Enter submitted all
-changes at once. We need to simulate this in a character-mode terminal.
+### Done
+- [x] CursorFocus model: CommandLine vs FileArea
+- [x] Tab cycles: CommandLine → FileArea (prefix) → FileArea (data) → CommandLine
+- [x] Shift-Tab reverses the cycle
+- [x] Arrow keys move freely within file area (up/down between lines, left/right between columns)
+- [x] Arrow left/right skips separator column between prefix and data
+- [x] Prefix area editing: cursor in cols 1-5, overtype line number with command text
+- [x] Per-line prefix input buffers (HashMap), visual feedback (bold white prefix text)
+- [x] Data area editing: overtype mode (default) and insert mode (Insert key toggles)
+- [x] Character-level editor methods: overtype_char, insert_char, delete_char
+- [x] Backspace works in both prefix and data areas
+- [x] Delete key removes character at cursor in data area
+- [x] Home/End: move to start/end within current area
+- [x] Enter in file area: batch-process all pending prefix commands + command line
+- [x] Escape in file area: clear pending prefixes, return to command line
+- [x] Cursor positioned correctly in all areas (command line, prefix, data)
+- [x] ID line shows [Ins]/[Ovr] mode indicator
+- [x] Message line shows contextual help when no message pending
+- [x] Arrow up/down in command line still scrolls (moves current line)
+- [x] PageUp/PageDown work in both focus modes
 
-### Cursor model
-- Cursor can be in: **command line**, **prefix area**, or **data area**
-- Tab cycles between areas (or free cursor movement with arrow keys)
-- The "focus area" determines what keystrokes do
-
-### Prefix area editing
-- When cursor is in the prefix area (columns 1-5 of a line):
-  - Typing overtypes the line number with prefix command text
-  - Each line has a small buffer for prefix input
-  - On Enter (or Tab away), the prefix command is parsed
-  - Visual: line number replaced with typed text (e.g., "dd   ")
-- Multiple prefix commands can be pending simultaneously (e.g., dd on line 3,
-  dd on line 7, f on line 10 — all processed on Enter)
-
-### Data area editing
-- When cursor is in the data area (columns 6+ of a line):
-  - **Overtype mode** (default): typing replaces characters at cursor position
-  - **Insert mode** (toggle): typing inserts characters
-  - Cursor position tracks line and column
-  - Changes are applied to the buffer immediately (or on Enter for batch)
-- Respect ZONE and TRUNC settings
-
-### Enter processing (batch commit)
-- On Enter: process all pending prefix commands AND command line text
-- Prefix commands execute in order: deletes first, then moves/copies, then inserts
-- Clear all prefix input areas after processing
+### TODO — refinements
+- [ ] Priority-ordered prefix processing (block ops before singles)
 
 ### Implementation approach
 - Add `CursorFocus` enum: `CommandLine | Prefix(line_num) | Data(line_num, col)`

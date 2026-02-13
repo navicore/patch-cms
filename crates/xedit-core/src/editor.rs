@@ -294,6 +294,61 @@ impl Editor {
         self.alt_count += 1;
     }
 
+    // -- Character-level editing (for data area screen editing) --
+
+    /// Overtype a character at the given line and 0-based column
+    pub fn overtype_char(&mut self, line_num: usize, col: usize, ch: char) {
+        if line_num == 0 || line_num > self.buffer.len() {
+            return;
+        }
+        if let Some(line) = self.buffer.get_mut(line_num) {
+            let mut text = line.text().to_string();
+            // Pad with spaces if needed
+            while text.len() <= col {
+                text.push(' ');
+            }
+            let mut chars: Vec<char> = text.chars().collect();
+            if col < chars.len() {
+                chars[col] = ch;
+            }
+            line.set_text(chars.into_iter().collect::<String>());
+        }
+    }
+
+    /// Insert a character at the given line and 0-based column
+    pub fn insert_char(&mut self, line_num: usize, col: usize, ch: char) {
+        if line_num == 0 || line_num > self.buffer.len() {
+            return;
+        }
+        if let Some(line) = self.buffer.get_mut(line_num) {
+            let mut text = line.text().to_string();
+            while text.len() < col {
+                text.push(' ');
+            }
+            text.insert(col, ch);
+            line.set_text(text);
+        }
+    }
+
+    /// Delete the character at the given line and 0-based column
+    pub fn delete_char(&mut self, line_num: usize, col: usize) {
+        if line_num == 0 || line_num > self.buffer.len() {
+            return;
+        }
+        if let Some(line) = self.buffer.get_mut(line_num) {
+            let mut text = line.text().to_string();
+            if col < text.len() {
+                text.remove(col);
+                line.set_text(text);
+            }
+        }
+    }
+
+    /// Set the current line directly (used when cursor movement drives position)
+    pub fn set_current_line(&mut self, line: usize) {
+        self.current_line = line.min(self.buffer.len());
+    }
+
     // -- Navigation --
 
     fn cmd_up(&mut self, n: usize) -> Result<CommandResult> {
