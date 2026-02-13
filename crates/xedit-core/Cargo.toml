@@ -5,4 +5,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["rexx"]
+rexx = ["patch-rexx"]
+
+[dependencies]
+patch-rexx = { version = "0.9.3", optional = true }
+
 [dev-dependencies]

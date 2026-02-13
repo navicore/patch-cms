@@ -308,6 +308,8 @@ impl Editor {
             Command::Query(what) => self.cmd_query(what),
             Command::Refresh => Ok(CommandResult::refresh()),
             Command::Help => self.cmd_help(),
+            #[cfg(feature = "rexx")]
+            Command::Macro(args) => self.cmd_macro(args),
             Command::Nop => Ok(CommandResult::ok()),
         };
 
@@ -679,6 +681,32 @@ impl Editor {
             }
         };
         Ok(CommandResult::with_message(msg))
+    }
+
+    #[cfg(feature = "rexx")]
+    fn cmd_macro(&mut self, args: &str) -> Result<CommandResult> {
+        let (macro_name, macro_args) = if let Some(pos) = args.find(char::is_whitespace) {
+            (&args[..pos], args[pos..].trim())
+        } else {
+            (args, "")
+        };
+
+        // Try .xedit extension first, then exact name
+        let candidates = [
+            format!("{}.xedit", macro_name),
+            macro_name.to_string(),
+            format!("{}.XEDIT", macro_name),
+        ];
+
+        let source = candidates
+            .iter()
+            .find_map(|name| fs::read_to_string(name).ok())
+            .ok_or_else(|| {
+                XeditError::FileNotFound(format!("Macro not found: {}", macro_name))
+            })?;
+
+        crate::macro_engine::run_macro(self, &source, macro_args)?;
+        Ok(CommandResult::ok())
     }
 
     fn cmd_help(&self) -> Result<CommandResult> {
