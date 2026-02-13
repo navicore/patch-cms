@@ -37,6 +37,10 @@ pub enum Command {
     Set(SetCommand),
     Query(String),
 
+    // Macros
+    #[cfg(feature = "rexx")]
+    Macro(String),
+
     // Display
     Refresh,
     Help,
@@ -144,6 +148,7 @@ const COMMAND_TABLE: &[(&str, usize)] = &[
     ("INPUT", 1),     // I
     ("LEFT", 2),      // LE
     ("LOCATE", 1),    // L (but see disambiguation below)
+    ("MACRO", 5),     // MACRO
     ("NEXT", 1),      // N
     ("QQUIT", 2),     // QQ
     ("QUERY", 2),     // QU
@@ -240,6 +245,14 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
         }
         "SET" => parse_set_args(args),
         "QUERY" => Ok(Command::Query(args.to_string())),
+        #[cfg(feature = "rexx")]
+        "MACRO" => {
+            if args.is_empty() {
+                Err("MACRO requires a filename".to_string())
+            } else {
+                Ok(Command::Macro(args.to_string()))
+            }
+        }
         "REFRESH" => Ok(Command::Refresh),
         "HELP" => Ok(Command::Help),
         _ => Err(format!("Unknown command: {}", cmd_word)),
