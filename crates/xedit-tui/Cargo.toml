@@ -1,0 +1,15 @@
+[package]
+name = "xedit-tui"
+description = "Terminal UI for XEDIT"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "xedit"
+path = "src/main.rs"
+
+[dependencies]
+xedit-core = { path = "../xedit-core" }
+crossterm = "0.28"
+ratatui = "0.29"

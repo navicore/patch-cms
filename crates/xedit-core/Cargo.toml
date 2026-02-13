@@ -1,0 +1,8 @@
+[package]
+name = "xedit-core"
+description = "Core editor model for XEDIT — the VM/CMS full-screen editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dev-dependencies]
