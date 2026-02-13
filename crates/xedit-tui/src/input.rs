@@ -21,6 +21,8 @@ pub enum Action {
     End,
     InsertToggle,
     Escape,
+    /// PF key pressed (1-24). F1-F12 = PF1-12, Shift+F1-F12 = PF13-24
+    PfKey(usize),
     ForceQuit,
     None,
 }
@@ -61,6 +63,18 @@ pub fn read_action() -> std::io::Result<Action> {
                 KeyCode::End => Ok(Action::End),
                 KeyCode::Insert => Ok(Action::InsertToggle),
                 KeyCode::Esc => Ok(Action::Escape),
+                KeyCode::F(n) => {
+                    let pf = if modifiers.contains(KeyModifiers::SHIFT) {
+                        n as usize + 12 // Shift+F1 = PF13, etc.
+                    } else {
+                        n as usize // F1 = PF1, etc.
+                    };
+                    if pf >= 1 && pf <= 24 {
+                        Ok(Action::PfKey(pf))
+                    } else {
+                        Ok(Action::None)
+                    }
+                }
                 _ => Ok(Action::None),
             }
         }
