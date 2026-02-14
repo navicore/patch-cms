@@ -41,6 +41,23 @@ pub enum Command {
     #[cfg(feature = "rexx")]
     Macro(String),
 
+    // Undo
+    Undo,
+
+    // Filtering
+    All(Option<Target>),
+
+    // Sorting
+    Sort {
+        target: Option<Target>,
+        ascending: bool,
+        col_start: Option<usize>,
+        col_end: Option<usize>,
+    },
+
+    // Cursor control
+    Cursor(CursorTarget),
+
     // Display
     Refresh,
     Help,
@@ -62,6 +79,13 @@ pub enum SetCommand {
     Stay(bool),
     MsgLine(usize),
     Verify(usize, usize),
+    Shadow(bool),
+    /// SET RESERVED row text
+    Reserved(usize, String),
+    /// SET RESERVED row OFF
+    ReservedOff(usize),
+    /// SET COLOR area colorname
+    Color(ColorArea, String),
     /// SET PFn command_text (1-24)
     Pf(usize, String),
 }
@@ -78,6 +102,25 @@ pub enum CaseSetting {
 pub enum CurLinePosition {
     Row(usize),
     Middle,
+}
+
+/// Areas that can have color overrides
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ColorArea {
+    FileArea,
+    CmdLine,
+    Prefix,
+    CurLine,
+    IdLine,
+    MsgLine,
+    Shadow,
+}
+
+/// CURSOR command target
+#[derive(Debug, Clone)]
+pub enum CursorTarget {
+    Home,
+    File { line: usize, col: usize },
 }
 
 /// Result of executing a command
@@ -136,9 +179,11 @@ impl CommandResult {
 // Each entry: (full_name, minimum_abbreviation_length)
 // Follows IBM XEDIT abbreviation conventions.
 const COMMAND_TABLE: &[(&str, usize)] = &[
+    ("ALL", 3),      // ALL
     ("BACKWARD", 1), // B
     ("BOTTOM", 2),   // BO
     ("CHANGE", 1),   // C
+    ("CURSOR", 3),   // CUR
     ("DELETE", 3),   // DEL
     ("DOWN", 2),     // DO
     ("FILE", 4),     // FILE
@@ -157,7 +202,9 @@ const COMMAND_TABLE: &[(&str, usize)] = &[
     ("RIGHT", 2),    // RI
     ("SAVE", 2),     // SA
     ("SET", 3),      // SET
+    ("SORT", 4),     // SORT
     ("TOP", 1),      // T
+    ("UNDO", 4),     // UNDO
     ("UP", 1),       // U
 ];
 
@@ -216,6 +263,7 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
             Ok(Command::Locate(Target::parse(args)?))
         }
         "CHANGE" => parse_change_args(args),
+        "CURSOR" => parse_cursor_args(args),
         "INPUT" => {
             if args.is_empty() {
                 Ok(Command::Input(None))
@@ -251,6 +299,15 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
                 Ok(Command::Macro(args.to_string()))
             }
         }
+        "ALL" => {
+            if args.is_empty() {
+                Ok(Command::All(None))
+            } else {
+                Ok(Command::All(Some(Target::parse(args)?)))
+            }
+        }
+        "SORT" => parse_sort_args(args),
+        "UNDO" => Ok(Command::Undo),
         "REFRESH" => Ok(Command::Refresh),
         "HELP" => Ok(Command::Help),
         _ => Err(format!("Unknown command: {}", cmd_word)),
@@ -314,6 +371,119 @@ fn parse_change_args(args: &str) -> Result<Command, String> {
     })
 }
 
+/// Parse CURSOR HOME | CURSOR FILE line col
+fn parse_cursor_args(args: &str) -> Result<Command, String> {
+    if args.is_empty() {
+        return Err("CURSOR requires HOME or FILE line col".to_string());
+    }
+    let (subcmd, subargs) = split_first_word(args);
+    let upper = subcmd.to_uppercase();
+    match upper.as_str() {
+        "HOME" | "H" => Ok(Command::Cursor(CursorTarget::Home)),
+        "FILE" | "F" => {
+            let parts: Vec<&str> = subargs.split_whitespace().collect();
+            if parts.len() < 2 {
+                return Err("CURSOR FILE requires line and col".to_string());
+            }
+            let line = parts[0]
+                .parse::<usize>()
+                .map_err(|_| format!("Invalid line number: {}", parts[0]))?;
+            let col = parts[1]
+                .parse::<usize>()
+                .map_err(|_| format!("Invalid column: {}", parts[1]))?;
+            Ok(Command::Cursor(CursorTarget::File { line, col }))
+        }
+        _ => Err(format!("CURSOR: expected HOME or FILE, got: {}", subcmd)),
+    }
+}
+
+/// Parse SORT [target] [A|D] [col_start [col_end]]
+fn parse_sort_args(args: &str) -> Result<Command, String> {
+    let mut target = None;
+    let mut ascending = true;
+    let mut col_start = None;
+    let mut col_end = None;
+
+    let mut remaining = args.trim();
+
+    // Try to parse a target first (starts with /, :, +, -, *, or digit)
+    if !remaining.is_empty() {
+        let first_char = remaining.chars().next().unwrap();
+        if first_char == '/'
+            || first_char == ':'
+            || first_char == '+'
+            || first_char == '-'
+            || first_char == '*'
+        {
+            // Find where the target ends: after a closing delimiter or at next space
+            let target_end = if first_char == '/' {
+                // Find closing /
+                let rest = &remaining[1..];
+                match rest.find('/') {
+                    Some(pos) => pos + 2, // include both delimiters
+                    None => remaining.len(),
+                }
+            } else if first_char == '*' {
+                1
+            } else {
+                remaining
+                    .find(char::is_whitespace)
+                    .unwrap_or(remaining.len())
+            };
+            let target_str = &remaining[..target_end];
+            target = Some(Target::parse(target_str)?);
+            remaining = remaining[target_end..].trim();
+        } else if first_char.is_ascii_digit() {
+            // Could be a plain number target
+            let end = remaining
+                .find(char::is_whitespace)
+                .unwrap_or(remaining.len());
+            let word = &remaining[..end];
+            if word.parse::<i64>().is_ok() {
+                target = Some(Target::parse(word)?);
+                remaining = remaining[end..].trim();
+            }
+        }
+    }
+
+    // Parse A|D
+    if !remaining.is_empty() {
+        let (word, rest) = split_first_word(remaining);
+        let upper = word.to_uppercase();
+        if upper == "A" || upper == "ASCENDING" {
+            ascending = true;
+            remaining = rest;
+        } else if upper == "D" || upper == "DESCENDING" {
+            ascending = false;
+            remaining = rest;
+        }
+    }
+
+    // Parse col_start [col_end]
+    if !remaining.is_empty() {
+        let (word, rest) = split_first_word(remaining);
+        col_start = Some(
+            word.parse::<usize>()
+                .map_err(|_| format!("Invalid column number: {}", word))?,
+        );
+        remaining = rest;
+    }
+    if !remaining.is_empty() {
+        let (word, _) = split_first_word(remaining);
+        col_end = Some(
+            word.parse::<usize>()
+                .map_err(|_| format!("Invalid column number: {}", word))?,
+        );
+    }
+
+    Ok(Command::Sort {
+        target,
+        ascending,
+        col_start,
+        col_end,
+    })
+}
+
 fn parse_set_args(args: &str) -> Result<Command, String> {
     if args.is_empty() {
         return Err("SET requires a subcommand".to_string());
@@ -360,6 +530,38 @@ fn parse_set_args(args: &str) -> Result<Command, String> {
         Ok(Command::Set(SetCommand::Wrap(parse_on_off(subargs)?)))
     } else if matches_abbrev(&subcmd_upper, "HEX", 3) {
         Ok(Command::Set(SetCommand::Hex(parse_on_off(subargs)?)))
+    } else if matches_abbrev(&subcmd_upper, "RESERVED", 3) {
+        // SET RESERVED row text | SET RESERVED row OFF
+        let (row_str, rest) = split_first_word(subargs);
+        let row = row_str
+            .parse::<usize>()
+            .map_err(|_| format!("SET RESERVED: invalid row: {}", row_str))?;
+        if rest.is_empty() || rest.to_uppercase() == "OFF" {
+            Ok(Command::Set(SetCommand::ReservedOff(row)))
+        } else {
+            Ok(Command::Set(SetCommand::Reserved(row, rest.to_string())))
+        }
+    } else if matches_abbrev(&subcmd_upper, "COLOR", 3)
+        || matches_abbrev(&subcmd_upper, "COLOUR", 3)
+    {
+        // SET COLOR area colorname
+        let (area_str, color) = split_first_word(subargs);
+        if color.is_empty() {
+            return Err("SET COLOR requires area and color".to_string());
+        }
+        let area = match area_str.to_uppercase().as_str() {
+            "FILEAREA" | "FILE" => ColorArea::FileArea,
+            "CMDLINE" | "CMD" => ColorArea::CmdLine,
+            "PREFIX" | "PRE" => ColorArea::Prefix,
+            "CURLINE" | "CUR" => ColorArea::CurLine,
+            "IDLINE" | "ID" => ColorArea::IdLine,
+            "MSGLINE" | "MSG" => ColorArea::MsgLine,
+            "SHADOW" | "SHA" => ColorArea::Shadow,
+            _ => return Err(format!("SET COLOR: unknown area: {}", area_str)),
+        };
+        Ok(Command::Set(SetCommand::Color(area, color.to_uppercase())))
+    } else if matches_abbrev(&subcmd_upper, "SHADOW", 3) {
+        Ok(Command::Set(SetCommand::Shadow(parse_on_off(subargs)?)))
     } else if matches_abbrev(&subcmd_upper, "STAY", 2) {
         Ok(Command::Set(SetCommand::Stay(parse_on_off(subargs)?)))
     } else if let Some(num_str) = subcmd_upper.strip_prefix("PF") {

@@ -11,6 +11,29 @@ use xedit_core::editor::Editor;
 
 use crate::app::CursorFocus;
 
+/// Resolve a color from the editor's color overrides, falling back to default.
+fn resolve_color(editor: &Editor, area: &str, default: Color) -> Color {
+    match editor.color_override(area) {
+        Some(name) => parse_color_name(name).unwrap_or(default),
+        None => default,
+    }
+}
+
+fn parse_color_name(name: &str) -> Option<Color> {
+    match name.to_uppercase().as_str() {
+        "BLACK" => Some(Color::Black),
+        "RED" => Some(Color::Red),
+        "GREEN" => Some(Color::Green),
+        "YELLOW" => Some(Color::Yellow),
+        "BLUE" => Some(Color::Blue),
+        "MAGENTA" => Some(Color::Magenta),
+        "CYAN" => Some(Color::Cyan),
+        "WHITE" => Some(Color::White),
+        "DARKGRAY" | "DARK_GRAY" => Some(Color::DarkGray),
+        _ => None,
+    }
+}
+
 const PREFIX_WIDTH: usize = 6; // 5 chars + 1 space
 const TOF_MARKER: &str = "* * * Top of File * * *";
 const EOF_MARKER: &str = "* * * End of File * * *";
@@ -26,6 +49,7 @@ const DATA_FG: Color = Color::Green;
 const MARKER_FG: Color = Color::Blue;
 const CMD_PROMPT_FG: Color = Color::Cyan;
 const MSG_FG: Color = Color::Yellow;
+const SHADOW_FG: Color = Color::DarkGray;
 const INPUT_MODE_FG: Color = Color::Red;
 
 /// Render the complete XEDIT screen
@@ -53,13 +77,33 @@ pub fn render(
     ])
     .split(area);
 
-    render_id_line(frame, chunks[0], editor, insert_mode);
+    render_id_line(
+        frame,
+        chunks[0],
+        editor,
+        insert_mode,
+        resolve_color(editor, "IdLine", ID_LINE_FG),
+        resolve_color(editor, "IdLine", ID_LINE_BG),
+    );
 
     let file_area_rect = chunks[1];
     let visible = render_file_area(frame, file_area_rect, editor, prefix_inputs);
 
-    render_message_line(frame, chunks[2], editor, in_input_mode);
-    render_command_line(frame, chunks[3], command_text, in_input_mode, input_text);
+    render_message_line(
+        frame,
+        chunks[2],
+        editor,
+        in_input_mode,
+        resolve_color(editor, "MsgLine", MSG_FG),
+    );
+    render_command_line(
+        frame,
+        chunks[3],
+        command_text,
+        in_input_mode,
+        input_text,
+        resolve_color(editor, "CmdLine", CMD_PROMPT_FG),
+    );
 
     // Position the cursor based on focus
     position_cursor(
@@ -83,7 +127,14 @@ struct VisibleRange {
     // Maps display_idx to screen row (relative to file area)
 }
 
-fn render_id_line(frame: &mut Frame, area: Rect, editor: &Editor, insert_mode: bool) {
+fn render_id_line(
+    frame: &mut Frame,
+    area: Rect,
+    editor: &Editor,
+    insert_mode: bool,
+    fg: Color,
+    bg: Color,
+) {
     let filename = if editor.filename().is_empty() {
         "UNNAMED"
     } else {
@@ -110,12 +161,50 @@ fn render_id_line(frame: &mut Frame, area: Rect, editor: &Editor, insert_mode: b
         mode,
     );
 
-    let style = Style::default().fg(ID_LINE_FG).bg(ID_LINE_BG);
+    let style = Style::default().fg(fg).bg(bg);
     let line = Line::from(vec![Span::styled(
         format!("{:<width$}", id_text, width = area.width as usize),
         style,
     )]);
     frame.render_widget(Paragraph::new(line), area);
+}
+
+/// An item in the display list
+enum DisplayItem {
+    Tof,
+    FileLine(usize), // 1-based line number
+    Shadow(usize),   // count of hidden lines
+    Eof,
+}
+
+/// Build the display list, collapsing hidden lines into shadow entries
+fn build_display_list(editor: &Editor) -> Vec<DisplayItem> {
+    let buf_len = editor.buffer().len();
+    let mut items = Vec::with_capacity(buf_len + 2);
+    items.push(DisplayItem::Tof);
+
+    if editor.all_filter_active() {
+        let mut i = 1;
+        while i <= buf_len {
+            if editor.is_line_visible(i) {
+                items.push(DisplayItem::FileLine(i));
+                i += 1;
+            } else {
+                let shadow = editor.shadow_count_after(i - 1);
+                if shadow > 0 && editor.show_shadow() {
+                    items.push(DisplayItem::Shadow(shadow));
+                }
+                i += shadow;
+            }
+        }
+    } else {
+        for i in 1..=buf_len {
+            items.push(DisplayItem::FileLine(i));
+        }
+    }
+
+    items.push(DisplayItem::Eof);
+    items
 }
 
 fn render_file_area(
@@ -125,45 +214,87 @@ fn render_file_area(
     prefix_inputs: &HashMap<usize, String>,
 ) -> VisibleRange {
     let height = area.height as usize;
-    let buf_len = editor.buffer().len();
     let current = editor.current_line();
+    let width = area.width as usize;
+
+    let display_list = build_display_list(editor);
 
     let curline_row = match editor.curline_position() {
         CurLinePosition::Middle => height / 2,
         CurLinePosition::Row(r) => (*r).min(height.saturating_sub(1)),
     };
 
-    // display_idx: 0 = TOF, 1..=buf_len = file lines, buf_len+1 = EOF
-    let current_display = if current == 0 { 0 } else { current };
-    let first_visible = current_display.saturating_sub(curline_row);
+    // Find which display item corresponds to the current line
+    let current_item_idx = display_list
+        .iter()
+        .position(|item| match item {
+            DisplayItem::Tof => current == 0,
+            DisplayItem::FileLine(n) => *n == current,
+            _ => false,
+        })
+        .unwrap_or(0);
+
+    let first_item = current_item_idx.saturating_sub(curline_row);
+
+    // The first_display_idx for cursor positioning: we need to map back to line numbers
+    let first_display_idx = match display_list.get(first_item) {
+        Some(DisplayItem::Tof) => 0,
+        Some(DisplayItem::FileLine(n)) => *n,
+        _ => 0,
+    };
+
+    let _data_fg = resolve_color(editor, "FileArea", DATA_FG);
+    let _prefix_fg = resolve_color(editor, "Prefix", PREFIX_FG);
+    let _curline_fg = resolve_color(editor, "CurLine", CURRENT_LINE_FG);
+    let _curline_bg = resolve_color(editor, "CurLine", CURRENT_LINE_BG);
+    let shadow_fg = resolve_color(editor, "Shadow", SHADOW_FG);
 
     let mut lines: Vec<Line> = Vec::with_capacity(height);
+    let mut reserved_offset = 0usize;
 
     for row in 0..height {
-        let display_idx = first_visible + row;
-        let is_current = display_idx == current_display;
+        // Check for reserved lines (1-based row in file area)
+        if let Some(reserved_text) = editor.reserved_line(row + 1) {
+            let padded = format!("{:<width$}", reserved_text, width = width);
+            lines.push(Line::from(Span::styled(
+                padded,
+                Style::default().fg(Color::White).bg(Color::Blue),
+            )));
+            reserved_offset += 1;
+            continue;
+        }
 
-        let line = if display_idx == 0 {
-            make_marker_line(TOF_MARKER, is_current, area.width as usize)
-        } else if display_idx <= buf_len {
-            let line_num = display_idx;
-            let prefix_text = prefix_inputs.get(&line_num);
-            if let Some(text) = editor.buffer().line_text(line_num) {
-                make_data_line(
-                    line_num,
-                    text,
-                    is_current,
-                    editor.show_number(),
-                    area.width as usize,
-                    prefix_text,
-                )
-            } else {
-                make_empty_row(area.width as usize)
+        let item_idx = first_item + row - reserved_offset;
+        let item = display_list.get(item_idx);
+
+        let line = match item {
+            Some(DisplayItem::Tof) => {
+                let is_current = current == 0;
+                make_marker_line(TOF_MARKER, is_current, width)
             }
-        } else if display_idx == buf_len + 1 {
-            make_marker_line(EOF_MARKER, false, area.width as usize)
-        } else {
-            make_empty_row(area.width as usize)
+            Some(DisplayItem::FileLine(line_num)) => {
+                let is_current = *line_num == current;
+                let prefix_text = prefix_inputs.get(line_num);
+                if let Some(text) = editor.buffer().line_text(*line_num) {
+                    make_data_line(
+                        *line_num,
+                        text,
+                        is_current,
+                        editor.show_number(),
+                        width,
+                        prefix_text,
+                    )
+                } else {
+                    make_empty_row(width)
+                }
+            }
+            Some(DisplayItem::Shadow(count)) => {
+                let text = format!("      --- {} line(s) not displayed ---", count);
+                let padded = format!("{:<width$}", text, width = width);
+                Line::from(Span::styled(padded, Style::default().fg(shadow_fg)))
+            }
+            Some(DisplayItem::Eof) => make_marker_line(EOF_MARKER, false, width),
+            None => make_empty_row(width),
         };
 
         lines.push(line);
@@ -171,9 +302,7 @@ fn render_file_area(
 
     frame.render_widget(Paragraph::new(lines), area);
 
-    VisibleRange {
-        first_display_idx: first_visible,
-    }
+    VisibleRange { first_display_idx }
 }
 
 fn make_marker_line(marker: &str, is_current: bool, width: usize) -> Line<'static> {
@@ -270,7 +399,13 @@ fn make_empty_row(width: usize) -> Line<'static> {
     Line::from(Span::raw(format!("{:<width$}", "", width = width)))
 }
 
-fn render_message_line(frame: &mut Frame, area: Rect, editor: &Editor, in_input_mode: bool) {
+fn render_message_line(
+    frame: &mut Frame,
+    area: Rect,
+    editor: &Editor,
+    in_input_mode: bool,
+    msg_fg: Color,
+) {
     let text = if in_input_mode {
         "INPUT MODE — type text, Enter on empty line to exit, Esc to cancel"
     } else {
@@ -284,7 +419,7 @@ fn render_message_line(frame: &mut Frame, area: Rect, editor: &Editor, in_input_
             .fg(INPUT_MODE_FG)
             .add_modifier(Modifier::BOLD)
     } else if editor.message().is_some() {
-        Style::default().fg(MSG_FG)
+        Style::default().fg(msg_fg)
     } else {
         Style::default().fg(Color::DarkGray)
     };
@@ -302,6 +437,7 @@ fn render_command_line(
     command_text: &str,
     in_input_mode: bool,
     input_text: &str,
+    cmd_fg: Color,
 ) {
     let (prompt, text) = if in_input_mode {
         ("input>", input_text)
@@ -319,9 +455,7 @@ fn render_command_line(
     let line = Line::from(vec![
         Span::styled(
             format!("{} ", prompt),
-            Style::default()
-                .fg(CMD_PROMPT_FG)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(cmd_fg).add_modifier(Modifier::BOLD),
         ),
         Span::styled(display_text.to_string(), Style::default().fg(DATA_FG)),
     ]);

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -6,6 +7,22 @@ use crate::command::*;
 use crate::error::{Result, XeditError};
 use crate::prefix::*;
 use crate::target::Target;
+
+/// Cursor placement request from CURSOR command
+#[derive(Debug, Clone)]
+pub enum CursorRequest {
+    Home,
+    File { line: usize, col: usize },
+}
+
+/// Snapshot of editor state for single-level undo
+#[derive(Debug, Clone)]
+struct UndoSnapshot {
+    lines: Vec<String>,
+    current_line: usize,
+    current_col: usize,
+    alt_count: usize,
+}
 
 /// XEDIT editor state for a single file.
 ///
@@ -56,6 +73,23 @@ pub struct Editor {
     pending_operation: Option<PendingOperation>,
     /// Number of lines per page (set by TUI based on screen size)
     page_size: usize,
+
+    // ALL filter: if Some, each entry says whether the line is visible
+    all_filter: Option<Vec<bool>>,
+    show_shadow: bool,
+
+    // Command history
+    command_history: Vec<String>,
+
+    // Undo
+    undo_snapshot: Option<UndoSnapshot>,
+
+    // Cursor request
+    cursor_request: Option<CursorRequest>,
+
+    // Display customization
+    reserved_lines: HashMap<usize, String>,
+    color_overrides: HashMap<String, String>,
 }
 
 /// Classic VM/CMS XEDIT default PF key assignments
@@ -107,6 +141,13 @@ impl Editor {
             pending_block: None,
             pending_operation: None,
             page_size: 20,
+            all_filter: None,
+            show_shadow: true,
+            command_history: Vec::new(),
+            undo_snapshot: None,
+            cursor_request: None,
+            reserved_lines: HashMap::new(),
+            color_overrides: HashMap::new(),
         }
     }
 
@@ -204,6 +245,163 @@ impl Editor {
         self.page_size = size.max(1);
     }
 
+    // -- Cursor request --
+
+    pub fn cursor_request(&self) -> Option<&CursorRequest> {
+        self.cursor_request.as_ref()
+    }
+
+    pub fn take_cursor_request(&mut self) -> Option<CursorRequest> {
+        self.cursor_request.take()
+    }
+
+    fn cmd_cursor(&mut self, target: &CursorTarget) -> Result<CommandResult> {
+        match target {
+            CursorTarget::Home => {
+                self.cursor_request = Some(CursorRequest::Home);
+            }
+            CursorTarget::File { line, col } => {
+                self.cursor_request = Some(CursorRequest::File {
+                    line: *line,
+                    col: *col,
+                });
+            }
+        }
+        Ok(CommandResult::ok())
+    }
+
+    // -- ALL filter --
+
+    pub fn all_filter_active(&self) -> bool {
+        self.all_filter.is_some()
+    }
+
+    pub fn is_line_visible(&self, line_num: usize) -> bool {
+        match &self.all_filter {
+            Some(filter) => {
+                if line_num == 0 || line_num > filter.len() {
+                    true
+                } else {
+                    filter[line_num - 1]
+                }
+            }
+            None => true,
+        }
+    }
+
+    /// Count consecutive hidden lines starting after line_num
+    pub fn shadow_count_after(&self, line_num: usize) -> usize {
+        match &self.all_filter {
+            Some(filter) => {
+                let mut count = 0;
+                let mut i = line_num; // line_num is 1-based, next is line_num+1
+                while i < filter.len() {
+                    if !filter[i] {
+                        count += 1;
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+                count
+            }
+            None => 0,
+        }
+    }
+
+    pub fn show_shadow(&self) -> bool {
+        self.show_shadow
+    }
+
+    fn cmd_all(&mut self, target: Option<&Target>) -> Result<CommandResult> {
+        match target {
+            Some(t) => {
+                let case_respect = self.case_respect;
+                let mut filter = Vec::with_capacity(self.buffer.len());
+                let mut visible_count = 0;
+                for i in 1..=self.buffer.len() {
+                    let text = self.buffer.line_text(i).unwrap_or("");
+                    let visible = t.matches_line(case_respect, text);
+                    if visible {
+                        visible_count += 1;
+                    }
+                    filter.push(visible);
+                }
+                self.all_filter = Some(filter);
+                Ok(CommandResult::with_message(format!(
+                    "{} line(s) displayed",
+                    visible_count
+                )))
+            }
+            None => {
+                self.all_filter = None;
+                Ok(CommandResult::with_message("ALL reset"))
+            }
+        }
+    }
+
+    fn cmd_sort(
+        &mut self,
+        target: Option<&Target>,
+        ascending: bool,
+        col_start: Option<usize>,
+        col_end: Option<usize>,
+    ) -> Result<CommandResult> {
+        self.snapshot_for_undo();
+
+        let start = if self.current_line == 0 {
+            1
+        } else {
+            self.current_line
+        };
+        let end = if let Some(t) = target {
+            let case_respect = self.case_respect;
+            let buffer = &self.buffer;
+            t.resolve(self.current_line, buffer.len(), case_respect, &|n| {
+                buffer.line_text(n).map(String::from)
+            })
+            .unwrap_or(self.buffer.len())
+        } else {
+            self.buffer.len()
+        };
+
+        if start > end || start > self.buffer.len() {
+            return Err(XeditError::InvalidCommand("Nothing to sort".to_string()));
+        }
+
+        // Extract lines in range
+        let mut lines_to_sort: Vec<String> = (start..=end)
+            .filter_map(|i| self.buffer.line_text(i).map(String::from))
+            .collect();
+
+        // Sort by key
+        lines_to_sort.sort_by(|a, b| {
+            let key_a = sort_key(a, col_start, col_end);
+            let key_b = sort_key(b, col_start, col_end);
+            if ascending {
+                key_a.cmp(&key_b)
+            } else {
+                key_b.cmp(&key_a)
+            }
+        });
+
+        // Replace in buffer
+        for (i, text) in lines_to_sort.into_iter().enumerate() {
+            let line_num = start + i;
+            if let Some(line) = self.buffer.get_mut(line_num) {
+                line.set_text(text);
+            }
+        }
+
+        self.alt_count += 1;
+        let count = end - start + 1;
+        let direction = if ascending { "ascending" } else { "descending" };
+        Ok(CommandResult::with_message(format!(
+            "{} line(s) sorted {}",
+            count, direction
+        )))
+    }
+
     /// Set the macro search path (list of directories)
     pub fn set_macro_path(&mut self, paths: Vec<PathBuf>) {
         self.macro_path = paths;
@@ -212,6 +410,81 @@ impl Editor {
     /// Get the macro search path
     pub fn macro_path(&self) -> &[PathBuf] {
         &self.macro_path
+    }
+
+    // -- Display customization --
+
+    pub fn reserved_line(&self, row: usize) -> Option<&str> {
+        self.reserved_lines.get(&row).map(|s| s.as_str())
+    }
+
+    pub fn reserved_lines(&self) -> &HashMap<usize, String> {
+        &self.reserved_lines
+    }
+
+    pub fn color_override(&self, area: &str) -> Option<&str> {
+        self.color_overrides.get(area).map(|s| s.as_str())
+    }
+
+    pub fn color_overrides(&self) -> &HashMap<String, String> {
+        &self.color_overrides
+    }
+
+    // -- Command history --
+
+    /// Push a command into the history (skips empty, `?`, `=`)
+    pub fn push_history(&mut self, cmd_text: &str) {
+        let trimmed = cmd_text.trim();
+        if trimmed.is_empty() || trimmed == "?" || trimmed == "=" {
+            return;
+        }
+        self.command_history.push(trimmed.to_string());
+    }
+
+    /// Get the most recent command in history
+    pub fn last_command(&self) -> Option<&str> {
+        self.command_history.last().map(|s| s.as_str())
+    }
+
+    /// Number of commands in history
+    pub fn history_len(&self) -> usize {
+        self.command_history.len()
+    }
+
+    /// Get a command by index (0 = oldest)
+    pub fn history_get(&self, index: usize) -> Option<&str> {
+        self.command_history.get(index).map(|s| s.as_str())
+    }
+
+    // -- Undo --
+
+    /// Capture buffer state before a modifying command
+    fn snapshot_for_undo(&mut self) {
+        self.undo_snapshot = Some(UndoSnapshot {
+            lines: self
+                .buffer
+                .lines()
+                .iter()
+                .map(|l| l.text().to_string())
+                .collect(),
+            current_line: self.current_line,
+            current_col: self.current_col,
+            alt_count: self.alt_count,
+        });
+    }
+
+    fn cmd_undo(&mut self) -> Result<CommandResult> {
+        if let Some(snap) = self.undo_snapshot.take() {
+            self.buffer = Buffer::from_lines(snap.lines);
+            self.current_line = snap.current_line;
+            self.current_col = snap.current_col;
+            self.alt_count = snap.alt_count;
+            // Clear ALL filter — it may reference the old buffer layout
+            self.all_filter = None;
+            Ok(CommandResult::with_message("Undone"))
+        } else {
+            Err(XeditError::InvalidCommand("Nothing to undo".to_string()))
+        }
     }
 
     /// Search the macro path for a macro file, returning its full path and contents.
@@ -357,6 +630,15 @@ impl Editor {
             Command::Quit => self.cmd_quit(),
             Command::QQuit => Ok(CommandResult::quit()),
             Command::Get(filename) => self.cmd_get(filename),
+            Command::Undo => self.cmd_undo(),
+            Command::Cursor(target) => self.cmd_cursor(target),
+            Command::All(target) => self.cmd_all(target.as_ref()),
+            Command::Sort {
+                target,
+                ascending,
+                col_start,
+                col_end,
+            } => self.cmd_sort(target.as_ref(), *ascending, *col_start, *col_end),
             Command::Set(subcmd) => self.cmd_set(subcmd),
             Command::Query(what) => self.cmd_query(what),
             Command::Refresh => Ok(CommandResult::refresh()),
@@ -444,12 +726,32 @@ impl Editor {
     // -- Navigation --
 
     fn cmd_up(&mut self, n: usize) -> Result<CommandResult> {
-        self.current_line = self.current_line.saturating_sub(n);
+        if self.all_filter.is_some() {
+            let mut remaining = n;
+            while remaining > 0 && self.current_line > 0 {
+                self.current_line -= 1;
+                if self.is_line_visible(self.current_line) || self.current_line == 0 {
+                    remaining -= 1;
+                }
+            }
+        } else {
+            self.current_line = self.current_line.saturating_sub(n);
+        }
         Ok(CommandResult::ok())
     }
 
     fn cmd_down(&mut self, n: usize) -> Result<CommandResult> {
-        self.current_line = (self.current_line + n).min(self.buffer.len());
+        if self.all_filter.is_some() {
+            let mut remaining = n;
+            while remaining > 0 && self.current_line < self.buffer.len() {
+                self.current_line += 1;
+                if self.is_line_visible(self.current_line) {
+                    remaining -= 1;
+                }
+            }
+        } else {
+            self.current_line = (self.current_line + n).min(self.buffer.len());
+        }
         Ok(CommandResult::ok())
     }
 
@@ -513,6 +815,7 @@ impl Editor {
         target: Option<&Target>,
         count: Option<usize>,
     ) -> Result<CommandResult> {
+        self.snapshot_for_undo();
         let max_changes = count.unwrap_or(1);
         let mut changes_made = 0;
 
@@ -576,6 +879,7 @@ impl Editor {
 
     fn cmd_input(&mut self, text: Option<&str>) -> Result<CommandResult> {
         if let Some(text) = text {
+            self.snapshot_for_undo();
             self.buffer.insert_after(self.current_line, text);
             self.current_line += 1;
             self.alt_count += 1;
@@ -586,6 +890,7 @@ impl Editor {
     }
 
     fn cmd_delete(&mut self, target: Option<&Target>) -> Result<CommandResult> {
+        self.snapshot_for_undo();
         if self.current_line == 0 {
             return Err(XeditError::InvalidCommand(
                 "Cannot delete at Top of File".to_string(),
@@ -689,6 +994,17 @@ impl Editor {
             SetCommand::Wrap(on) => self.wrap = *on,
             SetCommand::Hex(on) => self.hex = *on,
             SetCommand::Stay(on) => self.stay = *on,
+            SetCommand::Shadow(on) => self.show_shadow = *on,
+            SetCommand::Reserved(row, text) => {
+                self.reserved_lines.insert(*row, text.clone());
+            }
+            SetCommand::ReservedOff(row) => {
+                self.reserved_lines.remove(row);
+            }
+            SetCommand::Color(area, color) => {
+                let key = format!("{:?}", area);
+                self.color_overrides.insert(key, color.clone());
+            }
             SetCommand::MsgLine(_) => {}
             SetCommand::Verify(start, end) => {
                 self.verify_start = *start;
@@ -762,6 +1078,11 @@ impl Editor {
         line_num: usize,
         cmd: &PrefixCommand,
     ) -> Result<CommandResult> {
+        // Snapshot for undo on modifying prefix commands
+        match cmd {
+            PrefixCommand::SetCurrent => {}
+            _ => self.snapshot_for_undo(),
+        }
         match cmd {
             PrefixCommand::SetCurrent => {
                 self.current_line = line_num;
@@ -971,6 +1292,22 @@ impl Editor {
     }
 }
 
+/// Extract sort key from a line, optionally by column range (1-based).
+/// Uses character-based indexing to avoid panics on multibyte UTF-8.
+fn sort_key(line: &str, col_start: Option<usize>, col_end: Option<usize>) -> String {
+    match (col_start, col_end) {
+        (Some(start), Some(end)) => {
+            let s = start.saturating_sub(1);
+            line.chars().skip(s).take(end.saturating_sub(s)).collect()
+        }
+        (Some(start), None) => {
+            let s = start.saturating_sub(1);
+            line.chars().skip(s).collect()
+        }
+        _ => line.to_string(),
+    }
+}
+
 impl Default for Editor {
     fn default() -> Self {
         Self::new()
@@ -986,6 +1323,190 @@ mod tests {
         ed.buffer = Buffer::from_lines(lines.iter().map(|s| s.to_string()).collect());
         ed.current_line = 1;
         ed
+    }
+
+    #[test]
+    fn history_push_and_recall() {
+        let mut ed = Editor::new();
+        ed.push_history("LOCATE /foo/");
+        ed.push_history("CHANGE /a/b/");
+        assert_eq!(ed.history_len(), 2);
+        assert_eq!(ed.last_command(), Some("CHANGE /a/b/"));
+        assert_eq!(ed.history_get(0), Some("LOCATE /foo/"));
+    }
+
+    #[test]
+    fn reserved_set_and_clear() {
+        let mut ed = editor_with_lines(&["a"]);
+        ed.execute(&Command::Set(SetCommand::Reserved(1, "My Header".into())))
+            .unwrap();
+        assert_eq!(ed.reserved_line(1), Some("My Header"));
+
+        ed.execute(&Command::Set(SetCommand::ReservedOff(1)))
+            .unwrap();
+        assert!(ed.reserved_line(1).is_none());
+    }
+
+    #[test]
+    fn color_override() {
+        let mut ed = editor_with_lines(&["a"]);
+        ed.execute(&Command::Set(SetCommand::Color(
+            ColorArea::FileArea,
+            "RED".into(),
+        )))
+        .unwrap();
+        assert_eq!(ed.color_override("FileArea"), Some("RED"));
+    }
+
+    #[test]
+    fn cursor_home() {
+        let mut ed = editor_with_lines(&["a", "b"]);
+        ed.execute(&Command::Cursor(CursorTarget::Home)).unwrap();
+        assert!(ed.cursor_request().is_some());
+        match ed.take_cursor_request().unwrap() {
+            CursorRequest::Home => {}
+            other => panic!("Expected Home, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cursor_file() {
+        let mut ed = editor_with_lines(&["a", "b"]);
+        ed.execute(&Command::Cursor(CursorTarget::File { line: 2, col: 5 }))
+            .unwrap();
+        match ed.take_cursor_request().unwrap() {
+            CursorRequest::File { line, col } => {
+                assert_eq!(line, 2);
+                assert_eq!(col, 5);
+            }
+            other => panic!("Expected File, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn sort_ascending() {
+        let mut ed = editor_with_lines(&["cherry", "apple", "banana"]);
+        ed.execute(&Command::Sort {
+            target: None,
+            ascending: true,
+            col_start: None,
+            col_end: None,
+        })
+        .unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("apple"));
+        assert_eq!(ed.buffer().line_text(2), Some("banana"));
+        assert_eq!(ed.buffer().line_text(3), Some("cherry"));
+    }
+
+    #[test]
+    fn sort_descending() {
+        let mut ed = editor_with_lines(&["apple", "cherry", "banana"]);
+        ed.execute(&Command::Sort {
+            target: None,
+            ascending: false,
+            col_start: None,
+            col_end: None,
+        })
+        .unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("cherry"));
+        assert_eq!(ed.buffer().line_text(2), Some("banana"));
+        assert_eq!(ed.buffer().line_text(3), Some("apple"));
+    }
+
+    #[test]
+    fn sort_column_range() {
+        let mut ed = editor_with_lines(&["BBB_aaa", "AAA_ccc", "CCC_bbb"]);
+        // Sort by columns 5-7 (the last 3 chars after _)
+        ed.execute(&Command::Sort {
+            target: None,
+            ascending: true,
+            col_start: Some(5),
+            col_end: Some(7),
+        })
+        .unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("BBB_aaa"));
+        assert_eq!(ed.buffer().line_text(2), Some("CCC_bbb"));
+        assert_eq!(ed.buffer().line_text(3), Some("AAA_ccc"));
+    }
+
+    #[test]
+    fn all_filter_basic() {
+        let mut ed = editor_with_lines(&["apple", "banana", "apricot", "cherry"]);
+        ed.execute(&Command::All(Some(Target::StringForward("ap".into()))))
+            .unwrap();
+        assert!(ed.all_filter_active());
+        assert!(ed.is_line_visible(1)); // apple
+        assert!(!ed.is_line_visible(2)); // banana
+        assert!(ed.is_line_visible(3)); // apricot
+        assert!(!ed.is_line_visible(4)); // cherry
+    }
+
+    #[test]
+    fn all_filter_reset() {
+        let mut ed = editor_with_lines(&["apple", "banana"]);
+        ed.execute(&Command::All(Some(Target::StringForward("ap".into()))))
+            .unwrap();
+        assert!(ed.all_filter_active());
+        ed.execute(&Command::All(None)).unwrap();
+        assert!(!ed.all_filter_active());
+    }
+
+    #[test]
+    fn all_with_compound_target() {
+        let mut ed = editor_with_lines(&["hello world", "hello there", "goodbye world"]);
+        ed.execute(&Command::All(Some(
+            Target::parse("/hello/&/world/").unwrap(),
+        )))
+        .unwrap();
+        assert!(ed.is_line_visible(1)); // "hello world" has both
+        assert!(!ed.is_line_visible(2)); // "hello there" missing "world"
+        assert!(!ed.is_line_visible(3)); // "goodbye world" missing "hello"
+    }
+
+    #[test]
+    fn undo_delete() {
+        let mut ed = editor_with_lines(&["a", "b", "c"]);
+        ed.current_line = 2;
+        ed.execute(&Command::Delete(None)).unwrap();
+        assert_eq!(ed.buffer().len(), 2);
+
+        ed.execute(&Command::Undo).unwrap();
+        assert_eq!(ed.buffer().len(), 3);
+        assert_eq!(ed.buffer().line_text(2), Some("b"));
+        assert_eq!(ed.current_line(), 2);
+    }
+
+    #[test]
+    fn undo_change() {
+        let mut ed = editor_with_lines(&["hello world"]);
+        ed.execute(&Command::Change {
+            from: "hello".into(),
+            to: "hi".into(),
+            target: None,
+            count: None,
+        })
+        .unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("hi world"));
+
+        ed.execute(&Command::Undo).unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("hello world"));
+    }
+
+    #[test]
+    fn undo_nothing() {
+        let mut ed = editor_with_lines(&["a"]);
+        let result = ed.execute(&Command::Undo);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn history_skips_special() {
+        let mut ed = Editor::new();
+        ed.push_history("?");
+        ed.push_history("=");
+        ed.push_history("");
+        ed.push_history("  ");
+        assert_eq!(ed.history_len(), 0);
     }
 
     #[test]
