@@ -250,6 +250,7 @@ fn render_file_area(
     let shadow_fg = resolve_color(editor, "Shadow", SHADOW_FG);
 
     let mut lines: Vec<Line> = Vec::with_capacity(height);
+    let mut reserved_offset = 0usize;
 
     for row in 0..height {
         // Check for reserved lines (1-based row in file area)
@@ -259,10 +260,11 @@ fn render_file_area(
                 padded,
                 Style::default().fg(Color::White).bg(Color::Blue),
             )));
+            reserved_offset += 1;
             continue;
         }
 
-        let item_idx = first_item + row;
+        let item_idx = first_item + row - reserved_offset;
         let item = display_list.get(item_idx);
 
         let line = match item {

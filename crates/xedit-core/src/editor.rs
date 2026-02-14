@@ -1298,7 +1298,7 @@ fn sort_key(line: &str, col_start: Option<usize>, col_end: Option<usize>) -> Str
     match (col_start, col_end) {
         (Some(start), Some(end)) => {
             let s = start.saturating_sub(1);
-            line.chars().skip(s).take(end - s).collect()
+            line.chars().skip(s).take(end.saturating_sub(s)).collect()
         }
         (Some(start), None) => {
             let s = start.saturating_sub(1);
