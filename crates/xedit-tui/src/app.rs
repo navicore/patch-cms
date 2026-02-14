@@ -9,7 +9,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use xedit_core::command::{parse_command, Command, CommandAction};
-use xedit_core::editor::Editor;
+use xedit_core::editor::{CursorRequest, Editor};
 use xedit_core::prefix::PrefixCommand;
 
 use crate::input::{read_action, Action};
@@ -45,6 +45,9 @@ pub struct App {
     // Pending prefix inputs: line_num -> typed text
     prefix_inputs: HashMap<usize, String>,
 
+    // Command history browsing
+    history_index: Option<usize>,
+
     // Insert vs overtype mode for data area
     insert_mode: bool,
 
@@ -65,6 +68,7 @@ impl App {
             file_line: 1,
             file_col: 7, // start in data area
             prefix_inputs: HashMap::new(),
+            history_index: None,
             insert_mode: false,
             in_input_mode: false,
             input_text: String::new(),
@@ -195,13 +199,43 @@ impl App {
                 }
             }
             Action::ArrowUp => {
-                // Arrow up in command line: move current line up
-                let _ = self.editor.execute(&Command::Up(1));
-                self.sync_file_cursor_to_editor();
+                if self.editor.history_len() > 0 {
+                    // Browse history backward (older)
+                    let new_idx = match self.history_index {
+                        Some(idx) => idx.saturating_sub(1),
+                        None => self.editor.history_len().saturating_sub(1),
+                    };
+                    self.history_index = Some(new_idx);
+                    if let Some(cmd) = self.editor.history_get(new_idx) {
+                        self.command_text = cmd.to_string();
+                        self.command_cursor = self.command_text.len();
+                    }
+                } else {
+                    let _ = self.editor.execute(&Command::Up(1));
+                    self.sync_file_cursor_to_editor();
+                }
             }
             Action::ArrowDown => {
-                let _ = self.editor.execute(&Command::Down(1));
-                self.sync_file_cursor_to_editor();
+                if let Some(idx) = self.history_index {
+                    // Browse history forward (newer)
+                    let max_idx = self.editor.history_len().saturating_sub(1);
+                    if idx < max_idx {
+                        let new_idx = idx + 1;
+                        self.history_index = Some(new_idx);
+                        if let Some(cmd) = self.editor.history_get(new_idx) {
+                            self.command_text = cmd.to_string();
+                            self.command_cursor = self.command_text.len();
+                        }
+                    } else {
+                        // Past the end of history: clear
+                        self.history_index = None;
+                        self.command_text.clear();
+                        self.command_cursor = 0;
+                    }
+                } else {
+                    let _ = self.editor.execute(&Command::Down(1));
+                    self.sync_file_cursor_to_editor();
+                }
             }
             Action::Home => {
                 self.command_cursor = 0;
@@ -521,6 +555,34 @@ impl App {
     // -- Helpers --
 
     fn execute_command_text(&mut self, text: &str) {
+        let trimmed = text.trim();
+
+        // `?` (PF6): recall last command into command line
+        if trimmed == "?" {
+            if let Some(last) = self.editor.last_command() {
+                self.command_text = last.to_string();
+                self.command_cursor = self.command_text.len();
+            } else {
+                self.editor.set_message("No commands in history");
+            }
+            return;
+        }
+
+        // `=` (PF9): re-execute last command
+        if trimmed == "=" {
+            if let Some(last) = self.editor.last_command() {
+                let last = last.to_string();
+                self.execute_command_text(&last);
+            } else {
+                self.editor.set_message("No commands in history");
+            }
+            return;
+        }
+
+        // Record in history before executing
+        self.editor.push_history(trimmed);
+        self.history_index = None;
+
         match parse_command(text) {
             Ok(cmd) => match self.editor.execute(&cmd) {
                 Ok(result) => match result.action {
@@ -540,6 +602,24 @@ impl App {
             }
         }
         self.sync_file_cursor_to_editor();
+        self.apply_cursor_request();
+    }
+
+    fn apply_cursor_request(&mut self) {
+        if let Some(req) = self.editor.take_cursor_request() {
+            match req {
+                CursorRequest::Home => {
+                    self.focus = CursorFocus::CommandLine;
+                    self.command_cursor = 0;
+                }
+                CursorRequest::File { line, col } => {
+                    self.focus = CursorFocus::FileArea;
+                    self.file_line = line.max(1).min(self.editor.buffer().len());
+                    self.file_col = PREFIX_COLS + 1 + col.saturating_sub(1);
+                    self.editor.set_current_line(self.file_line);
+                }
+            }
+        }
     }
 
     /// Keep the file area cursor in sync with the editor's current line
