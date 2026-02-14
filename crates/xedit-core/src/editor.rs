@@ -479,6 +479,8 @@ impl Editor {
             self.current_line = snap.current_line;
             self.current_col = snap.current_col;
             self.alt_count = snap.alt_count;
+            // Clear ALL filter — it may reference the old buffer layout
+            self.all_filter = None;
             Ok(CommandResult::with_message("Undone"))
         } else {
             Err(XeditError::InvalidCommand("Nothing to undo".to_string()))
@@ -1290,25 +1292,17 @@ impl Editor {
     }
 }
 
-/// Extract sort key from a line, optionally by column range (1-based)
+/// Extract sort key from a line, optionally by column range (1-based).
+/// Uses character-based indexing to avoid panics on multibyte UTF-8.
 fn sort_key(line: &str, col_start: Option<usize>, col_end: Option<usize>) -> String {
     match (col_start, col_end) {
         (Some(start), Some(end)) => {
             let s = start.saturating_sub(1);
-            let e = end.min(line.len());
-            if s < line.len() {
-                line[s..e.min(line.len())].to_string()
-            } else {
-                String::new()
-            }
+            line.chars().skip(s).take(end - s).collect()
         }
         (Some(start), None) => {
             let s = start.saturating_sub(1);
-            if s < line.len() {
-                line[s..].to_string()
-            } else {
-                String::new()
-            }
+            line.chars().skip(s).collect()
         }
         _ => line.to_string(),
     }

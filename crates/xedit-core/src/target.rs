@@ -143,17 +143,24 @@ impl Target {
 }
 
 /// Try to parse a compound target (containing & or |), falling back to simple.
+/// OR (`|`) has lower precedence — checked first at top level.
+/// AND (`&`) has higher precedence — checked in sub-parser.
 fn try_parse_compound(input: &str) -> Result<Target, String> {
-    // Scan for & or | outside of delimiters
-    if let Some(pos) = find_operator(input, '&') {
-        let left = parse_simple(input[..pos].trim())?;
-        let right = try_parse_compound(input[pos + 1..].trim())?;
-        return Ok(Target::And(Box::new(left), Box::new(right)));
-    }
+    // OR has lower precedence: check first so it binds last
     if let Some(pos) = find_operator(input, '|') {
-        let left = parse_simple(input[..pos].trim())?;
+        let left = try_parse_and(input[..pos].trim())?;
         let right = try_parse_compound(input[pos + 1..].trim())?;
         return Ok(Target::Or(Box::new(left), Box::new(right)));
+    }
+    try_parse_and(input)
+}
+
+/// Parse AND-level compound targets (higher precedence than OR).
+fn try_parse_and(input: &str) -> Result<Target, String> {
+    if let Some(pos) = find_operator(input, '&') {
+        let left = parse_simple(input[..pos].trim())?;
+        let right = try_parse_and(input[pos + 1..].trim())?;
+        return Ok(Target::And(Box::new(left), Box::new(right)));
     }
     parse_simple(input)
 }
@@ -335,6 +342,25 @@ mod tests {
                 }
             }
             other => panic!("Expected Or, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn mixed_precedence_and_binds_tighter() {
+        // /a/|/b/&/c/ should parse as /a/ | (/b/ & /c/)
+        let target = Target::parse("/a/|/b/&/c/").unwrap();
+        match target {
+            Target::Or(left, right) => {
+                match *left {
+                    Target::StringForward(ref s) => assert_eq!(s, "a"),
+                    ref other => panic!("Expected StringForward(a), got {:?}", other),
+                }
+                match *right {
+                    Target::And(_, _) => {} // /b/ & /c/
+                    ref other => panic!("Expected And, got {:?}", other),
+                }
+            }
+            other => panic!("Expected Or at top level, got {:?}", other),
         }
     }
 
