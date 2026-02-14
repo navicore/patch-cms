@@ -212,18 +212,16 @@ mod tests {
     #[test]
     fn resolve_forward_search() {
         let lines = vec!["alpha", "beta", "gamma", "delta"];
-        let result = Target::StringForward("gamma".into()).resolve(1, 4, false, &|n| {
-            lines.get(n - 1).map(|s| s.to_string())
-        });
+        let result = Target::StringForward("gamma".into())
+            .resolve(1, 4, false, &|n| lines.get(n - 1).map(|s| s.to_string()));
         assert_eq!(result, Some(3));
     }
 
     #[test]
     fn resolve_backward_search() {
         let lines = vec!["alpha", "beta", "gamma", "delta"];
-        let result = Target::StringBackward("alpha".into()).resolve(3, 4, false, &|n| {
-            lines.get(n - 1).map(|s| s.to_string())
-        });
+        let result = Target::StringBackward("alpha".into())
+            .resolve(3, 4, false, &|n| lines.get(n - 1).map(|s| s.to_string()));
         assert_eq!(result, Some(1));
     }
 }

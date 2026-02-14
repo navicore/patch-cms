@@ -74,6 +74,9 @@ impl App {
 
     pub fn load_file(&mut self, path: &Path) -> xedit_core::error::Result<()> {
         self.editor.load_file(path)?;
+        // Run PROFILE XEDIT macro if it exists (customizes settings on file open)
+        #[cfg(feature = "rexx")]
+        self.editor.run_profile();
         self.file_line = self.editor.current_line().max(1);
         Ok(())
     }
@@ -511,8 +514,7 @@ impl App {
             let cmd_text = cmd_text.to_string();
             self.execute_command_text(&cmd_text);
         } else {
-            self.editor
-                .set_message(format!("PF{} is not defined", num));
+            self.editor.set_message(format!("PF{} is not defined", num));
         }
     }
 

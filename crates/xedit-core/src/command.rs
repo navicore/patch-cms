@@ -136,29 +136,29 @@ impl CommandResult {
 // Each entry: (full_name, minimum_abbreviation_length)
 // Follows IBM XEDIT abbreviation conventions.
 const COMMAND_TABLE: &[(&str, usize)] = &[
-    ("BACKWARD", 1),  // B
-    ("BOTTOM", 2),    // BO
-    ("CHANGE", 1),    // C
-    ("DELETE", 3),    // DEL
-    ("DOWN", 2),      // DO
-    ("FILE", 4),      // FILE
-    ("FORWARD", 1),   // F
-    ("GET", 3),       // GET
-    ("HELP", 4),      // HELP
-    ("INPUT", 1),     // I
-    ("LEFT", 2),      // LE
-    ("LOCATE", 1),    // L (but see disambiguation below)
-    ("MACRO", 5),     // MACRO
-    ("NEXT", 1),      // N
-    ("QQUIT", 2),     // QQ
-    ("QUERY", 2),     // QU
-    ("QUIT", 4),      // QUIT
-    ("REFRESH", 3),   // REF
-    ("RIGHT", 2),     // RI
-    ("SAVE", 2),      // SA
-    ("SET", 3),       // SET
-    ("TOP", 1),       // T
-    ("UP", 1),        // U
+    ("BACKWARD", 1), // B
+    ("BOTTOM", 2),   // BO
+    ("CHANGE", 1),   // C
+    ("DELETE", 3),   // DEL
+    ("DOWN", 2),     // DO
+    ("FILE", 4),     // FILE
+    ("FORWARD", 1),  // F
+    ("GET", 3),      // GET
+    ("HELP", 4),     // HELP
+    ("INPUT", 1),    // I
+    ("LEFT", 2),     // LE
+    ("LOCATE", 1),   // L (but see disambiguation below)
+    ("MACRO", 5),    // MACRO
+    ("NEXT", 1),     // N
+    ("QQUIT", 2),    // QQ
+    ("QUERY", 2),    // QU
+    ("QUIT", 4),     // QUIT
+    ("REFRESH", 3),  // REF
+    ("RIGHT", 2),    // RI
+    ("SAVE", 2),     // SA
+    ("SET", 3),      // SET
+    ("TOP", 1),      // T
+    ("UP", 1),       // U
 ];
 
 fn lookup_command(input: &str) -> Option<&'static str> {

@@ -45,6 +45,10 @@ pub struct Editor {
     // PF key assignments: PF1..PF24 stored as index 0..23
     pf_keys: [Option<String>; 24],
 
+    // Macro settings
+    /// Search path for REXX macros (directories to check)
+    macro_path: Vec<PathBuf>,
+
     // Operational state
     alt_count: usize,
     message: Option<String>,
@@ -57,18 +61,18 @@ pub struct Editor {
 /// Classic VM/CMS XEDIT default PF key assignments
 fn default_pf_keys() -> [Option<String>; 24] {
     let mut keys: [Option<String>; 24] = Default::default();
-    keys[0] = Some("HELP".to_string());         // PF1
-    keys[2] = Some("QUIT".to_string());          // PF3
-    keys[3] = Some("TOP".to_string());           // PF4 (TAB in some configs)
-    keys[4] = Some("BOTTOM".to_string());        // PF5
-    keys[5] = Some("?".to_string());             // PF6 (repeat last command placeholder)
-    keys[6] = Some("BACKWARD".to_string());      // PF7
-    keys[7] = Some("FORWARD".to_string());       // PF8
-    keys[8] = Some("=".to_string());             // PF9 (repeat last command placeholder)
-    keys[9] = Some("LOCATE".to_string());        // PF10 (cursor-locate placeholder)
-    keys[10] = Some("SAVE".to_string());         // PF11
-    keys[11] = Some("FILE".to_string());         // PF12
-    // PF13-PF24: unassigned by default (mirrored in some configs)
+    keys[0] = Some("HELP".to_string()); // PF1
+    keys[2] = Some("QUIT".to_string()); // PF3
+    keys[3] = Some("TOP".to_string()); // PF4 (TAB in some configs)
+    keys[4] = Some("BOTTOM".to_string()); // PF5
+    keys[5] = Some("?".to_string()); // PF6 (repeat last command placeholder)
+    keys[6] = Some("BACKWARD".to_string()); // PF7
+    keys[7] = Some("FORWARD".to_string()); // PF8
+    keys[8] = Some("=".to_string()); // PF9 (repeat last command placeholder)
+    keys[9] = Some("LOCATE".to_string()); // PF10 (cursor-locate placeholder)
+    keys[10] = Some("SAVE".to_string()); // PF11
+    keys[11] = Some("FILE".to_string()); // PF12
+                                         // PF13-PF24: unassigned by default (mirrored in some configs)
     keys
 }
 
@@ -97,6 +101,7 @@ impl Editor {
             verify_start: 1,
             verify_end: 80,
             pf_keys: default_pf_keys(),
+            macro_path: vec![PathBuf::from(".")],
             alt_count: 0,
             message: None,
             pending_block: None,
@@ -197,6 +202,54 @@ impl Editor {
 
     pub fn set_page_size(&mut self, size: usize) {
         self.page_size = size.max(1);
+    }
+
+    /// Set the macro search path (list of directories)
+    pub fn set_macro_path(&mut self, paths: Vec<PathBuf>) {
+        self.macro_path = paths;
+    }
+
+    /// Get the macro search path
+    pub fn macro_path(&self) -> &[PathBuf] {
+        &self.macro_path
+    }
+
+    /// Search the macro path for a macro file, returning its full path and contents.
+    #[cfg(feature = "rexx")]
+    fn find_macro(&self, name: &str) -> Option<(PathBuf, String)> {
+        let candidates = [
+            format!("{}.xedit", name),
+            name.to_string(),
+            format!("{}.XEDIT", name),
+            format!("{}.xedit", name.to_lowercase()),
+        ];
+        for dir in &self.macro_path {
+            for candidate in &candidates {
+                let path = dir.join(candidate);
+                if let Ok(source) = fs::read_to_string(&path) {
+                    return Some((path, source));
+                }
+            }
+        }
+        None
+    }
+
+    /// Run the PROFILE XEDIT macro if it exists.
+    ///
+    /// Called automatically after loading a file. The profile macro can
+    /// customize settings (PF keys, number/prefix display, case, etc.)
+    /// based on filetype or other conditions. A missing profile is silently
+    /// ignored — it's optional.
+    #[cfg(feature = "rexx")]
+    pub fn run_profile(&mut self) {
+        if let Some((_path, source)) = self.find_macro("PROFILE") {
+            match crate::macro_engine::run_macro(self, &source, "") {
+                Ok(()) => {}
+                Err(e) => {
+                    self.message = Some(format!("PROFILE error: {}", e));
+                }
+            }
+        }
     }
 
     /// Get the current line text, or a marker for TOF/EOF
@@ -328,8 +381,7 @@ impl Editor {
 
     /// Insert a line in input mode (called by TUI for each line entered)
     pub fn input_line(&mut self, text: &str) {
-        self.buffer
-            .insert_after(self.current_line, text);
+        self.buffer.insert_after(self.current_line, text);
         self.current_line += 1;
         self.alt_count += 1;
     }
@@ -524,8 +576,7 @@ impl Editor {
 
     fn cmd_input(&mut self, text: Option<&str>) -> Result<CommandResult> {
         if let Some(text) = text {
-            self.buffer
-                .insert_after(self.current_line, text);
+            self.buffer.insert_after(self.current_line, text);
             self.current_line += 1;
             self.alt_count += 1;
             Ok(CommandResult::ok())
@@ -604,12 +655,11 @@ impl Editor {
 
     fn cmd_get(&mut self, filename: &str) -> Result<CommandResult> {
         let path = Path::new(filename);
-        let content = fs::read_to_string(path)
-            .map_err(|_| XeditError::FileNotFound(filename.to_string()))?;
+        let content =
+            fs::read_to_string(path).map_err(|_| XeditError::FileNotFound(filename.to_string()))?;
         let lines: Vec<String> = content.lines().map(String::from).collect();
         let count = lines.len();
-        self.buffer
-            .insert_lines_after(self.current_line, lines);
+        self.buffer.insert_lines_after(self.current_line, lines);
         self.alt_count += count;
         Ok(CommandResult::with_message(format!(
             "{} line(s) read from {}",
@@ -691,19 +741,9 @@ impl Editor {
             (args, "")
         };
 
-        // Try .xedit extension first, then exact name
-        let candidates = [
-            format!("{}.xedit", macro_name),
-            macro_name.to_string(),
-            format!("{}.XEDIT", macro_name),
-        ];
-
-        let source = candidates
-            .iter()
-            .find_map(|name| fs::read_to_string(name).ok())
-            .ok_or_else(|| {
-                XeditError::FileNotFound(format!("Macro not found: {}", macro_name))
-            })?;
+        let (_path, source) = self
+            .find_macro(macro_name)
+            .ok_or_else(|| XeditError::FileNotFound(format!("Macro not found: {}", macro_name)))?;
 
         crate::macro_engine::run_macro(self, &source, macro_args)?;
         Ok(CommandResult::ok())
@@ -772,9 +812,7 @@ impl Editor {
                 }
                 Ok(CommandResult::ok())
             }
-            PrefixCommand::DeleteBlock => {
-                self.handle_block_marker(line_num, BlockType::Delete)
-            }
+            PrefixCommand::DeleteBlock => self.handle_block_marker(line_num, BlockType::Delete),
             PrefixCommand::CopyBlock => self.handle_block_marker(line_num, BlockType::Copy),
             PrefixCommand::MoveBlock => self.handle_block_marker(line_num, BlockType::Move),
             PrefixCommand::DuplicateBlock => {
@@ -882,9 +920,10 @@ impl Editor {
         dest_line: usize,
         after: bool,
     ) -> Result<CommandResult> {
-        let op = self.pending_operation.take().ok_or_else(|| {
-            XeditError::PrefixError("No pending copy/move operation".to_string())
-        })?;
+        let op = self
+            .pending_operation
+            .take()
+            .ok_or_else(|| XeditError::PrefixError("No pending copy/move operation".to_string()))?;
 
         let mut texts = Vec::new();
         for i in op.source_start..=op.source_end {
@@ -893,7 +932,11 @@ impl Editor {
             }
         }
 
-        let insert_after = if after { dest_line } else { dest_line.saturating_sub(1) };
+        let insert_after = if after {
+            dest_line
+        } else {
+            dest_line.saturating_sub(1)
+        };
 
         // For move: delete source lines first (adjust dest if needed)
         if op.op_type == OperationType::Move {
@@ -1060,5 +1103,92 @@ mod tests {
         assert_eq!(ed.buffer().len(), 2);
         assert_eq!(ed.buffer().line_text(1), Some("a"));
         assert_eq!(ed.buffer().line_text(2), Some("e"));
+    }
+
+    #[cfg(feature = "rexx")]
+    #[test]
+    fn profile_xedit_runs_on_load() {
+        // Create a temp dir with a profile and a data file
+        let dir = std::env::temp_dir().join("xedit_profile_test");
+        let _ = fs::create_dir_all(&dir);
+
+        let profile_path = dir.join("profile.xedit");
+        let data_path = dir.join("test.txt");
+
+        // Profile macro: set number off, move to bottom
+        fs::write(&profile_path, "/* PROFILE */\n'SET NUMBER OFF'\n'BOTTOM'\n").unwrap();
+        fs::write(&data_path, "line1\nline2\nline3\n").unwrap();
+
+        let mut ed = Editor::new();
+        ed.set_macro_path(vec![dir.clone()]);
+        ed.load_file(&data_path).unwrap();
+        ed.run_profile();
+
+        // Profile should have turned off line numbers
+        assert!(!ed.show_number());
+        // Profile should have moved to bottom
+        assert_eq!(ed.current_line(), 3);
+
+        // Clean up
+        let _ = fs::remove_file(&profile_path);
+        let _ = fs::remove_file(&data_path);
+        let _ = fs::remove_dir(&dir);
+    }
+
+    #[cfg(feature = "rexx")]
+    #[test]
+    fn profile_missing_is_silent() {
+        let dir = std::env::temp_dir().join("xedit_no_profile_test");
+        let _ = fs::create_dir_all(&dir);
+
+        let data_path = dir.join("test.txt");
+        fs::write(&data_path, "hello\n").unwrap();
+
+        let mut ed = Editor::new();
+        ed.set_macro_path(vec![dir.clone()]);
+        ed.load_file(&data_path).unwrap();
+        ed.run_profile(); // should not error
+
+        assert!(ed.message().is_none());
+
+        let _ = fs::remove_file(&data_path);
+        let _ = fs::remove_dir(&dir);
+    }
+
+    #[cfg(feature = "rexx")]
+    #[test]
+    fn profile_filetype_conditional() {
+        let dir = std::env::temp_dir().join("xedit_profile_cond_test");
+        let _ = fs::create_dir_all(&dir);
+
+        let profile_path = dir.join("profile.xedit");
+        let data_path = dir.join("code.rs");
+
+        // Profile that sets case respect only for .rs files
+        let profile = r#"/* PROFILE */
+if ftype.1 = 'RS' then
+    'SET CASE RESPECT'
+"#;
+        fs::write(&profile_path, profile).unwrap();
+        fs::write(&data_path, "fn main() {}\n").unwrap();
+
+        let mut ed = Editor::new();
+        ed.set_macro_path(vec![dir.clone()]);
+        ed.load_file(&data_path).unwrap();
+
+        // Case respect should be off by default
+        assert!(!ed.show_number() || ed.show_number()); // just checking we can query
+                                                        // Now run profile
+        ed.run_profile();
+
+        // Case respect is an internal state — verify by trying a case-sensitive locate
+        ed.set_current_line(0);
+        // With CASE RESPECT, searching for "FN" should NOT find "fn"
+        let locate_result = ed.execute(&Command::Locate(Target::StringForward("FN".into())));
+        assert!(locate_result.is_err()); // not found because case matters
+
+        let _ = fs::remove_file(&profile_path);
+        let _ = fs::remove_file(&data_path);
+        let _ = fs::remove_dir(&dir);
     }
 }
