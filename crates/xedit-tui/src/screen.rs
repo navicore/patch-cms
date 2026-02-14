@@ -28,7 +28,6 @@ const CMD_PROMPT_FG: Color = Color::Cyan;
 const MSG_FG: Color = Color::Yellow;
 const INPUT_MODE_FG: Color = Color::Red;
 
-
 /// Render the complete XEDIT screen
 #[allow(clippy::too_many_arguments)]
 pub fn render(
@@ -48,7 +47,7 @@ pub fn render(
 
     let chunks = Layout::vertical([
         Constraint::Length(1), // ID line
-        Constraint::Min(3),   // file area
+        Constraint::Min(3),    // file area
         Constraint::Length(1), // message line
         Constraint::Length(1), // command line
     ])
@@ -57,12 +56,7 @@ pub fn render(
     render_id_line(frame, chunks[0], editor, insert_mode);
 
     let file_area_rect = chunks[1];
-    let visible = render_file_area(
-        frame,
-        file_area_rect,
-        editor,
-        prefix_inputs,
-    );
+    let visible = render_file_area(frame, file_area_rect, editor, prefix_inputs);
 
     render_message_line(frame, chunks[2], editor, in_input_mode);
     render_command_line(frame, chunks[3], command_text, in_input_mode, input_text);
@@ -279,10 +273,10 @@ fn make_empty_row(width: usize) -> Line<'static> {
 fn render_message_line(frame: &mut Frame, area: Rect, editor: &Editor, in_input_mode: bool) {
     let text = if in_input_mode {
         "INPUT MODE — type text, Enter on empty line to exit, Esc to cancel"
-    } else if let Some(msg) = editor.message() {
-        msg
     } else {
-        "Tab=toggle focus | Arrows=navigate | Enter=execute | Esc=cancel"
+        editor
+            .message()
+            .unwrap_or("Tab=toggle focus | Arrows=navigate | Enter=execute | Esc=cancel")
     };
 
     let style = if in_input_mode {

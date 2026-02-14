@@ -136,29 +136,29 @@ impl CommandResult {
 // Each entry: (full_name, minimum_abbreviation_length)
 // Follows IBM XEDIT abbreviation conventions.
 const COMMAND_TABLE: &[(&str, usize)] = &[
-    ("BACKWARD", 1),  // B
-    ("BOTTOM", 2),    // BO
-    ("CHANGE", 1),    // C
-    ("DELETE", 3),    // DEL
-    ("DOWN", 2),      // DO
-    ("FILE", 4),      // FILE
-    ("FORWARD", 1),   // F
-    ("GET", 3),       // GET
-    ("HELP", 4),      // HELP
-    ("INPUT", 1),     // I
-    ("LEFT", 2),      // LE
-    ("LOCATE", 1),    // L (but see disambiguation below)
-    ("MACRO", 5),     // MACRO
-    ("NEXT", 1),      // N
-    ("QQUIT", 2),     // QQ
-    ("QUERY", 2),     // QU
-    ("QUIT", 4),      // QUIT
-    ("REFRESH", 3),   // REF
-    ("RIGHT", 2),     // RI
-    ("SAVE", 2),      // SA
-    ("SET", 3),       // SET
-    ("TOP", 1),       // T
-    ("UP", 1),        // U
+    ("BACKWARD", 1), // B
+    ("BOTTOM", 2),   // BO
+    ("CHANGE", 1),   // C
+    ("DELETE", 3),   // DEL
+    ("DOWN", 2),     // DO
+    ("FILE", 4),     // FILE
+    ("FORWARD", 1),  // F
+    ("GET", 3),      // GET
+    ("HELP", 4),     // HELP
+    ("INPUT", 1),    // I
+    ("LEFT", 2),     // LE
+    ("LOCATE", 1),   // L (but see disambiguation below)
+    ("MACRO", 5),    // MACRO
+    ("NEXT", 1),     // N
+    ("QQUIT", 2),    // QQ
+    ("QUERY", 2),    // QU
+    ("QUIT", 4),     // QUIT
+    ("REFRESH", 3),  // REF
+    ("RIGHT", 2),    // RI
+    ("SAVE", 2),     // SA
+    ("SET", 3),      // SET
+    ("TOP", 1),      // T
+    ("UP", 1),       // U
 ];
 
 fn lookup_command(input: &str) -> Option<&'static str> {
@@ -177,10 +177,8 @@ fn lookup_command(input: &str) -> Option<&'static str> {
         }
     }
     // Disambiguation: prefer LOCATE over LEFT for single "L"
-    if matches.len() > 1 {
-        if matches.contains(&"LOCATE") && input_upper == "L" {
-            return Some("LOCATE");
-        }
+    if matches.len() > 1 && matches.contains(&"LOCATE") && input_upper == "L" {
+        return Some("LOCATE");
     }
     matches.first().copied()
 }
@@ -364,13 +362,12 @@ fn parse_set_args(args: &str) -> Result<Command, String> {
         Ok(Command::Set(SetCommand::Hex(parse_on_off(subargs)?)))
     } else if matches_abbrev(&subcmd_upper, "STAY", 2) {
         Ok(Command::Set(SetCommand::Stay(parse_on_off(subargs)?)))
-    } else if subcmd_upper.starts_with("PF") {
+    } else if let Some(num_str) = subcmd_upper.strip_prefix("PF") {
         // SET PFn command_text
-        let num_str = &subcmd_upper[2..];
         let num = num_str
             .parse::<usize>()
             .map_err(|_| format!("Invalid PF key number: {}", num_str))?;
-        if num < 1 || num > 24 {
+        if !(1..=24).contains(&num) {
             return Err(format!("PF key must be 1-24, got: {}", num));
         }
         if subargs.is_empty() || subargs.to_uppercase() == "OFF" {

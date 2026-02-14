@@ -69,7 +69,7 @@ pub fn read_action() -> std::io::Result<Action> {
                     } else {
                         n as usize // F1 = PF1, etc.
                     };
-                    if pf >= 1 && pf <= 24 {
+                    if (1..=24).contains(&pf) {
                         Ok(Action::PfKey(pf))
                     } else {
                         Ok(Action::None)

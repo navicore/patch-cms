@@ -156,7 +156,10 @@ mod tests {
 
     #[test]
     fn parse_shift() {
-        assert_eq!(PrefixCommand::parse(">"), Some(PrefixCommand::ShiftRight(2)));
+        assert_eq!(
+            PrefixCommand::parse(">"),
+            Some(PrefixCommand::ShiftRight(2))
+        );
         assert_eq!(
             PrefixCommand::parse(">4"),
             Some(PrefixCommand::ShiftRight(4))
