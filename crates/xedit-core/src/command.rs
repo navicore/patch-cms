@@ -177,10 +177,8 @@ fn lookup_command(input: &str) -> Option<&'static str> {
         }
     }
     // Disambiguation: prefer LOCATE over LEFT for single "L"
-    if matches.len() > 1 {
-        if matches.contains(&"LOCATE") && input_upper == "L" {
-            return Some("LOCATE");
-        }
+    if matches.len() > 1 && matches.contains(&"LOCATE") && input_upper == "L" {
+        return Some("LOCATE");
     }
     matches.first().copied()
 }
@@ -364,13 +362,12 @@ fn parse_set_args(args: &str) -> Result<Command, String> {
         Ok(Command::Set(SetCommand::Hex(parse_on_off(subargs)?)))
     } else if matches_abbrev(&subcmd_upper, "STAY", 2) {
         Ok(Command::Set(SetCommand::Stay(parse_on_off(subargs)?)))
-    } else if subcmd_upper.starts_with("PF") {
+    } else if let Some(num_str) = subcmd_upper.strip_prefix("PF") {
         // SET PFn command_text
-        let num_str = &subcmd_upper[2..];
         let num = num_str
             .parse::<usize>()
             .map_err(|_| format!("Invalid PF key number: {}", num_str))?;
-        if num < 1 || num > 24 {
+        if !(1..=24).contains(&num) {
             return Err(format!("PF key must be 1-24, got: {}", num));
         }
         if subargs.is_empty() || subargs.to_uppercase() == "OFF" {

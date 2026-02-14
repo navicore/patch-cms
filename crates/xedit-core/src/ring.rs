@@ -47,7 +47,7 @@ impl Ring {
     }
 
     /// Cycle to the next file in the ring
-    pub fn next(&mut self) -> Result<()> {
+    pub fn cycle_next(&mut self) -> Result<()> {
         if self.editors.is_empty() {
             return Err(XeditError::NoFile);
         }

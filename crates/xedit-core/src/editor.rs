@@ -146,7 +146,7 @@ impl Editor {
 
     /// Get the command string assigned to a PF key (1-based: PF1..PF24)
     pub fn pf_key(&self, num: usize) -> Option<&str> {
-        if num >= 1 && num <= 24 {
+        if (1..=24).contains(&num) {
             self.pf_keys[num - 1].as_deref()
         } else {
             None
@@ -155,7 +155,7 @@ impl Editor {
 
     /// Set a PF key assignment (1-based)
     pub fn set_pf_key(&mut self, num: usize, command: Option<String>) {
-        if num >= 1 && num <= 24 {
+        if (1..=24).contains(&num) {
             self.pf_keys[num - 1] = command;
         }
     }
@@ -708,7 +708,7 @@ impl Editor {
     fn cmd_query(&self, what: &str) -> Result<CommandResult> {
         let what_upper = what.trim().to_uppercase();
         let msg = match what_upper.as_str() {
-            s if s.is_empty() => format!(
+            "" => format!(
                 "Size={} Line={} Col={} Alt={} Trunc={}",
                 self.buffer.len(),
                 self.current_line,
@@ -1108,19 +1108,17 @@ mod tests {
     #[cfg(feature = "rexx")]
     #[test]
     fn profile_xedit_runs_on_load() {
-        // Create a temp dir with a profile and a data file
-        let dir = std::env::temp_dir().join("xedit_profile_test");
-        let _ = fs::create_dir_all(&dir);
+        let dir = tempfile::TempDir::new().unwrap();
 
-        let profile_path = dir.join("profile.xedit");
-        let data_path = dir.join("test.txt");
+        let profile_path = dir.path().join("profile.xedit");
+        let data_path = dir.path().join("test.txt");
 
         // Profile macro: set number off, move to bottom
         fs::write(&profile_path, "/* PROFILE */\n'SET NUMBER OFF'\n'BOTTOM'\n").unwrap();
         fs::write(&data_path, "line1\nline2\nline3\n").unwrap();
 
         let mut ed = Editor::new();
-        ed.set_macro_path(vec![dir.clone()]);
+        ed.set_macro_path(vec![dir.path().to_path_buf()]);
         ed.load_file(&data_path).unwrap();
         ed.run_profile();
 
@@ -1128,41 +1126,31 @@ mod tests {
         assert!(!ed.show_number());
         // Profile should have moved to bottom
         assert_eq!(ed.current_line(), 3);
-
-        // Clean up
-        let _ = fs::remove_file(&profile_path);
-        let _ = fs::remove_file(&data_path);
-        let _ = fs::remove_dir(&dir);
     }
 
     #[cfg(feature = "rexx")]
     #[test]
     fn profile_missing_is_silent() {
-        let dir = std::env::temp_dir().join("xedit_no_profile_test");
-        let _ = fs::create_dir_all(&dir);
+        let dir = tempfile::TempDir::new().unwrap();
 
-        let data_path = dir.join("test.txt");
+        let data_path = dir.path().join("test.txt");
         fs::write(&data_path, "hello\n").unwrap();
 
         let mut ed = Editor::new();
-        ed.set_macro_path(vec![dir.clone()]);
+        ed.set_macro_path(vec![dir.path().to_path_buf()]);
         ed.load_file(&data_path).unwrap();
         ed.run_profile(); // should not error
 
         assert!(ed.message().is_none());
-
-        let _ = fs::remove_file(&data_path);
-        let _ = fs::remove_dir(&dir);
     }
 
     #[cfg(feature = "rexx")]
     #[test]
     fn profile_filetype_conditional() {
-        let dir = std::env::temp_dir().join("xedit_profile_cond_test");
-        let _ = fs::create_dir_all(&dir);
+        let dir = tempfile::TempDir::new().unwrap();
 
-        let profile_path = dir.join("profile.xedit");
-        let data_path = dir.join("code.rs");
+        let profile_path = dir.path().join("profile.xedit");
+        let data_path = dir.path().join("code.rs");
 
         // Profile that sets case respect only for .rs files
         let profile = r#"/* PROFILE */
@@ -1173,22 +1161,18 @@ if ftype.1 = 'RS' then
         fs::write(&data_path, "fn main() {}\n").unwrap();
 
         let mut ed = Editor::new();
-        ed.set_macro_path(vec![dir.clone()]);
+        ed.set_macro_path(vec![dir.path().to_path_buf()]);
         ed.load_file(&data_path).unwrap();
-
-        // Case respect should be off by default
-        assert!(!ed.show_number() || ed.show_number()); // just checking we can query
-                                                        // Now run profile
         ed.run_profile();
 
-        // Case respect is an internal state — verify by trying a case-sensitive locate
+        // Verify case-sensitive locate: uppercase "FN" should NOT match lowercase "fn"
         ed.set_current_line(0);
-        // With CASE RESPECT, searching for "FN" should NOT find "fn"
-        let locate_result = ed.execute(&Command::Locate(Target::StringForward("FN".into())));
-        assert!(locate_result.is_err()); // not found because case matters
+        let upper = ed.execute(&Command::Locate(Target::StringForward("FN".into())));
+        assert!(upper.is_err());
 
-        let _ = fs::remove_file(&profile_path);
-        let _ = fs::remove_file(&data_path);
-        let _ = fs::remove_dir(&dir);
+        // But lowercase "fn" should still match
+        ed.set_current_line(0);
+        let lower = ed.execute(&Command::Locate(Target::StringForward("fn".into())));
+        assert!(lower.is_ok());
     }
 }

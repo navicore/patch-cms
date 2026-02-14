@@ -273,10 +273,10 @@ fn make_empty_row(width: usize) -> Line<'static> {
 fn render_message_line(frame: &mut Frame, area: Rect, editor: &Editor, in_input_mode: bool) {
     let text = if in_input_mode {
         "INPUT MODE — type text, Enter on empty line to exit, Esc to cancel"
-    } else if let Some(msg) = editor.message() {
-        msg
     } else {
-        "Tab=toggle focus | Arrows=navigate | Enter=execute | Esc=cancel"
+        editor
+            .message()
+            .unwrap_or("Tab=toggle focus | Arrows=navigate | Enter=execute | Esc=cancel")
     };
 
     let style = if in_input_mode {

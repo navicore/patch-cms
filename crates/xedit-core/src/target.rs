@@ -48,8 +48,7 @@ impl Target {
         }
 
         // Negative: relative number or backward search
-        if input.starts_with('-') {
-            let rest = &input[1..];
+        if let Some(rest) = input.strip_prefix('-') {
             if rest.starts_with('/') {
                 let search_str = extract_delimited(rest, '/')?;
                 return Ok(Target::StringBackward(search_str));
