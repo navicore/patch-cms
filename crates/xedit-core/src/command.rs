@@ -44,6 +44,10 @@ pub enum Command {
     // Undo
     Undo,
 
+    // Data stack
+    Stack(usize), // STACK n — push n lines onto data stack (LIFO)
+    Queue(usize), // QUEUE n — queue n lines onto data stack (FIFO)
+
     // Filtering
     All(Option<Target>),
 
@@ -197,12 +201,14 @@ const COMMAND_TABLE: &[(&str, usize)] = &[
     ("NEXT", 1),     // N
     ("QQUIT", 2),    // QQ
     ("QUERY", 2),    // QU
+    ("QUEUE", 3),    // QUE (avoids conflict with QUERY at QU)
     ("QUIT", 4),     // QUIT
     ("REFRESH", 3),  // REF
     ("RIGHT", 2),    // RI
     ("SAVE", 2),     // SA
     ("SET", 3),      // SET
     ("SORT", 4),     // SORT
+    ("STACK", 2),    // ST (no conflicts)
     ("TOP", 1),      // T
     ("UNDO", 4),     // UNDO
     ("UP", 1),       // U
@@ -226,6 +232,10 @@ fn lookup_command(input: &str) -> Option<&'static str> {
     // Disambiguation: prefer LOCATE over LEFT for single "L"
     if matches.len() > 1 && matches.contains(&"LOCATE") && input_upper == "L" {
         return Some("LOCATE");
+    }
+    // Disambiguation: "QUE"+ prefers QUEUE over QUERY (QU already maps to QUERY)
+    if matches.len() > 1 && matches.contains(&"QUEUE") && input_upper.len() >= 3 {
+        return Some("QUEUE");
     }
     matches.first().copied()
 }
@@ -307,6 +317,8 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
             }
         }
         "SORT" => parse_sort_args(args),
+        "STACK" => Ok(Command::Stack(parse_optional_count(args)?)),
+        "QUEUE" => Ok(Command::Queue(parse_optional_count(args)?)),
         "UNDO" => Ok(Command::Undo),
         "REFRESH" => Ok(Command::Refresh),
         "HELP" => Ok(Command::Help),
@@ -988,7 +1000,10 @@ mod tests {
     fn parse_cursor_file() {
         match parse_command("cur file 5 10").unwrap() {
             Command::Cursor(CursorTarget::File { line: 5, col: 10 }) => {}
-            other => panic!("Expected Cursor(File {{ line: 5, col: 10 }}), got {:?}", other),
+            other => panic!(
+                "Expected Cursor(File {{ line: 5, col: 10 }}), got {:?}",
+                other
+            ),
         }
     }
 
@@ -1011,7 +1026,10 @@ mod tests {
     fn parse_all_with_target() {
         match parse_command("all /foo/").unwrap() {
             Command::All(Some(Target::StringForward(ref s))) => assert_eq!(s, "foo"),
-            other => panic!("Expected All(Some(StringForward(\"foo\"))), got {:?}", other),
+            other => panic!(
+                "Expected All(Some(StringForward(\"foo\"))), got {:?}",
+                other
+            ),
         }
     }
 
@@ -1054,5 +1072,39 @@ mod tests {
         assert!(matches_abbrev("BO", "BOTTOM", 2));
         // "B" is too short (min 2 for BOTTOM)
         assert!(!matches_abbrev("B", "BOTTOM", 2));
+    }
+
+    // -- STACK / QUEUE tests --
+
+    #[test]
+    fn parse_stack_default() {
+        match parse_command("st").unwrap() {
+            Command::Stack(1) => {}
+            other => panic!("Expected Stack(1), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_stack_with_count() {
+        match parse_command("stack 5").unwrap() {
+            Command::Stack(5) => {}
+            other => panic!("Expected Stack(5), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_queue_default() {
+        match parse_command("que").unwrap() {
+            Command::Queue(1) => {}
+            other => panic!("Expected Queue(1), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_queue_with_count() {
+        match parse_command("queue 3").unwrap() {
+            Command::Queue(3) => {}
+            other => panic!("Expected Queue(3), got {:?}", other),
+        }
     }
 }
