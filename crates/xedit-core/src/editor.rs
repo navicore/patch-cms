@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -90,6 +91,9 @@ pub struct Editor {
     // Display customization
     reserved_lines: HashMap<usize, String>,
     color_overrides: HashMap<String, String>,
+
+    // Data stack (for STACK/QUEUE commands, REXX interop)
+    data_stack: VecDeque<String>,
 }
 
 /// Classic VM/CMS XEDIT default PF key assignments
@@ -148,6 +152,7 @@ impl Editor {
             cursor_request: None,
             reserved_lines: HashMap::new(),
             color_overrides: HashMap::new(),
+            data_stack: VecDeque::new(),
         }
     }
 
@@ -430,6 +435,32 @@ impl Editor {
         &self.color_overrides
     }
 
+    // -- Data stack --
+
+    pub fn data_stack(&self) -> &VecDeque<String> {
+        &self.data_stack
+    }
+
+    pub fn data_stack_len(&self) -> usize {
+        self.data_stack.len()
+    }
+
+    pub fn data_stack_pop(&mut self) -> Option<String> {
+        self.data_stack.pop_front()
+    }
+
+    pub fn data_stack_push(&mut self, line: String) {
+        self.data_stack.push_front(line);
+    }
+
+    pub fn data_stack_queue(&mut self, line: String) {
+        self.data_stack.push_back(line);
+    }
+
+    pub fn data_stack_clear(&mut self) {
+        self.data_stack.clear();
+    }
+
     // -- Command history --
 
     /// Push a command into the history (skips empty, `?`, `=`)
@@ -637,6 +668,8 @@ impl Editor {
             Command::QQuit => Ok(CommandResult::quit()),
             Command::Get(filename) => self.cmd_get(filename),
             Command::Undo => self.cmd_undo(),
+            Command::Stack(n) => self.cmd_stack(*n),
+            Command::Queue(n) => self.cmd_queue(*n),
             Command::Cursor(target) => self.cmd_cursor(target),
             Command::All(target) => self.cmd_all(target.as_ref()),
             Command::Sort {
@@ -1070,6 +1103,46 @@ impl Editor {
 
         crate::macro_engine::run_macro(self, &source, macro_args)?;
         Ok(CommandResult::ok())
+    }
+
+    fn cmd_stack(&mut self, n: usize) -> Result<CommandResult> {
+        if self.current_line == 0 {
+            return Err(XeditError::InvalidCommand(
+                "Cannot STACK at Top of File".to_string(),
+            ));
+        }
+        let available = self.buffer.len() - self.current_line + 1;
+        let count = n.min(available);
+        // LIFO: push in reverse order so that the first line ends up on top
+        for i in (self.current_line..self.current_line + count).rev() {
+            if let Some(text) = self.buffer.line_text(i) {
+                self.data_stack.push_front(text.to_string());
+            }
+        }
+        Ok(CommandResult::with_message(format!(
+            "{} line(s) stacked",
+            count
+        )))
+    }
+
+    fn cmd_queue(&mut self, n: usize) -> Result<CommandResult> {
+        if self.current_line == 0 {
+            return Err(XeditError::InvalidCommand(
+                "Cannot QUEUE at Top of File".to_string(),
+            ));
+        }
+        let available = self.buffer.len() - self.current_line + 1;
+        let count = n.min(available);
+        // FIFO: push in forward order to the back
+        for i in self.current_line..self.current_line + count {
+            if let Some(text) = self.buffer.line_text(i) {
+                self.data_stack.push_back(text.to_string());
+            }
+        }
+        Ok(CommandResult::with_message(format!(
+            "{} line(s) queued",
+            count
+        )))
     }
 
     fn cmd_help(&self) -> Result<CommandResult> {
@@ -1836,5 +1909,92 @@ if ftype.1 = 'RS' then
         // P without prior C/M → error
         let result = ed.execute_prefix(2, &PrefixCommand::Preceding);
         assert!(result.is_err());
+    }
+
+    // -- STACK / QUEUE tests --
+
+    #[test]
+    fn stack_single_line() {
+        let mut ed = editor_with_lines(&["alpha", "beta", "gamma"]);
+        ed.current_line = 2;
+        ed.execute(&Command::Stack(1)).unwrap();
+        assert_eq!(ed.data_stack_len(), 1);
+        assert_eq!(ed.data_stack().front().map(|s| s.as_str()), Some("beta"));
+    }
+
+    #[test]
+    fn stack_multiple_lines_lifo() {
+        let mut ed = editor_with_lines(&["alpha", "beta", "gamma"]);
+        ed.current_line = 1;
+        ed.execute(&Command::Stack(3)).unwrap();
+        assert_eq!(ed.data_stack_len(), 3);
+        // LIFO: first popped should be "alpha" (the first line stacked)
+        assert_eq!(ed.data_stack_pop().as_deref(), Some("alpha"));
+        assert_eq!(ed.data_stack_pop().as_deref(), Some("beta"));
+        assert_eq!(ed.data_stack_pop().as_deref(), Some("gamma"));
+    }
+
+    #[test]
+    fn stack_at_tof_errors() {
+        let mut ed = editor_with_lines(&["alpha"]);
+        ed.current_line = 0;
+        let result = ed.execute(&Command::Stack(1));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn stack_clamps_to_buffer_end() {
+        let mut ed = editor_with_lines(&["alpha", "beta", "gamma"]);
+        ed.current_line = 2;
+        // Request 10 but only 2 lines remain (beta, gamma)
+        ed.execute(&Command::Stack(10)).unwrap();
+        assert_eq!(ed.data_stack_len(), 2);
+        assert_eq!(ed.data_stack_pop().as_deref(), Some("beta"));
+        assert_eq!(ed.data_stack_pop().as_deref(), Some("gamma"));
+    }
+
+    #[test]
+    fn queue_single_line() {
+        let mut ed = editor_with_lines(&["alpha", "beta", "gamma"]);
+        ed.current_line = 2;
+        ed.execute(&Command::Queue(1)).unwrap();
+        assert_eq!(ed.data_stack_len(), 1);
+        assert_eq!(ed.data_stack().front().map(|s| s.as_str()), Some("beta"));
+    }
+
+    #[test]
+    fn queue_multiple_lines_fifo() {
+        let mut ed = editor_with_lines(&["alpha", "beta", "gamma"]);
+        ed.current_line = 1;
+        ed.execute(&Command::Queue(3)).unwrap();
+        assert_eq!(ed.data_stack_len(), 3);
+        // FIFO: first popped should be "alpha" (the first line queued)
+        assert_eq!(ed.data_stack_pop().as_deref(), Some("alpha"));
+        assert_eq!(ed.data_stack_pop().as_deref(), Some("beta"));
+        assert_eq!(ed.data_stack_pop().as_deref(), Some("gamma"));
+    }
+
+    #[test]
+    fn queue_at_tof_errors() {
+        let mut ed = editor_with_lines(&["alpha"]);
+        ed.current_line = 0;
+        let result = ed.execute(&Command::Queue(1));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn stack_then_queue_ordering() {
+        let mut ed = editor_with_lines(&["alpha", "beta"]);
+        // Stack line 1 (LIFO — push_front)
+        ed.current_line = 1;
+        ed.execute(&Command::Stack(1)).unwrap();
+        // Queue line 2 (FIFO — push_back)
+        ed.current_line = 2;
+        ed.execute(&Command::Queue(1)).unwrap();
+
+        assert_eq!(ed.data_stack_len(), 2);
+        // "alpha" was push_front, "beta" was push_back
+        assert_eq!(ed.data_stack_pop().as_deref(), Some("alpha"));
+        assert_eq!(ed.data_stack_pop().as_deref(), Some("beta"));
     }
 }

@@ -49,21 +49,21 @@ genuinely embeddable standalone.
 - [x] Prefix command model: d, dd, i, a, c, cc, m, mm, ", "", >, <, /, f, p
 - [x] Prefix execution: delete, insert, duplicate, shift, block ops, copy/move
 - [x] File ring: multiple open files, cycle through
-- [x] 34 unit tests passing
+- [x] 133 unit tests passing
 
 ### TODO — Phase 1 remaining
-- [ ] **Screen editing model** (the big one — see below)
-- [ ] Compound targets: `/foo/ & /bar/`, `/foo/ | /bar/`
-- [ ] ALL command (show only lines matching target)
-- [ ] SORT command
-- [ ] STACK / QUEUE (data stack for REXX interop)
-- [ ] CURSOR command
-- [ ] SET SHADOW, SET RESERVED, SET COLOR
-- [ ] EXTRACT command (query editor state into variables — key for REXX macros)
-- [ ] COMMAND vs MACRO resolution
-- [ ] PF key assignments (SET PFn command)
-- [ ] Command history (recall previous commands)
-- [ ] Undo (at minimum single-level)
+- [x] **Screen editing model** (completed in Phase 2)
+- [x] Compound targets: `/foo/ & /bar/`, `/foo/ | /bar/`
+- [x] ALL command (show only lines matching target)
+- [x] SORT command
+- [x] STACK / QUEUE (data stack for REXX interop)
+- [x] CURSOR command
+- [x] SET SHADOW, SET RESERVED, SET COLOR
+- [x] EXTRACT command (via REXX macro variable population)
+- [x] COMMAND vs MACRO resolution
+- [x] PF key assignments (SET PFn command)
+- [x] Command history (recall previous commands)
+- [x] Undo (multi-level)
 
 ## Phase 2: Screen Editing (3270 Block-Mode Simulation) — DONE
 
