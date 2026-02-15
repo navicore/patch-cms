@@ -672,4 +672,387 @@ mod tests {
             other => panic!("Expected Nop, got {:?}", other),
         }
     }
+
+    // -- Navigation tests --
+
+    #[test]
+    fn parse_top() {
+        match parse_command("t").unwrap() {
+            Command::Top => {}
+            other => panic!("Expected Top, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_bottom() {
+        match parse_command("bo").unwrap() {
+            Command::Bottom => {}
+            other => panic!("Expected Bottom, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_forward_default() {
+        match parse_command("f").unwrap() {
+            Command::Forward(1) => {}
+            other => panic!("Expected Forward(1), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_backward_with_count() {
+        match parse_command("b 3").unwrap() {
+            Command::Backward(3) => {}
+            other => panic!("Expected Backward(3), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_next_is_down() {
+        match parse_command("n 2").unwrap() {
+            Command::Down(2) => {}
+            other => panic!("Expected Down(2), got {:?}", other),
+        }
+    }
+
+    // -- Editing tests --
+
+    #[test]
+    fn parse_input_no_text() {
+        match parse_command("i").unwrap() {
+            Command::Input(None) => {}
+            other => panic!("Expected Input(None), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_input_with_text() {
+        match parse_command("i hello world").unwrap() {
+            Command::Input(Some(ref s)) => assert_eq!(s, "hello world"),
+            other => panic!("Expected Input(Some(...)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_delete_no_target() {
+        match parse_command("del").unwrap() {
+            Command::Delete(None) => {}
+            other => panic!("Expected Delete(None), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_delete_with_target() {
+        match parse_command("del 5").unwrap() {
+            Command::Delete(Some(Target::Relative(5))) => {}
+            other => panic!("Expected Delete(Some(Relative(5))), got {:?}", other),
+        }
+    }
+
+    // -- File operations tests --
+
+    #[test]
+    fn parse_file() {
+        match parse_command("file").unwrap() {
+            Command::File => {}
+            other => panic!("Expected File, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_save() {
+        match parse_command("sa").unwrap() {
+            Command::Save => {}
+            other => panic!("Expected Save, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_quit() {
+        match parse_command("quit").unwrap() {
+            Command::Quit => {}
+            other => panic!("Expected Quit, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_get_requires_filename() {
+        assert!(parse_command("get").is_err());
+    }
+
+    // -- Change edge cases --
+
+    #[test]
+    fn parse_change_no_args() {
+        assert!(parse_command("c").is_err());
+    }
+
+    #[test]
+    fn parse_change_missing_delim() {
+        assert!(parse_command("c /foo").is_err());
+    }
+
+    #[test]
+    fn parse_change_with_count() {
+        match parse_command("c /a/b/ 3").unwrap() {
+            Command::Change {
+                from,
+                to,
+                count: Some(3),
+                ..
+            } => {
+                assert_eq!(from, "a");
+                assert_eq!(to, "b");
+            }
+            other => panic!("Expected Change with count 3, got {:?}", other),
+        }
+    }
+
+    // -- SET subcommand tests --
+
+    #[test]
+    fn parse_set_no_args() {
+        assert!(parse_command("set").is_err());
+    }
+
+    #[test]
+    fn parse_set_trunc() {
+        match parse_command("set tr 72").unwrap() {
+            Command::Set(SetCommand::Trunc(72)) => {}
+            other => panic!("Expected Set(Trunc(72)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_prefix_off() {
+        match parse_command("set pr off").unwrap() {
+            Command::Set(SetCommand::Prefix(false)) => {}
+            other => panic!("Expected Set(Prefix(false)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_scale_on() {
+        match parse_command("set sc on").unwrap() {
+            Command::Set(SetCommand::Scale(true)) => {}
+            other => panic!("Expected Set(Scale(true)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_curline_middle() {
+        match parse_command("set cur m").unwrap() {
+            Command::Set(SetCommand::CurLine(CurLinePosition::Middle)) => {}
+            other => panic!("Expected Set(CurLine(Middle)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_curline_row() {
+        match parse_command("set cur 5").unwrap() {
+            Command::Set(SetCommand::CurLine(CurLinePosition::Row(5))) => {}
+            other => panic!("Expected Set(CurLine(Row(5))), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_wrap_on() {
+        match parse_command("set wr on").unwrap() {
+            Command::Set(SetCommand::Wrap(true)) => {}
+            other => panic!("Expected Set(Wrap(true)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_hex_on() {
+        match parse_command("set hex on").unwrap() {
+            Command::Set(SetCommand::Hex(true)) => {}
+            other => panic!("Expected Set(Hex(true)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_reserved_text() {
+        match parse_command("set res 3 Hello").unwrap() {
+            Command::Set(SetCommand::Reserved(3, ref s)) => assert_eq!(s, "Hello"),
+            other => panic!("Expected Set(Reserved(3, \"Hello\")), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_reserved_off() {
+        match parse_command("set res 3 OFF").unwrap() {
+            Command::Set(SetCommand::ReservedOff(3)) => {}
+            other => panic!("Expected Set(ReservedOff(3)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_color() {
+        match parse_command("set col filearea blue").unwrap() {
+            Command::Set(SetCommand::Color(ColorArea::FileArea, ref s)) => {
+                assert_eq!(s, "BLUE");
+            }
+            other => panic!("Expected Set(Color(FileArea, \"BLUE\")), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_shadow() {
+        match parse_command("set sha on").unwrap() {
+            Command::Set(SetCommand::Shadow(true)) => {}
+            other => panic!("Expected Set(Shadow(true)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_stay() {
+        match parse_command("set st on").unwrap() {
+            Command::Set(SetCommand::Stay(true)) => {}
+            other => panic!("Expected Set(Stay(true)), got {:?}", other),
+        }
+    }
+
+    // -- SET PF key tests --
+
+    #[test]
+    fn parse_set_pf() {
+        match parse_command("set pf1 help").unwrap() {
+            Command::Set(SetCommand::Pf(1, ref s)) => assert_eq!(s, "help"),
+            other => panic!("Expected Set(Pf(1, \"help\")), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_pf_off() {
+        match parse_command("set pf1 off").unwrap() {
+            Command::Set(SetCommand::Pf(1, ref s)) => assert_eq!(s, ""),
+            other => panic!("Expected Set(Pf(1, \"\")), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_pf_out_of_range() {
+        assert!(parse_command("set pf25 help").is_err());
+    }
+
+    // -- SORT tests --
+
+    #[test]
+    fn parse_sort_default() {
+        match parse_command("sort").unwrap() {
+            Command::Sort {
+                ascending: true,
+                col_start: None,
+                col_end: None,
+                ..
+            } => {}
+            other => panic!("Expected Sort default, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_sort_descending() {
+        match parse_command("sort d").unwrap() {
+            Command::Sort {
+                ascending: false, ..
+            } => {}
+            other => panic!("Expected Sort descending, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_sort_with_columns() {
+        match parse_command("sort a 5 10").unwrap() {
+            Command::Sort {
+                ascending: true,
+                col_start: Some(5),
+                col_end: Some(10),
+                ..
+            } => {}
+            other => panic!("Expected Sort with columns 5-10, got {:?}", other),
+        }
+    }
+
+    // -- CURSOR tests --
+
+    #[test]
+    fn parse_cursor_home() {
+        match parse_command("cur home").unwrap() {
+            Command::Cursor(CursorTarget::Home) => {}
+            other => panic!("Expected Cursor(Home), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_cursor_file() {
+        match parse_command("cur file 5 10").unwrap() {
+            Command::Cursor(CursorTarget::File { line: 5, col: 10 }) => {}
+            other => panic!("Expected Cursor(File {{ line: 5, col: 10 }}), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_cursor_no_args() {
+        assert!(parse_command("cur").is_err());
+    }
+
+    // -- Other command tests --
+
+    #[test]
+    fn parse_all_no_target() {
+        match parse_command("all").unwrap() {
+            Command::All(None) => {}
+            other => panic!("Expected All(None), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_all_with_target() {
+        match parse_command("all /foo/").unwrap() {
+            Command::All(Some(Target::StringForward(ref s))) => assert_eq!(s, "foo"),
+            other => panic!("Expected All(Some(StringForward(\"foo\"))), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_undo() {
+        match parse_command("undo").unwrap() {
+            Command::Undo => {}
+            other => panic!("Expected Undo, got {:?}", other),
+        }
+    }
+
+    // -- Error handling tests --
+
+    #[test]
+    fn parse_unknown_command() {
+        let err = parse_command("xyzzy").unwrap_err();
+        assert_eq!(err, "Unknown command: xyzzy");
+    }
+
+    #[test]
+    fn parse_invalid_count() {
+        assert!(parse_command("u abc").is_err());
+    }
+
+    #[test]
+    fn parse_locate_no_args() {
+        assert!(parse_command("l").is_err());
+    }
+
+    // -- Helper function tests --
+
+    #[test]
+    fn lookup_l_prefers_locate() {
+        assert_eq!(lookup_command("l"), Some("LOCATE"));
+    }
+
+    #[test]
+    fn matches_abbrev_boundary() {
+        // "BO" meets the minimum abbreviation length of 2 for BOTTOM
+        assert!(matches_abbrev("BO", "BOTTOM", 2));
+        // "B" is too short (min 2 for BOTTOM)
+        assert!(!matches_abbrev("B", "BOTTOM", 2));
+    }
 }
