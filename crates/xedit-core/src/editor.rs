@@ -1727,4 +1727,114 @@ if ftype.1 = 'RS' then
         let lower = ed.execute(&Command::Locate(Target::StringForward("fn".into())));
         assert!(lower.is_ok());
     }
+
+    #[test]
+    fn prefix_copy_single() {
+        let mut ed = editor_with_lines(&["a", "b", "c", "d", "e"]);
+
+        // C on line 2 — marks single-line copy
+        ed.execute_prefix(2, &PrefixCommand::Copy).unwrap();
+        // F on line 4 — paste after line 4
+        ed.execute_prefix(4, &PrefixCommand::Following).unwrap();
+
+        assert_eq!(ed.buffer().len(), 6);
+        // Original line 2 still present
+        assert_eq!(ed.buffer().line_text(2), Some("b"));
+        // Copied text appears after original line 4
+        assert_eq!(ed.buffer().line_text(5), Some("b"));
+        // Remaining lines shifted
+        assert_eq!(ed.buffer().line_text(6), Some("e"));
+    }
+
+    #[test]
+    fn prefix_move_single() {
+        let mut ed = editor_with_lines(&["a", "b", "c", "d", "e"]);
+
+        // M on line 2 — marks single-line move
+        ed.execute_prefix(2, &PrefixCommand::Move).unwrap();
+        // F on line 4 — move after line 4
+        ed.execute_prefix(4, &PrefixCommand::Following).unwrap();
+
+        // Move: buffer size stays the same
+        assert_eq!(ed.buffer().len(), 5);
+        // "b" removed from position 2, so line 2 is now "c"
+        assert_eq!(ed.buffer().line_text(1), Some("a"));
+        assert_eq!(ed.buffer().line_text(2), Some("c"));
+        assert_eq!(ed.buffer().line_text(3), Some("d"));
+        // "b" inserted after original line 4 (adjusted to 3 after deletion)
+        assert_eq!(ed.buffer().line_text(4), Some("b"));
+        assert_eq!(ed.buffer().line_text(5), Some("e"));
+    }
+
+    #[test]
+    fn prefix_copy_block() {
+        let mut ed = editor_with_lines(&["a", "b", "c", "d", "e", "f"]);
+
+        // CC on line 1, CC on line 3 — marks block copy of lines 1-3
+        ed.execute_prefix(1, &PrefixCommand::CopyBlock).unwrap();
+        ed.execute_prefix(3, &PrefixCommand::CopyBlock).unwrap();
+        // F on line 5 — paste after line 5
+        ed.execute_prefix(5, &PrefixCommand::Following).unwrap();
+
+        assert_eq!(ed.buffer().len(), 9);
+        // Originals unchanged
+        assert_eq!(ed.buffer().line_text(1), Some("a"));
+        assert_eq!(ed.buffer().line_text(2), Some("b"));
+        assert_eq!(ed.buffer().line_text(3), Some("c"));
+        // Copied block after line 5
+        assert_eq!(ed.buffer().line_text(6), Some("a"));
+        assert_eq!(ed.buffer().line_text(7), Some("b"));
+        assert_eq!(ed.buffer().line_text(8), Some("c"));
+        assert_eq!(ed.buffer().line_text(9), Some("f"));
+    }
+
+    #[test]
+    fn prefix_move_block() {
+        let mut ed = editor_with_lines(&["a", "b", "c", "d", "e", "f"]);
+
+        // MM on line 1, MM on line 3 — marks block move of lines 1-3
+        ed.execute_prefix(1, &PrefixCommand::MoveBlock).unwrap();
+        ed.execute_prefix(3, &PrefixCommand::MoveBlock).unwrap();
+        // P on line 5 — move before line 5
+        ed.execute_prefix(5, &PrefixCommand::Preceding).unwrap();
+
+        // Move: buffer size stays the same
+        assert_eq!(ed.buffer().len(), 6);
+        // Lines 1-3 removed, d and e shift up, then a/b/c inserted before original line 5
+        assert_eq!(ed.buffer().line_text(1), Some("d"));
+        assert_eq!(ed.buffer().line_text(2), Some("a"));
+        assert_eq!(ed.buffer().line_text(3), Some("b"));
+        assert_eq!(ed.buffer().line_text(4), Some("c"));
+        assert_eq!(ed.buffer().line_text(5), Some("e"));
+        assert_eq!(ed.buffer().line_text(6), Some("f"));
+    }
+
+    #[test]
+    fn prefix_move_adjusts_dest() {
+        let mut ed = editor_with_lines(&["a", "b", "c", "d"]);
+
+        // M on line 1, F on line 3 — source before dest, dest must adjust
+        ed.execute_prefix(1, &PrefixCommand::Move).unwrap();
+        ed.execute_prefix(3, &PrefixCommand::Following).unwrap();
+
+        assert_eq!(ed.buffer().len(), 4);
+        // "a" removed from line 1, dest 3 adjusts to 2 after deletion
+        assert_eq!(ed.buffer().line_text(1), Some("b"));
+        assert_eq!(ed.buffer().line_text(2), Some("c"));
+        assert_eq!(ed.buffer().line_text(3), Some("a"));
+        assert_eq!(ed.buffer().line_text(4), Some("d"));
+    }
+
+    #[test]
+    fn prefix_no_pending_destination() {
+        let mut ed = editor_with_lines(&["a", "b", "c"]);
+
+        // F without prior C/M → error
+        let result = ed.execute_prefix(2, &PrefixCommand::Following);
+        assert!(result.is_err());
+
+        // P without prior C/M → error
+        let result = ed.execute_prefix(2, &PrefixCommand::Preceding);
+        assert!(result.is_err());
+    }
 }
