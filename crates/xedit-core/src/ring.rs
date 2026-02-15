@@ -96,3 +96,143 @@ impl Default for Ring {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn new_ring_is_empty() {
+        let ring = Ring::new();
+        assert_eq!(ring.len(), 0);
+        assert!(ring.is_empty());
+        assert!(ring.current().is_none());
+    }
+
+    #[test]
+    fn add_empty() {
+        let mut ring = Ring::new();
+        ring.add_empty();
+        assert_eq!(ring.len(), 1);
+        assert!(ring.current().is_some());
+        assert_eq!(ring.current_index(), 0);
+    }
+
+    #[test]
+    fn add_multiple_empty() {
+        let mut ring = Ring::new();
+        ring.add_empty();
+        ring.add_empty();
+        ring.add_empty();
+        assert_eq!(ring.len(), 3);
+        assert_eq!(ring.current_index(), 2);
+    }
+
+    #[test]
+    fn add_file_success() {
+        let mut tmp = NamedTempFile::new().unwrap();
+        writeln!(tmp, "hello").unwrap();
+        writeln!(tmp, "world").unwrap();
+        tmp.flush().unwrap();
+
+        let mut ring = Ring::new();
+        ring.add_file(tmp.path()).unwrap();
+        assert_eq!(ring.len(), 1);
+
+        let editor = ring.current().unwrap();
+        assert_eq!(editor.buffer().lines().len(), 2);
+    }
+
+    #[test]
+    fn add_file_not_found() {
+        let mut ring = Ring::new();
+        let result = ring.add_file(Path::new("/tmp/nonexistent_xedit_test_file.txt"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cycle_next_wraps() {
+        let mut ring = Ring::new();
+        ring.add_empty();
+        ring.add_empty();
+        ring.add_empty();
+        assert_eq!(ring.current_index(), 2);
+
+        ring.cycle_next().unwrap();
+        assert_eq!(ring.current_index(), 0);
+
+        ring.cycle_next().unwrap();
+        assert_eq!(ring.current_index(), 1);
+
+        ring.cycle_next().unwrap();
+        assert_eq!(ring.current_index(), 2);
+    }
+
+    #[test]
+    fn cycle_next_empty_ring() {
+        let mut ring = Ring::new();
+        let result = ring.cycle_next();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn prev_wraps() {
+        let mut ring = Ring::new();
+        ring.add_empty();
+        ring.add_empty();
+        ring.add_empty();
+        // current_index is 2 after adding 3
+        assert_eq!(ring.current_index(), 2);
+
+        ring.prev().unwrap();
+        assert_eq!(ring.current_index(), 1);
+
+        ring.prev().unwrap();
+        assert_eq!(ring.current_index(), 0);
+
+        // wraps to last
+        ring.prev().unwrap();
+        assert_eq!(ring.current_index(), 2);
+    }
+
+    #[test]
+    fn prev_empty_ring() {
+        let mut ring = Ring::new();
+        let result = ring.prev();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn remove_current_middle() {
+        let mut ring = Ring::new();
+        ring.add_empty();
+        ring.add_empty();
+        ring.add_empty();
+        // cycle to index 1
+        ring.current = 1;
+        ring.remove_current();
+        assert_eq!(ring.len(), 2);
+        assert!(ring.current_index() <= 1);
+    }
+
+    #[test]
+    fn remove_current_last() {
+        let mut ring = Ring::new();
+        ring.add_empty();
+        ring.add_empty();
+        // current_index is 1 (last)
+        assert_eq!(ring.current_index(), 1);
+        ring.remove_current();
+        assert_eq!(ring.len(), 1);
+        assert_eq!(ring.current_index(), 0);
+    }
+
+    #[test]
+    fn remove_current_empty() {
+        let mut ring = Ring::new();
+        ring.remove_current(); // should not panic
+        assert_eq!(ring.len(), 0);
+    }
+}
