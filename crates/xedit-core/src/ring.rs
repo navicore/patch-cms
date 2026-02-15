@@ -72,7 +72,9 @@ impl Ring {
     pub fn remove_current(&mut self) {
         if !self.editors.is_empty() {
             self.editors.remove(self.current);
-            if self.current >= self.editors.len() && !self.editors.is_empty() {
+            if self.editors.is_empty() {
+                self.current = 0;
+            } else if self.current >= self.editors.len() {
                 self.current = self.editors.len() - 1;
             }
         }
@@ -210,11 +212,13 @@ mod tests {
         ring.add_empty();
         ring.add_empty();
         ring.add_empty();
-        // cycle to index 1
-        ring.current = 1;
+        // navigate to index 1 via public API
+        ring.cycle_next().unwrap(); // 2 -> 0
+        ring.cycle_next().unwrap(); // 0 -> 1
+        assert_eq!(ring.current_index(), 1);
         ring.remove_current();
         assert_eq!(ring.len(), 2);
-        assert!(ring.current_index() <= 1);
+        assert_eq!(ring.current_index(), 1);
     }
 
     #[test]
@@ -234,5 +238,30 @@ mod tests {
         let mut ring = Ring::new();
         ring.remove_current(); // should not panic
         assert_eq!(ring.len(), 0);
+    }
+
+    #[test]
+    fn current_mut_modifies_editor() {
+        let mut ring = Ring::new();
+        ring.add_empty();
+        assert!(ring.current_mut().is_some());
+
+        let mut empty_ring = Ring::new();
+        assert!(empty_ring.current_mut().is_none());
+    }
+
+    #[test]
+    fn remove_all_then_add() {
+        let mut ring = Ring::new();
+        ring.add_empty();
+        ring.add_empty();
+        ring.remove_current();
+        ring.remove_current();
+        assert_eq!(ring.len(), 0);
+        assert_eq!(ring.current_index(), 0);
+
+        ring.add_empty();
+        assert_eq!(ring.current_index(), 0);
+        assert!(ring.current().is_some());
     }
 }
