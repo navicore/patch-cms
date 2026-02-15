@@ -15,7 +15,7 @@ pub enum CursorRequest {
     File { line: usize, col: usize },
 }
 
-/// Snapshot of editor state for single-level undo
+/// Snapshot of editor state for undo
 #[derive(Debug, Clone)]
 struct UndoSnapshot {
     lines: Vec<String>,
@@ -81,8 +81,8 @@ pub struct Editor {
     // Command history
     command_history: Vec<String>,
 
-    // Undo
-    undo_snapshot: Option<UndoSnapshot>,
+    // Undo stack (multi-level)
+    undo_stack: Vec<UndoSnapshot>,
 
     // Cursor request
     cursor_request: Option<CursorRequest>,
@@ -144,7 +144,7 @@ impl Editor {
             all_filter: None,
             show_shadow: true,
             command_history: Vec::new(),
-            undo_snapshot: None,
+            undo_stack: Vec::new(),
             cursor_request: None,
             reserved_lines: HashMap::new(),
             color_overrides: HashMap::new(),
@@ -459,8 +459,8 @@ impl Editor {
     // -- Undo --
 
     /// Capture buffer state before a modifying command
-    fn snapshot_for_undo(&mut self) {
-        self.undo_snapshot = Some(UndoSnapshot {
+    pub fn snapshot_for_undo(&mut self) {
+        self.undo_stack.push(UndoSnapshot {
             lines: self
                 .buffer
                 .lines()
@@ -474,14 +474,20 @@ impl Editor {
     }
 
     fn cmd_undo(&mut self) -> Result<CommandResult> {
-        if let Some(snap) = self.undo_snapshot.take() {
+        if let Some(snap) = self.undo_stack.pop() {
             self.buffer = Buffer::from_lines(snap.lines);
             self.current_line = snap.current_line;
             self.current_col = snap.current_col;
             self.alt_count = snap.alt_count;
             // Clear ALL filter — it may reference the old buffer layout
             self.all_filter = None;
-            Ok(CommandResult::with_message("Undone"))
+            let remaining = self.undo_stack.len();
+            let msg = if remaining > 0 {
+                format!("Undone ({} more)", remaining)
+            } else {
+                "Undone".to_string()
+            };
+            Ok(CommandResult::with_message(msg))
         } else {
             Err(XeditError::InvalidCommand("Nothing to undo".to_string()))
         }
@@ -964,6 +970,7 @@ impl Editor {
             fs::read_to_string(path).map_err(|_| XeditError::FileNotFound(filename.to_string()))?;
         let lines: Vec<String> = content.lines().map(String::from).collect();
         let count = lines.len();
+        self.snapshot_for_undo();
         self.buffer.insert_lines_after(self.current_line, lines);
         self.alt_count += count;
         Ok(CommandResult::with_message(format!(
@@ -1490,6 +1497,30 @@ mod tests {
 
         ed.execute(&Command::Undo).unwrap();
         assert_eq!(ed.buffer().line_text(1), Some("hello world"));
+    }
+
+    #[test]
+    fn undo_multi_level() {
+        let mut ed = editor_with_lines(&["a", "b", "c"]);
+        ed.current_line = 1;
+        // Delete line 1 ("a"), then line 1 again ("b")
+        ed.execute(&Command::Delete(None)).unwrap();
+        assert_eq!(ed.buffer().len(), 2); // b, c
+        ed.execute(&Command::Delete(None)).unwrap();
+        assert_eq!(ed.buffer().len(), 1); // c
+
+        // Undo second delete — restores "b"
+        ed.execute(&Command::Undo).unwrap();
+        assert_eq!(ed.buffer().len(), 2);
+        assert_eq!(ed.buffer().line_text(1), Some("b"));
+
+        // Undo first delete — restores "a"
+        ed.execute(&Command::Undo).unwrap();
+        assert_eq!(ed.buffer().len(), 3);
+        assert_eq!(ed.buffer().line_text(1), Some("a"));
+
+        // No more undo
+        assert!(ed.execute(&Command::Undo).is_err());
     }
 
     #[test]
