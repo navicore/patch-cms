@@ -459,7 +459,7 @@ impl Editor {
     // -- Undo --
 
     /// Capture buffer state before a modifying command
-    fn snapshot_for_undo(&mut self) {
+    pub fn snapshot_for_undo(&mut self) {
         self.undo_stack.push(UndoSnapshot {
             lines: self
                 .buffer
@@ -970,6 +970,7 @@ impl Editor {
             fs::read_to_string(path).map_err(|_| XeditError::FileNotFound(filename.to_string()))?;
         let lines: Vec<String> = content.lines().map(String::from).collect();
         let count = lines.len();
+        self.snapshot_for_undo();
         self.buffer.insert_lines_after(self.current_line, lines);
         self.alt_count += count;
         Ok(CommandResult::with_message(format!(

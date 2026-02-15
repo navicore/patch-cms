@@ -56,6 +56,9 @@ pub struct App {
     input_text: String,
 
     should_quit: bool,
+
+    // Track whether we've snapshotted for the current file-area editing session
+    file_area_edited: bool,
 }
 
 impl App {
@@ -73,6 +76,7 @@ impl App {
             in_input_mode: false,
             input_text: String::new(),
             should_quit: false,
+            file_area_edited: false,
         }
     }
 
@@ -289,12 +293,14 @@ impl App {
             }
             Action::Delete => {
                 if !in_prefix && self.file_line >= 1 && self.file_line <= buf_len {
+                    self.ensure_screen_edit_snapshot();
                     let data_col = self.file_col.saturating_sub(PREFIX_COLS + 1);
                     self.editor.delete_char(self.file_line, data_col);
                 }
             }
             Action::Enter => {
                 self.process_enter();
+                self.file_area_edited = false;
             }
             Action::Tab => {
                 // Tab: cycle prefix → data → command line
@@ -302,12 +308,14 @@ impl App {
                     self.file_col = 7; // jump to data area
                 } else {
                     self.focus = CursorFocus::CommandLine;
+                    self.file_area_edited = false;
                 }
             }
             Action::BackTab => {
                 // Shift-Tab: reverse cycle
                 if in_prefix {
                     self.focus = CursorFocus::CommandLine;
+                    self.file_area_edited = false;
                 } else {
                     self.file_col = 1; // jump to prefix area
                 }
@@ -375,6 +383,7 @@ impl App {
                 // Escape in file area: return to command line, clear pending prefixes
                 self.prefix_inputs.clear();
                 self.focus = CursorFocus::CommandLine;
+                self.file_area_edited = false;
             }
             _ => {}
         }
@@ -437,12 +446,21 @@ impl App {
 
     // -- Data area editing --
 
+    /// Snapshot once per file-area editing session (first keystroke)
+    fn ensure_screen_edit_snapshot(&mut self) {
+        if !self.file_area_edited {
+            self.editor.snapshot_for_undo();
+            self.file_area_edited = true;
+        }
+    }
+
     fn type_in_data(&mut self, c: char) {
         let line = self.file_line;
         if line == 0 || line > self.editor.buffer().len() {
             return;
         }
 
+        self.ensure_screen_edit_snapshot();
         let data_col = self.file_col.saturating_sub(PREFIX_COLS + 1);
 
         if self.insert_mode {
@@ -461,6 +479,7 @@ impl App {
             return;
         }
 
+        self.ensure_screen_edit_snapshot();
         self.file_col -= 1;
         let data_col = self.file_col.saturating_sub(PREFIX_COLS + 1);
         self.editor.delete_char(line, data_col);
@@ -610,6 +629,7 @@ impl App {
             match req {
                 CursorRequest::Home => {
                     self.focus = CursorFocus::CommandLine;
+                    self.file_area_edited = false;
                     self.command_cursor = 0;
                 }
                 CursorRequest::File { line, col } => {
