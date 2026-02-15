@@ -488,22 +488,44 @@ impl App {
     // -- Enter processing (batch commit) --
 
     fn process_enter(&mut self) {
-        // Collect prefix commands
-        let mut prefixes: Vec<(usize, String)> = self.prefix_inputs.drain().collect();
-        prefixes.sort_by_key(|(line, _)| *line);
+        // Collect and parse prefix commands
+        let mut parsed: Vec<(usize, PrefixCommand)> = self
+            .prefix_inputs
+            .drain()
+            .filter_map(|(line, text)| PrefixCommand::parse(&text).map(|cmd| (line, cmd)))
+            .collect();
 
-        // Process prefix commands in line order
-        for (line_num, text) in &prefixes {
-            if let Some(cmd) = PrefixCommand::parse(text) {
-                match self.editor.execute_prefix(*line_num, &cmd) {
-                    Ok(result) => {
-                        if let Some(msg) = result.message {
-                            self.editor.set_message(msg);
-                        }
+        // Sort by priority, then by line number.
+        // Priority ordering ensures correct IBM XEDIT semantics:
+        //   0: SetCurrent (/) — non-modifying, safe first
+        //   1: Block markers (dd, cc, mm, "") — pair up before singles shift lines
+        //   2: Single-line modifying (d, i, a, ", >, <) — descending line order to
+        //      avoid line-number shifting
+        //   3: Pending copy/move (c, m) — sets up pending operation
+        //   4: Destination markers (f, p) — must run after the op they target
+        parsed.sort_by(|(line_a, cmd_a), (line_b, cmd_b)| {
+            let pri_a = prefix_priority(cmd_a);
+            let pri_b = prefix_priority(cmd_b);
+            pri_a.cmp(&pri_b).then_with(|| {
+                if pri_a == 2 {
+                    // Descending for single-line modifying ops (avoids line shift issues)
+                    line_b.cmp(line_a)
+                } else {
+                    line_a.cmp(line_b)
+                }
+            })
+        });
+
+        // Execute in priority order
+        for (line_num, cmd) in &parsed {
+            match self.editor.execute_prefix(*line_num, cmd) {
+                Ok(result) => {
+                    if let Some(msg) = result.message {
+                        self.editor.set_message(msg);
                     }
-                    Err(e) => {
-                        self.editor.set_message(e.to_string());
-                    }
+                }
+                Err(e) => {
+                    self.editor.set_message(e.to_string());
                 }
             }
         }
@@ -650,5 +672,25 @@ impl App {
         } else {
             self.file_line = 1.min(self.editor.buffer().len());
         }
+    }
+}
+
+/// Returns the execution priority for a prefix command.
+/// Lower numbers execute first. See `process_enter()` for rationale.
+fn prefix_priority(cmd: &PrefixCommand) -> u8 {
+    match cmd {
+        PrefixCommand::SetCurrent => 0,
+        PrefixCommand::DeleteBlock
+        | PrefixCommand::CopyBlock
+        | PrefixCommand::MoveBlock
+        | PrefixCommand::DuplicateBlock => 1,
+        PrefixCommand::Delete
+        | PrefixCommand::Insert(_)
+        | PrefixCommand::Add(_)
+        | PrefixCommand::Duplicate(_)
+        | PrefixCommand::ShiftRight(_)
+        | PrefixCommand::ShiftLeft(_) => 2,
+        PrefixCommand::Copy | PrefixCommand::Move => 3,
+        PrefixCommand::Following | PrefixCommand::Preceding => 4,
     }
 }

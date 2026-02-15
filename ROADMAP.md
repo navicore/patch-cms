@@ -89,7 +89,7 @@ genuinely embeddable standalone.
 - [x] PageUp/PageDown work in both focus modes
 
 ### TODO — refinements
-- [ ] Priority-ordered prefix processing (block ops before singles)
+- [x] Priority-ordered prefix processing (block ops before singles)
 
 ### Implementation approach
 - Add `CursorFocus` enum: `CommandLine | Prefix(line_num) | Data(line_num, col)`
