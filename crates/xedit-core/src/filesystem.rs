@@ -30,7 +30,13 @@ pub struct NativeFs;
 
 impl FileSystem for NativeFs {
     fn read_file(&self, file_id: &str) -> Result<String> {
-        std::fs::read_to_string(file_id).map_err(|_| XeditError::FileNotFound(file_id.to_string()))
+        std::fs::read_to_string(file_id).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                XeditError::FileNotFound(file_id.to_string())
+            } else {
+                XeditError::Io(e)
+            }
+        })
     }
 
     fn write_file(&self, file_id: &str, content: &str) -> Result<()> {
@@ -90,6 +96,31 @@ mod tests {
         let fs = NativeFs;
         let result = fs.read_file("/tmp/nonexistent_xedit_test_file_12345.txt");
         assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_fs_read_permission_denied() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "secret").unwrap();
+        tmp.flush().unwrap();
+
+        // Remove all permissions
+        let path = tmp.path().to_str().unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let fs = NativeFs;
+        let result = fs.read_file(path);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            XeditError::Io(_) => {} // should be Io, not FileNotFound
+            other => panic!("Expected Io error, got {:?}", other),
+        }
+
+        // Restore permissions so tempfile cleanup works
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
     }
 
     #[test]
