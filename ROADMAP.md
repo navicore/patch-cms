@@ -19,7 +19,7 @@ embeddable Rust library with full PARSE/INTERPRET/SIGNAL/TRACE support).
 ## Workspace Architecture
 
 ```
-patch-xedit/                        (may rename to patch-cms)
+patch-cms/
 ├── crates/
 │   ├── xedit-core/                  # Editor model — pure logic, no I/O deps
 │   ├── xedit-tui/                   # Terminal UI — 3270-style rendering
