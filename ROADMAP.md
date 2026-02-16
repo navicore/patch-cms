@@ -135,10 +135,12 @@ pad = (trunc.1 - length(text)) % 2
 - [x] Minidisk model (directory-backed disks with access modes)
 - [x] CmsFileSystem (read, write, state, listfile, erase, copyfile, rename)
 
+### Command processor — DONE
+- [x] Command processor (CMS command line, EXEC/REXX resolution)
+- [x] GLOBALV (session-scoped variable storage)
+- [x] PROFILE EXEC (startup macro)
+
 ### TODO — Phase 4 remaining
-- [ ] Command processor (CMS command line, EXEC/REXX resolution)
-- [ ] GLOBALV (session-scoped variable storage)
-- [ ] PROFILE EXEC (startup macro)
 - [ ] FileSystem trait integration with xedit-core
 - [ ] HELP facility
 

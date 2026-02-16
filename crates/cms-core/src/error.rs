@@ -14,6 +14,10 @@ pub enum CmsError {
     FileExists(String),
     /// Disk is read-only
     ReadOnly(char),
+    /// Command not found in table or on disk
+    UnknownCommand(String),
+    /// Bad syntax or arguments
+    InvalidCommand(String),
     /// Underlying filesystem error
     Io(io::Error),
 }
@@ -26,6 +30,8 @@ impl fmt::Display for CmsError {
             CmsError::DiskNotAccessed(letter) => write!(f, "Disk {} not accessed", letter),
             CmsError::FileExists(name) => write!(f, "File already exists: {}", name),
             CmsError::ReadOnly(letter) => write!(f, "Disk {} is read-only", letter),
+            CmsError::UnknownCommand(cmd) => write!(f, "Unknown CP/CMS command: {}", cmd),
+            CmsError::InvalidCommand(msg) => write!(f, "Invalid command: {}", msg),
             CmsError::Io(e) => write!(f, "I/O error: {}", e),
         }
     }
