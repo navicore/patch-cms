@@ -218,6 +218,34 @@ impl Editor {
         self.show_scale
     }
 
+    pub fn case_respect(&self) -> bool {
+        self.case_respect
+    }
+
+    pub fn hex(&self) -> bool {
+        self.hex
+    }
+
+    pub fn stay(&self) -> bool {
+        self.stay
+    }
+
+    pub fn wrap(&self) -> bool {
+        self.wrap
+    }
+
+    pub fn verify_start(&self) -> usize {
+        self.verify_start
+    }
+
+    pub fn verify_end(&self) -> usize {
+        self.verify_end
+    }
+
+    pub fn last_message(&self) -> Option<&str> {
+        self.message.as_deref()
+    }
+
     pub fn curline_position(&self) -> &CurLinePosition {
         &self.curline
     }
@@ -1056,6 +1084,9 @@ impl Editor {
                 } else {
                     self.set_pf_key(*num, Some(cmd.clone()));
                 }
+            }
+            SetCommand::MacroPath(paths) => {
+                self.macro_path = paths.clone();
             }
         }
         Ok(CommandResult::ok())

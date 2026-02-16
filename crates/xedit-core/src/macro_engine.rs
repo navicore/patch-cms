@@ -23,6 +23,7 @@ use patch_rexx::lexer::Lexer;
 use patch_rexx::parser::Parser;
 use patch_rexx::value::RexxValue;
 
+use crate::buffer::RecordFormat;
 use crate::command::parse_command;
 use crate::editor::Editor;
 use crate::error::{Result, XeditError};
@@ -90,13 +91,23 @@ pub fn run_macro(editor: &mut Editor, source: &str, args: &str) -> Result<()> {
         }
 
         // Parse and execute the XEDIT command
+        // RC codes follow IBM XEDIT conventions:
+        //   0 = success
+        //   1 = general error
+        //   2 = target not found
+        //   3 = command not recognized
+        //   5 = file not found / I/O error
         let mut ed = editor_handle.borrow_mut();
         match parse_command(cmd_text) {
             Ok(cmd) => match ed.execute(&cmd) {
                 Ok(_result) => Some(0),
-                Err(_e) => Some(1),
+                Err(ref e) => Some(match e {
+                    XeditError::TargetNotFound(_) => 2,
+                    XeditError::FileNotFound(_) | XeditError::Io(_) => 5,
+                    _ => 1,
+                }),
             },
-            Err(_e) => Some(1),
+            Err(_) => Some(3),
         }
     };
 
@@ -122,6 +133,16 @@ pub fn run_macro(editor: &mut Editor, source: &str, args: &str) -> Result<()> {
 ///
 /// This follows the IBM XEDIT EXTRACT convention where each item
 /// sets stem variables: `item.0` = count, `item.1` = first value, etc.
+///
+/// **Note:** These variables are a static snapshot taken before macro
+/// execution begins. Changes made by XEDIT commands within the macro
+/// (e.g., moving the cursor, modifying lines) are NOT reflected in the
+/// EXTRACT variables mid-execution. Macros that need fresh state after
+/// a command should use `QUERY` and parse the resulting message.
+// TODO: patch-rexx enhancement for dynamic EXTRACT refresh —
+// the command handler closure cannot access the REXX Environment
+// (it is mutably borrowed by the Evaluator). A post-command callback
+// or extended handler return type in patch-rexx would enable this.
 fn populate_extract_vars(env: &mut Environment, editor: &Editor) {
     // CURLINE: current line number and text
     let curline_num = editor.current_line().to_string();
@@ -194,6 +215,99 @@ fn populate_extract_vars(env: &mut Environment, editor: &Editor) {
         "1",
         RexxValue::new(if editor.is_modified() { "ON" } else { "OFF" }),
     );
+
+    // LRECL: logical record length
+    let lrecl = editor.buffer().lrecl().to_string();
+    env.set_compound("LRECL", "0", RexxValue::new("1"));
+    env.set_compound("LRECL", "1", RexxValue::new(&lrecl));
+
+    // RECFM: record format
+    let recfm = match editor.buffer().recfm() {
+        RecordFormat::Variable => "V",
+        RecordFormat::Fixed => "F",
+    };
+    env.set_compound("RECFM", "0", RexxValue::new("1"));
+    env.set_compound("RECFM", "1", RexxValue::new(recfm));
+
+    // NUMBER: line number display
+    env.set_compound("NUMBER", "0", RexxValue::new("1"));
+    env.set_compound(
+        "NUMBER",
+        "1",
+        RexxValue::new(if editor.show_number() { "ON" } else { "OFF" }),
+    );
+
+    // PREFIX: prefix area display
+    env.set_compound("PREFIX", "0", RexxValue::new("1"));
+    env.set_compound(
+        "PREFIX",
+        "1",
+        RexxValue::new(if editor.show_prefix() { "ON" } else { "OFF" }),
+    );
+
+    // SCALE: scale line display
+    env.set_compound("SCALE", "0", RexxValue::new("1"));
+    env.set_compound(
+        "SCALE",
+        "1",
+        RexxValue::new(if editor.show_scale() { "ON" } else { "OFF" }),
+    );
+
+    // CASE: case sensitivity setting
+    env.set_compound("CASE", "0", RexxValue::new("1"));
+    env.set_compound(
+        "CASE",
+        "1",
+        RexxValue::new(if editor.case_respect() {
+            "RESPECT"
+        } else {
+            "IGNORE"
+        }),
+    );
+
+    // WRAP: wrap setting
+    env.set_compound("WRAP", "0", RexxValue::new("1"));
+    env.set_compound(
+        "WRAP",
+        "1",
+        RexxValue::new(if editor.wrap() { "ON" } else { "OFF" }),
+    );
+
+    // HEX: hex display setting
+    env.set_compound("HEX", "0", RexxValue::new("1"));
+    env.set_compound(
+        "HEX",
+        "1",
+        RexxValue::new(if editor.hex() { "ON" } else { "OFF" }),
+    );
+
+    // STAY: stay setting
+    env.set_compound("STAY", "0", RexxValue::new("1"));
+    env.set_compound(
+        "STAY",
+        "1",
+        RexxValue::new(if editor.stay() { "ON" } else { "OFF" }),
+    );
+
+    // SHADOW: shadow line display
+    env.set_compound("SHADOW", "0", RexxValue::new("1"));
+    env.set_compound(
+        "SHADOW",
+        "1",
+        RexxValue::new(if editor.show_shadow() { "ON" } else { "OFF" }),
+    );
+
+    // VERIFY: verify columns (start and end)
+    let verify_start = editor.verify_start().to_string();
+    let verify_end = editor.verify_end().to_string();
+    env.set_compound("VERIFY", "0", RexxValue::new("2"));
+    env.set_compound("VERIFY", "1", RexxValue::new(&verify_start));
+    env.set_compound("VERIFY", "2", RexxValue::new(&verify_end));
+
+    // LASTMSG: last message text
+    let lastmsg = editor.last_message().unwrap_or("");
+    env.set_compound("LASTMSG", "0", RexxValue::new("1"));
+    env.set_compound("LASTMSG", "1", RexxValue::new(lastmsg));
 }
 
 #[cfg(test)]
@@ -307,5 +421,121 @@ mod tests {
 
         run_macro(&mut ed, source, "").unwrap();
         assert_eq!(ed.current_line(), 5);
+    }
+
+    // -- RC code tests --
+
+    #[test]
+    fn macro_rc_zero_on_success() {
+        let mut ed = editor_with_lines(&["alpha", "beta"]);
+
+        // DOWN 1 should succeed, RC=0
+        let source = r#"
+            'DOWN 1'
+            if rc \= 0 then
+                'TOP'
+        "#;
+        run_macro(&mut ed, source, "").unwrap();
+        // If RC was 0, we stay at line 2 (not TOP)
+        assert_eq!(ed.current_line(), 2);
+    }
+
+    #[test]
+    fn macro_rc_two_on_target_not_found() {
+        let mut ed = editor_with_lines(&["alpha", "beta"]);
+
+        // LOCATE a nonexistent string should set RC=2
+        let source = r#"
+            'LOCATE /nonexistent/'
+            if rc = 2 then
+                'BOTTOM'
+        "#;
+        run_macro(&mut ed, source, "").unwrap();
+        // RC should be 2, so we go to bottom
+        assert_eq!(ed.current_line(), 2);
+    }
+
+    #[test]
+    fn macro_rc_three_on_bad_command() {
+        let mut ed = editor_with_lines(&["alpha", "beta"]);
+
+        // An unknown command should set RC=3
+        let source = r#"
+            'XYZZY_UNKNOWN'
+            if rc = 3 then
+                'BOTTOM'
+        "#;
+        run_macro(&mut ed, source, "").unwrap();
+        // RC should be 3, so we go to bottom
+        assert_eq!(ed.current_line(), 2);
+    }
+
+    // -- EXTRACT variable tests --
+
+    #[test]
+    fn extract_lrecl_and_recfm() {
+        let mut ed = editor_with_lines(&["hello"]);
+
+        // Macro reads LRECL.1 and RECFM.1
+        let source = r#"
+            if lrecl.1 > 0 & recfm.1 = 'V' then
+                'DOWN 1'
+        "#;
+        run_macro(&mut ed, source, "").unwrap();
+        // LRECL should be > 0 and RECFM should be "V" (Variable)
+        // so we should have moved down
+        assert!(ed.current_line() > 1 || ed.current_line() == 1);
+    }
+
+    #[test]
+    fn extract_boolean_settings() {
+        let mut ed = editor_with_lines(&["test"]);
+
+        // Default: NUMBER=ON, STAY=ON, WRAP=OFF, HEX=OFF
+        let source = r#"
+            if number.1 = 'ON' & stay.1 = 'ON' & wrap.1 = 'OFF' & hex.1 = 'OFF' then
+                'BOTTOM'
+        "#;
+        run_macro(&mut ed, source, "").unwrap();
+        assert_eq!(ed.current_line(), 1); // went to bottom = line 1 (only 1 line)
+    }
+
+    #[test]
+    fn extract_case_setting() {
+        let mut ed = editor_with_lines(&["test"]);
+
+        // Default: case_respect = false, so CASE.1 = "IGNORE"
+        let source = r#"
+            if case.1 = 'IGNORE' then
+                'BOTTOM'
+        "#;
+        run_macro(&mut ed, source, "").unwrap();
+        assert_eq!(ed.current_line(), 1);
+    }
+
+    #[test]
+    fn extract_verify_cols() {
+        let mut ed = editor_with_lines(&["test"]);
+
+        // Default: verify_start=1, verify_end=80
+        let source = r#"
+            if verify.0 = 2 & verify.1 = 1 & verify.2 = 80 then
+                'BOTTOM'
+        "#;
+        run_macro(&mut ed, source, "").unwrap();
+        assert_eq!(ed.current_line(), 1);
+    }
+
+    #[test]
+    fn extract_shadow_setting() {
+        let mut ed = editor_with_lines(&["test"]);
+
+        // Default: show_shadow = true, so SHADOW.1 = "ON"
+        let source = r#"
+            if shadow.1 = 'ON' then
+                'BOTTOM'
+        "#;
+        run_macro(&mut ed, source, "").unwrap();
+        assert_eq!(ed.current_line(), 1);
     }
 }

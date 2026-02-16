@@ -99,27 +99,25 @@ genuinely embeddable standalone.
 - Enter: collect all prefix inputs, execute them, then execute command line
 - Home/End: move within current area
 
-## Phase 3: REXX Macro Integration
+## Phase 3: REXX Macro Integration — DONE
 
 Wire `patch-rexx` as a dependency of `xedit-core`.
 
-### EXTRACT command
-- EXTRACT /CURLINE/ → current line number and text
-- EXTRACT /FNAME/ /FTYPE/ /FMODE/ → file identity
-- EXTRACT /SIZE/ → buffer size
-- EXTRACT /LINE/ → current line content
-- EXTRACT /COLUMN/ → current column
-- EXTRACT /TRUNC/ /ZONE/ /VERIFY/ → settings
-- Sets REXX variables in the caller's environment
+### Done
+- [x] EXTRACT variables: CURLINE, SIZE, LINE, COLUMN, FNAME, FTYPE, FMODE, TRUNC, ALT, TOF, EOF, MODIFIED
+- [x] EXTRACT variables (added): LRECL, RECFM, NUMBER, PREFIX, SCALE, CASE, WRAP, HEX, STAY, SHADOW, VERIFY, LASTMSG
+- [x] COMMAND interface: REXX macros call XEDIT commands via `'COMMAND LOCATE /foo/'`
+- [x] ADDRESS XEDIT command routing with IBM-style RC codes (0=success, 1=error, 2=target not found, 3=bad command, 5=file I/O)
+- [x] SET MACRO PATH command — configure search directories for .xedit macros
+- [x] MACRO command — load and execute named macros
+- [x] PROFILE XEDIT — auto-run macro on file open
+- [x] Macro arguments via `parse arg`
 
-### COMMAND interface
-- REXX macros call XEDIT commands via `'COMMAND LOCATE /foo/'`
-- The editor executes them and returns RC
-
-### Macro loading
-- `SET MACRO PATH path` — where to find .xedit macros
-- Macros are REXX programs that use EXTRACT and COMMAND
-- PROFILE XEDIT — auto-run macro on file open
+### Limitation
+- EXTRACT variables are a static snapshot taken before macro execution. Mid-macro
+  changes (cursor moves, edits) are not reflected. Macros needing fresh state
+  should use `QUERY` and parse the message. Dynamic refresh requires a
+  `patch-rexx` enhancement (post-command callback or extended handler return type).
 
 ### Example macro (what we're targeting)
 ```rexx
