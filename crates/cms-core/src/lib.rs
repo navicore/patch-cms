@@ -1,9 +1,15 @@
+pub mod command;
 pub mod error;
 pub mod filespec;
 pub mod filesystem;
+pub mod globalv;
 pub mod minidisk;
 
+pub use command::{
+    CmsCommand, CmsCommandResult, CommandProcessor, ExecHandler, GlobalvSubcommand, NoExecHandler,
+};
 pub use error::{CmsError, Result};
 pub use filespec::FileSpec;
 pub use filesystem::{CmsFileSystem, FileInfo};
+pub use globalv::GlobalVars;
 pub use minidisk::{AccessMode, Minidisk};
