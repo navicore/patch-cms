@@ -130,23 +130,17 @@ pad = (trunc.1 - length(text)) % 2
 
 ## Phase 4: CMS Core
 
-### File system model
-- **fn ft fm** addressing (FILENAME FILETYPE FILEMODE)
-- Filemode letters A-Z with access modes (A1 = read/write, etc.)
-- LISTFILE, STATE, COPYFILE, ERASE, RENAME commands
-- Minidisk concept (directories mapped to filemode letters)
-- Could map to real directories: A → $HOME/cms/a/, etc.
+### File system model — DONE
+- [x] FileSpec type (fn ft fm parsing and validation)
+- [x] Minidisk model (directory-backed disks with access modes)
+- [x] CmsFileSystem (read, write, state, listfile, erase, copyfile, rename)
 
-### Command processor
-- CMS command line with EXEC/REXX resolution
-- EXEC: legacy command procedure language
-- Search order: EXEC → REXX → builtin → external
-- PROFILE EXEC — auto-run on "IPL" (startup)
-- GLOBALV — global variable storage across commands
-
-### HELP facility
-- HELP command with paneled help text
-- Could use markdown files as help source
+### TODO — Phase 4 remaining
+- [ ] Command processor (CMS command line, EXEC/REXX resolution)
+- [ ] GLOBALV (session-scoped variable storage)
+- [ ] PROFILE EXEC (startup macro)
+- [ ] FileSystem trait integration with xedit-core
+- [ ] HELP facility
 
 ## Phase 5: CMS Spool System
 

@@ -1,0 +1,9 @@
+[package]
+name = "cms-core"
+description = "CMS file system model — fn ft fm addressing and minidisk operations"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
