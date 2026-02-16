@@ -1,6 +1,6 @@
 use crate::editor::Editor;
 use crate::error::{Result, XeditError};
-use std::path::Path;
+use crate::filesystem::FileSystem;
 
 /// The file ring — XEDIT's model for multiple open files.
 ///
@@ -28,9 +28,22 @@ impl Ring {
     }
 
     /// Add a file to the ring
-    pub fn add_file(&mut self, path: &Path) -> Result<&mut Editor> {
+    pub fn add_file(&mut self, file_id: &str) -> Result<&mut Editor> {
         let mut editor = Editor::new();
-        editor.load_file(path)?;
+        editor.load_file(file_id)?;
+        self.editors.push(editor);
+        self.current = self.editors.len() - 1;
+        Ok(&mut self.editors[self.current])
+    }
+
+    /// Add a file to the ring with a custom filesystem implementation
+    pub fn add_file_with_fs(
+        &mut self,
+        file_id: &str,
+        fs: Box<dyn FileSystem>,
+    ) -> Result<&mut Editor> {
+        let mut editor = Editor::with_fs(fs);
+        editor.load_file(file_id)?;
         self.editors.push(editor);
         self.current = self.editors.len() - 1;
         Ok(&mut self.editors[self.current])
@@ -140,7 +153,7 @@ mod tests {
         tmp.flush().unwrap();
 
         let mut ring = Ring::new();
-        ring.add_file(tmp.path()).unwrap();
+        ring.add_file(tmp.path().to_str().unwrap()).unwrap();
         assert_eq!(ring.len(), 1);
 
         let editor = ring.current().unwrap();
@@ -150,7 +163,7 @@ mod tests {
     #[test]
     fn add_file_not_found() {
         let mut ring = Ring::new();
-        let result = ring.add_file(Path::new("/tmp/nonexistent_xedit_test_file.txt"));
+        let result = ring.add_file("/tmp/nonexistent_xedit_test_file.txt");
         assert!(result.is_err());
     }
 

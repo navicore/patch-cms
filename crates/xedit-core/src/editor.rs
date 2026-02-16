@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::fmt;
 
 use crate::buffer::Buffer;
 use crate::command::*;
 use crate::error::{Result, XeditError};
+use crate::filesystem::{FileSystem, NativeFs};
 use crate::prefix::*;
 use crate::target::Target;
 
@@ -30,7 +30,6 @@ struct UndoSnapshot {
 /// This is a pure data model with no I/O beyond file loading/saving.
 /// It is designed to be embedded: the TUI or host application drives it
 /// by calling `execute()` with parsed commands and rendering the state.
-#[derive(Debug)]
 pub struct Editor {
     buffer: Buffer,
     /// Current line: 0 = Top of File, 1..=len = file lines
@@ -42,8 +41,11 @@ pub struct Editor {
     filename: String,
     filetype: String,
     filemode: String,
-    filepath: Option<PathBuf>,
+    file_id: Option<String>,
     readonly: bool,
+
+    // Filesystem abstraction
+    fs: Box<dyn FileSystem>,
 
     // Settings
     trunc: usize,
@@ -65,7 +67,7 @@ pub struct Editor {
 
     // Macro settings
     /// Search path for REXX macros (directories to check)
-    macro_path: Vec<PathBuf>,
+    macro_path: Vec<String>,
 
     // Operational state
     alt_count: usize,
@@ -96,6 +98,21 @@ pub struct Editor {
     data_stack: VecDeque<String>,
 }
 
+impl fmt::Debug for Editor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Editor")
+            .field("current_line", &self.current_line)
+            .field("current_col", &self.current_col)
+            .field("filename", &self.filename)
+            .field("filetype", &self.filetype)
+            .field("filemode", &self.filemode)
+            .field("file_id", &self.file_id)
+            .field("alt_count", &self.alt_count)
+            .field("buffer_len", &self.buffer.len())
+            .finish()
+    }
+}
+
 /// Classic VM/CMS XEDIT default PF key assignments
 fn default_pf_keys() -> [Option<String>; 24] {
     let mut keys: [Option<String>; 24] = Default::default();
@@ -116,6 +133,11 @@ fn default_pf_keys() -> [Option<String>; 24] {
 
 impl Editor {
     pub fn new() -> Self {
+        Self::with_fs(Box::new(NativeFs))
+    }
+
+    /// Create an editor with a custom filesystem implementation.
+    pub fn with_fs(fs: Box<dyn FileSystem>) -> Self {
         Self {
             buffer: Buffer::new(),
             current_line: 0,
@@ -123,8 +145,9 @@ impl Editor {
             filename: String::new(),
             filetype: String::new(),
             filemode: "A1".to_string(),
-            filepath: None,
+            file_id: None,
             readonly: false,
+            fs,
             trunc: 72,
             zone_left: 1,
             zone_right: 72,
@@ -139,7 +162,7 @@ impl Editor {
             verify_start: 1,
             verify_end: 80,
             pf_keys: default_pf_keys(),
-            macro_path: vec![PathBuf::from(".")],
+            macro_path: vec![".".to_string()],
             alt_count: 0,
             message: None,
             pending_block: None,
@@ -436,12 +459,12 @@ impl Editor {
     }
 
     /// Set the macro search path (list of directories)
-    pub fn set_macro_path(&mut self, paths: Vec<PathBuf>) {
+    pub fn set_macro_path(&mut self, paths: Vec<String>) {
         self.macro_path = paths;
     }
 
     /// Get the macro search path
-    pub fn macro_path(&self) -> &[PathBuf] {
+    pub fn macro_path(&self) -> &[String] {
         &self.macro_path
     }
 
@@ -552,9 +575,9 @@ impl Editor {
         }
     }
 
-    /// Search the macro path for a macro file, returning its full path and contents.
+    /// Search the macro path for a macro file, returning its file ID and contents.
     #[cfg(feature = "rexx")]
-    fn find_macro(&self, name: &str) -> Option<(PathBuf, String)> {
+    fn find_macro(&self, name: &str) -> Option<(String, String)> {
         let candidates = [
             format!("{}.xedit", name),
             name.to_string(),
@@ -563,9 +586,9 @@ impl Editor {
         ];
         for dir in &self.macro_path {
             for candidate in &candidates {
-                let path = dir.join(candidate);
-                if let Ok(source) = fs::read_to_string(&path) {
-                    return Some((path, source));
+                let file_id = format!("{}/{}", dir, candidate);
+                if let Ok(source) = self.fs.read_file(&file_id) {
+                    return Some((file_id, source));
                 }
             }
         }
@@ -611,19 +634,17 @@ impl Editor {
 
     // -- File operations --
 
-    pub fn load_file(&mut self, path: &Path) -> Result<()> {
-        let content = fs::read_to_string(path)
-            .map_err(|_| XeditError::FileNotFound(path.display().to_string()))?;
+    pub fn load_file(&mut self, file_id: &str) -> Result<()> {
+        let content = self.fs.read_file(file_id)?;
         let lines: Vec<String> = content.lines().map(String::from).collect();
         self.buffer = Buffer::from_lines(lines);
 
-        if let Some(stem) = path.file_stem() {
-            self.filename = stem.to_string_lossy().to_uppercase();
+        if let Some(identity) = self.fs.parse_file_id(file_id) {
+            self.filename = identity.filename;
+            self.filetype = identity.filetype;
+            self.filemode = identity.filemode;
         }
-        if let Some(ext) = path.extension() {
-            self.filetype = ext.to_string_lossy().to_uppercase();
-        }
-        self.filepath = Some(path.to_path_buf());
+        self.file_id = Some(file_id.to_string());
 
         let max_width = self
             .buffer
@@ -644,7 +665,7 @@ impl Editor {
     }
 
     pub fn save_file(&mut self) -> Result<()> {
-        let path = self.filepath.as_ref().ok_or(XeditError::NoFile)?;
+        let file_id = self.file_id.clone().ok_or(XeditError::NoFile)?;
         if self.readonly {
             return Err(XeditError::ReadOnly);
         }
@@ -662,7 +683,7 @@ impl Editor {
             content + "\n"
         };
 
-        fs::write(path, &content)?;
+        self.fs.write_file(&file_id, &content)?;
         self.buffer.clear_modified();
         self.alt_count = 0;
         Ok(())
@@ -1026,9 +1047,7 @@ impl Editor {
     }
 
     fn cmd_get(&mut self, filename: &str) -> Result<CommandResult> {
-        let path = Path::new(filename);
-        let content =
-            fs::read_to_string(path).map_err(|_| XeditError::FileNotFound(filename.to_string()))?;
+        let content = self.fs.read_file(filename)?;
         let lines: Vec<String> = content.lines().map(String::from).collect();
         let count = lines.len();
         self.snapshot_for_undo();
@@ -1770,12 +1789,12 @@ mod tests {
         let data_path = dir.path().join("test.txt");
 
         // Profile macro: set number off, move to bottom
-        fs::write(&profile_path, "/* PROFILE */\n'SET NUMBER OFF'\n'BOTTOM'\n").unwrap();
-        fs::write(&data_path, "line1\nline2\nline3\n").unwrap();
+        std::fs::write(&profile_path, "/* PROFILE */\n'SET NUMBER OFF'\n'BOTTOM'\n").unwrap();
+        std::fs::write(&data_path, "line1\nline2\nline3\n").unwrap();
 
         let mut ed = Editor::new();
-        ed.set_macro_path(vec![dir.path().to_path_buf()]);
-        ed.load_file(&data_path).unwrap();
+        ed.set_macro_path(vec![dir.path().to_str().unwrap().to_string()]);
+        ed.load_file(data_path.to_str().unwrap()).unwrap();
         ed.run_profile();
 
         // Profile should have turned off line numbers
@@ -1790,11 +1809,11 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
 
         let data_path = dir.path().join("test.txt");
-        fs::write(&data_path, "hello\n").unwrap();
+        std::fs::write(&data_path, "hello\n").unwrap();
 
         let mut ed = Editor::new();
-        ed.set_macro_path(vec![dir.path().to_path_buf()]);
-        ed.load_file(&data_path).unwrap();
+        ed.set_macro_path(vec![dir.path().to_str().unwrap().to_string()]);
+        ed.load_file(data_path.to_str().unwrap()).unwrap();
         ed.run_profile(); // should not error
 
         assert!(ed.message().is_none());
@@ -1813,12 +1832,12 @@ mod tests {
 if ftype.1 = 'RS' then
     'SET CASE RESPECT'
 "#;
-        fs::write(&profile_path, profile).unwrap();
-        fs::write(&data_path, "fn main() {}\n").unwrap();
+        std::fs::write(&profile_path, profile).unwrap();
+        std::fs::write(&data_path, "fn main() {}\n").unwrap();
 
         let mut ed = Editor::new();
-        ed.set_macro_path(vec![dir.path().to_path_buf()]);
-        ed.load_file(&data_path).unwrap();
+        ed.set_macro_path(vec![dir.path().to_str().unwrap().to_string()]);
+        ed.load_file(data_path.to_str().unwrap()).unwrap();
         ed.run_profile();
 
         // Verify case-sensitive locate: uppercase "FN" should NOT match lowercase "fn"

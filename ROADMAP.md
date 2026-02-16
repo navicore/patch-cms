@@ -141,7 +141,7 @@ pad = (trunc.1 - length(text)) % 2
 - [x] PROFILE EXEC (startup macro)
 
 ### TODO — Phase 4 remaining
-- [ ] FileSystem trait integration with xedit-core
+- [x] FileSystem trait integration with xedit-core
 - [ ] HELP facility
 
 ## Phase 5: CMS Spool System
