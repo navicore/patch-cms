@@ -75,17 +75,22 @@ pub fn run_macro(editor: &mut Editor, source: &str, args: &str) -> Result<()> {
         }
 
         // Strip leading "COMMAND " prefix if present (XEDIT convention)
-        let cmd_text = command
-            .strip_prefix("COMMAND ")
-            .or_else(|| command.strip_prefix("command "))
-            .unwrap_or(command)
-            .trim();
+        // Case-insensitive: REXX doesn't preserve keyword case
+        let cmd_text = if command.len() >= 8 && command[..8].eq_ignore_ascii_case("COMMAND ") {
+            &command[8..]
+        } else {
+            command
+        }
+        .trim();
 
         if cmd_text.is_empty() {
             return Some(0);
         }
 
-        // Handle EXTRACT specially — pre-populated before execution
+        // Handle EXTRACT specially — all variables are pre-populated before
+        // execution, so EXTRACT commands are acknowledged without re-parsing.
+        // This is a simplification: IBM XEDIT EXTRACT selectively populates
+        // only the requested stems. Here all stems are always available.
         if cmd_text.to_uppercase().starts_with("EXTRACT ") {
             return Some(0);
         }
@@ -121,7 +126,11 @@ pub fn run_macro(editor: &mut Editor, source: &str, args: &str) -> Result<()> {
     // Swap the editor state back, dropping the Rc wrapper
     drop(evaluator); // release the handler's Rc clone
     let recovered = Rc::try_unwrap(shared_editor)
-        .expect("macro engine: editor Rc should have single owner after evaluator drop")
+        .map_err(|_| {
+            XeditError::InvalidCommand(
+                "REXX macro: internal state error (multiple references)".to_string(),
+            )
+        })?
         .into_inner();
     *editor = recovered;
 
@@ -474,17 +483,16 @@ mod tests {
 
     #[test]
     fn extract_lrecl_and_recfm() {
-        let mut ed = editor_with_lines(&["hello"]);
+        let mut ed = editor_with_lines(&["hello", "world"]);
 
-        // Macro reads LRECL.1 and RECFM.1
+        // Macro reads LRECL.1 and RECFM.1; if both match, move down
         let source = r#"
             if lrecl.1 > 0 & recfm.1 = 'V' then
                 'DOWN 1'
         "#;
         run_macro(&mut ed, source, "").unwrap();
-        // LRECL should be > 0 and RECFM should be "V" (Variable)
-        // so we should have moved down
-        assert!(ed.current_line() > 1 || ed.current_line() == 1);
+        // LRECL > 0 and RECFM = "V" (Variable), so DOWN 1 executed
+        assert_eq!(ed.current_line(), 2);
     }
 
     #[test]
