@@ -60,9 +60,13 @@ impl Minidisk {
         self.path.join(name)
     }
 
-    /// Check whether a file exists on this disk.
+    /// Check whether a regular file (not a symlink) exists on this disk.
     pub fn file_exists(&self, filename: &str, filetype: &str) -> bool {
-        self.file_path(filename, filetype).is_file()
+        let path = self.file_path(filename, filetype);
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) => meta.file_type().is_file(),
+            Err(_) => false,
+        }
     }
 
     /// Create the disk directory if it doesn't exist.

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::io::BufRead;
 use std::path::Path;
 
 use crate::error::{CmsError, Result};
@@ -11,6 +12,21 @@ pub struct FileInfo {
     pub spec: FileSpec,
     pub size_bytes: u64,
     pub line_count: usize,
+}
+
+/// Count lines in a file using buffered I/O (avoids reading entire file into memory).
+fn count_lines(path: &Path) -> std::io::Result<usize> {
+    let file = std::fs::File::open(path)?;
+    let reader = std::io::BufReader::new(file);
+    Ok(reader.lines().count())
+}
+
+/// Returns true if the path is a regular file (not a symlink).
+fn is_regular_file(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta.file_type().is_file(),
+        Err(_) => false,
+    }
 }
 
 /// Multi-disk CMS file system.
@@ -44,13 +60,13 @@ impl CmsFileSystem {
         path: impl Into<std::path::PathBuf>,
         access: AccessMode,
     ) -> Result<()> {
-        let letter = letter.to_ascii_uppercase();
-        if !letter.is_ascii_uppercase() {
+        if !letter.is_ascii_alphabetic() {
             return Err(CmsError::InvalidFileSpec(format!(
                 "Disk letter must be A-Z, got '{}'",
                 letter
             )));
         }
+        let letter = letter.to_ascii_uppercase();
         let disk = Minidisk::new(letter, path.into(), access);
         disk.ensure_dir()?;
         self.disks.insert(letter, disk);
@@ -91,10 +107,7 @@ impl CmsFileSystem {
     pub fn state(&self, spec: &FileSpec) -> Result<FileInfo> {
         let path = self.resolve_file(spec)?;
         let metadata = std::fs::metadata(&path)?;
-        let content = std::fs::read_to_string(&path)?;
-        let line_count = content.lines().count();
-
-        // Determine which disk the file is on
+        let line_count = count_lines(&path)?;
         let resolved_spec = self.resolve_spec(spec)?;
 
         Ok(FileInfo {
@@ -118,15 +131,14 @@ impl CmsFileSystem {
 
             for entry in entries.flatten() {
                 let path = entry.path();
-                if !path.is_file() {
+                if !is_regular_file(&path) {
                     continue;
                 }
 
                 if let Some(spec) = self.path_to_spec(&path, disk.letter()) {
                     if pattern.matches(&spec) {
                         let metadata = std::fs::metadata(&path)?;
-                        let content = std::fs::read_to_string(&path)?;
-                        let line_count = content.lines().count();
+                        let line_count = count_lines(&path)?;
                         results.push(FileInfo {
                             spec,
                             size_bytes: metadata.len(),
@@ -158,7 +170,7 @@ impl CmsFileSystem {
         }
         let disk = self.get_writable_disk(spec.mode_letter())?;
         let path = disk.file_path(spec.filename(), spec.filetype());
-        if !path.is_file() {
+        if !is_regular_file(&path) {
             return Err(CmsError::FileNotFound(spec.to_string()));
         }
         std::fs::remove_file(&path)?;
@@ -193,11 +205,11 @@ impl CmsFileSystem {
         }
         let disk = self.get_writable_disk(from.mode_letter())?;
         let src = disk.file_path(from.filename(), from.filetype());
-        if !src.is_file() {
+        if !is_regular_file(&src) {
             return Err(CmsError::FileNotFound(from.to_string()));
         }
         let dst = disk.file_path(to.filename(), to.filetype());
-        if dst.is_file() {
+        if is_regular_file(&dst) {
             return Err(CmsError::FileExists(to.to_string()));
         }
         std::fs::rename(&src, &dst)?;
@@ -231,7 +243,7 @@ impl CmsFileSystem {
 
         for disk in &disks {
             let path = disk.file_path(spec.filename(), spec.filetype());
-            if path.is_file() {
+            if is_regular_file(&path) {
                 return Ok(path);
             }
         }
@@ -549,6 +561,35 @@ mod tests {
         fs.write_file(&dst, "two").unwrap();
         let err = fs.rename(&src, &dst).unwrap_err();
         assert!(matches!(err, CmsError::FileExists(_)));
+    }
+
+    #[test]
+    fn state_empty_file() {
+        let (_dir, fs) = setup_fs();
+        let spec = FileSpec::parse("EMPTY DATA A").unwrap();
+        fs.write_file(&spec, "").unwrap();
+        let info = fs.state(&spec).unwrap();
+        assert_eq!(info.line_count, 0);
+        assert_eq!(info.size_bytes, 0);
+    }
+
+    #[test]
+    fn state_no_trailing_newline() {
+        let (_dir, fs) = setup_fs();
+        let spec = FileSpec::parse("NOTAIL DATA A").unwrap();
+        fs.write_file(&spec, "line one\nline two").unwrap();
+        let info = fs.state(&spec).unwrap();
+        assert_eq!(info.line_count, 2);
+    }
+
+    #[test]
+    fn access_disk_rejects_non_alpha() {
+        let dir = TempDir::new().unwrap();
+        let mut fs = CmsFileSystem::new();
+        let err = fs
+            .access_disk('1', dir.path().join("x"), AccessMode::ReadWrite)
+            .unwrap_err();
+        assert!(matches!(err, CmsError::InvalidFileSpec(_)));
     }
 
     #[test]

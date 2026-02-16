@@ -365,6 +365,19 @@ mod tests {
     }
 
     #[test]
+    fn has_wildcards_ignores_mode_letter() {
+        // mode_letter '*' is a search directive, not a filename/filetype wildcard
+        let spec = FileSpec::parse("MYFILE DATA *").unwrap();
+        assert!(!spec.has_wildcards());
+    }
+
+    #[test]
+    fn reject_non_ascii_chars() {
+        let result = FileSpec::parse("caf\u{00e9} DATA A");
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn reject_single_token() {
         let result = FileSpec::parse("ONLYNAME");
         assert!(result.is_err());
