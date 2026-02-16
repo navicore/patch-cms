@@ -15,10 +15,11 @@ pub struct FileInfo {
 }
 
 /// Count lines in a file using buffered I/O (avoids reading entire file into memory).
+/// Lines that fail to decode (e.g. invalid UTF-8) are skipped rather than counted.
 fn count_lines(path: &Path) -> std::io::Result<usize> {
     let file = std::fs::File::open(path)?;
     let reader = std::io::BufReader::new(file);
-    Ok(reader.lines().count())
+    Ok(reader.lines().map_while(|l| l.ok()).count())
 }
 
 /// Returns true if the path is a regular file (not a symlink).
@@ -192,6 +193,9 @@ impl CmsFileSystem {
     }
 
     /// Rename a file. Both specs must be on the same disk.
+    ///
+    /// Note: The destination-exists check is best-effort (TOCTOU race with
+    /// concurrent processes). Acceptable for a single-user CMS environment.
     pub fn rename(&self, from: &FileSpec, to: &FileSpec) -> Result<()> {
         if from.has_wildcards() || to.has_wildcards() {
             return Err(CmsError::InvalidFileSpec(
@@ -607,5 +611,30 @@ mod tests {
         let pattern = FileSpec::parse("FILE1 EXEC *").unwrap();
         let files = fs.listfile(&pattern).unwrap();
         assert_eq!(files.len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_ignored() {
+        let (_dir, fs) = setup_fs();
+        // Write a real file
+        let real = FileSpec::parse("REAL DATA A").unwrap();
+        fs.write_file(&real, "real content").unwrap();
+
+        // Create a symlink in the same disk directory
+        let disk = fs.disk('A').unwrap();
+        let link_path = disk.file_path("LINK", "DATA");
+        let real_path = disk.file_path("REAL", "DATA");
+        std::os::unix::fs::symlink(&real_path, &link_path).unwrap();
+
+        // Symlink should not be visible via read_file
+        let link_spec = FileSpec::parse("LINK DATA A").unwrap();
+        assert!(fs.read_file(&link_spec).is_err());
+
+        // Symlink should not appear in listfile
+        let pattern = FileSpec::parse("* DATA A").unwrap();
+        let files = fs.listfile(&pattern).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].spec.filename(), "REAL");
     }
 }
