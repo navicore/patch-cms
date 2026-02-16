@@ -2,7 +2,6 @@ mod app;
 mod input;
 mod screen;
 
-use std::path::Path;
 use std::process;
 
 fn main() {
@@ -11,8 +10,7 @@ fn main() {
     let mut app = app::App::new();
 
     if args.len() > 1 {
-        let path = Path::new(&args[1]);
-        if let Err(e) = app.load_file(path) {
+        if let Err(e) = app.load_file(&args[1]) {
             eprintln!("Error: {}", e);
             process::exit(1);
         }

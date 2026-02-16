@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use crate::target::Target;
 
 /// XEDIT command line commands
@@ -95,7 +93,7 @@ pub enum SetCommand {
     /// SET PFn command_text (1-24)
     Pf(usize, String),
     /// SET MACRO PATH dir1 dir2 ...
-    MacroPath(Vec<PathBuf>),
+    MacroPath(Vec<String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -586,10 +584,10 @@ fn parse_set_args(args: &str) -> Result<Command, String> {
         if next_word.to_uppercase() != "PATH" {
             return Err(format!("SET MACRO: expected PATH, got: {}", next_word));
         }
-        let paths: Vec<PathBuf> = if rest.trim().is_empty() {
-            vec![PathBuf::from(".")]
+        let paths: Vec<String> = if rest.trim().is_empty() {
+            vec![".".to_string()]
         } else {
-            rest.split_whitespace().map(PathBuf::from).collect()
+            rest.split_whitespace().map(String::from).collect()
         };
         Ok(Command::Set(SetCommand::MacroPath(paths)))
     } else if let Some(num_str) = subcmd_upper.strip_prefix("PF") {
@@ -971,7 +969,7 @@ mod tests {
         match parse_command("set mac path /tmp/macros").unwrap() {
             Command::Set(SetCommand::MacroPath(ref paths)) => {
                 assert_eq!(paths.len(), 1);
-                assert_eq!(paths[0], PathBuf::from("/tmp/macros"));
+                assert_eq!(paths[0], "/tmp/macros");
             }
             other => panic!("Expected Set(MacroPath), got {:?}", other),
         }
@@ -982,9 +980,9 @@ mod tests {
         match parse_command("set mac path /dir1 /dir2 /dir3").unwrap() {
             Command::Set(SetCommand::MacroPath(ref paths)) => {
                 assert_eq!(paths.len(), 3);
-                assert_eq!(paths[0], PathBuf::from("/dir1"));
-                assert_eq!(paths[1], PathBuf::from("/dir2"));
-                assert_eq!(paths[2], PathBuf::from("/dir3"));
+                assert_eq!(paths[0], "/dir1");
+                assert_eq!(paths[1], "/dir2");
+                assert_eq!(paths[2], "/dir3");
             }
             other => panic!("Expected Set(MacroPath) with 3 dirs, got {:?}", other),
         }
@@ -995,7 +993,7 @@ mod tests {
         match parse_command("set mac path").unwrap() {
             Command::Set(SetCommand::MacroPath(ref paths)) => {
                 assert_eq!(paths.len(), 1);
-                assert_eq!(paths[0], PathBuf::from("."));
+                assert_eq!(paths[0], ".");
             }
             other => panic!("Expected Set(MacroPath) with default, got {:?}", other),
         }

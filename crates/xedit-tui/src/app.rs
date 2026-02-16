@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::io;
-use std::path::Path;
 
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -80,8 +79,8 @@ impl App {
         }
     }
 
-    pub fn load_file(&mut self, path: &Path) -> xedit_core::error::Result<()> {
-        self.editor.load_file(path)?;
+    pub fn load_file(&mut self, file_id: &str) -> xedit_core::error::Result<()> {
+        self.editor.load_file(file_id)?;
         // Run PROFILE XEDIT macro if it exists (customizes settings on file open)
         #[cfg(feature = "rexx")]
         self.editor.run_profile();

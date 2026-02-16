@@ -2,6 +2,7 @@ pub mod buffer;
 pub mod command;
 pub mod editor;
 pub mod error;
+pub mod filesystem;
 #[cfg(feature = "rexx")]
 pub mod macro_engine;
 pub mod prefix;

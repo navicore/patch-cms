@@ -4,6 +4,7 @@ pub mod filespec;
 pub mod filesystem;
 pub mod globalv;
 pub mod minidisk;
+pub mod xedit_adapter;
 
 pub use command::{
     CmsCommand, CmsCommandResult, CommandProcessor, ExecHandler, GlobalvSubcommand, NoExecHandler,
@@ -13,3 +14,4 @@ pub use filespec::FileSpec;
 pub use filesystem::{CmsFileSystem, FileInfo};
 pub use globalv::GlobalVars;
 pub use minidisk::{AccessMode, Minidisk};
+pub use xedit_adapter::CmsFs;
