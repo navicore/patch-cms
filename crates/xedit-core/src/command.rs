@@ -1167,6 +1167,11 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parse_re_too_short_for_any_command() {
+        assert!(parse_command("re").is_err());
+    }
+
     // -- Error handling tests --
 
     // -- XEDIT command tests --

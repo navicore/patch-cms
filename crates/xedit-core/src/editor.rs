@@ -1053,6 +1053,10 @@ impl Editor {
             line.set_text(text);
         }
         self.alt_count += 1;
+        // Advance to next line per IBM XEDIT semantics
+        if self.current_line < self.buffer.len() {
+            self.current_line += 1;
+        }
         Ok(CommandResult::ok())
     }
 
@@ -2102,6 +2106,8 @@ if ftype.1 = 'RS' then
             .unwrap();
         assert_eq!(ed.buffer().line_text(1), Some("goodbye"));
         assert_eq!(ed.buffer().line_text(2), Some("world"));
+        // Advances to next line per IBM XEDIT semantics
+        assert_eq!(ed.current_line(), 2);
     }
 
     #[test]
@@ -2141,6 +2147,17 @@ if ftype.1 = 'RS' then
     }
 
     #[test]
+    fn replace_at_last_line_stays() {
+        let mut ed = editor_with_lines(&["only"]);
+        ed.current_line = 1;
+        ed.execute(&Command::Replace("changed".to_string()))
+            .unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("changed"));
+        // At last line, current_line stays (no line to advance to)
+        assert_eq!(ed.current_line(), 1);
+    }
+
+    #[test]
     fn replace_noop_does_not_dirtify() {
         let mut ed = editor_with_lines(&["same text"]);
         ed.current_line = 1;
@@ -2153,7 +2170,8 @@ if ftype.1 = 'RS' then
     #[test]
     fn replace_on_empty_buffer_errors() {
         let mut ed = Editor::new();
-        ed.execute(&Command::Down(1)).ok();
+        // Force current_line past end on empty buffer to exercise the > len guard
+        ed.current_line = 1;
         let result = ed.execute(&Command::Replace("text".to_string()));
         assert!(result.is_err());
     }
