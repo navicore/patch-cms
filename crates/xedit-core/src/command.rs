@@ -347,8 +347,13 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
                 let count = if rest.is_empty() {
                     1
                 } else {
-                    rest.parse::<usize>()
-                        .map_err(|_| format!("Invalid count: {}", rest))?
+                    let n = rest
+                        .parse::<usize>()
+                        .map_err(|_| format!("Invalid count: {}", rest))?;
+                    if n == 0 {
+                        return Err("PUT count must be at least 1".to_string());
+                    }
+                    n
                 };
                 Ok(Command::Put(filename.to_string(), count))
             }
@@ -1225,6 +1230,11 @@ mod tests {
     #[test]
     fn parse_put_requires_filename() {
         assert!(parse_command("put").is_err());
+    }
+
+    #[test]
+    fn parse_put_zero_count_is_error() {
+        assert!(parse_command("put myfile.txt 0").is_err());
     }
 
     #[test]

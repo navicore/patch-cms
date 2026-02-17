@@ -1068,6 +1068,11 @@ impl Editor {
                 "Cannot duplicate at Top of File".to_string(),
             ));
         }
+        if count == 0 {
+            return Err(XeditError::InvalidCommand(
+                "DUPLICAT count must be at least 1".to_string(),
+            ));
+        }
         if let Some(line) = self.buffer.get(self.current_line) {
             let text = line.text().to_string();
             self.snapshot_for_undo();
@@ -1138,6 +1143,11 @@ impl Editor {
         if self.current_line == 0 {
             return Err(XeditError::InvalidCommand(
                 "Cannot PUT at Top of File".to_string(),
+            ));
+        }
+        if count == 0 {
+            return Err(XeditError::InvalidCommand(
+                "PUT count must be at least 1".to_string(),
             ));
         }
         let start = self.current_line;
@@ -2329,6 +2339,14 @@ if ftype.1 = 'RS' then
         assert_eq!(ed.buffer().line_text(2), Some("beta"));
     }
 
+    #[test]
+    fn duplicat_zero_count_is_error() {
+        let mut ed = editor_with_lines(&["alpha"]);
+        ed.current_line = 1;
+        let result = ed.execute(&Command::Duplicat(0));
+        assert!(result.is_err());
+    }
+
     // -- PUT tests --
 
     #[test]
@@ -2362,6 +2380,16 @@ if ftype.1 = 'RS' then
         let mut ed = editor_with_lines(&["alpha"]);
         ed.current_line = 0;
         let result = ed.execute(&Command::Put(out_path.to_str().unwrap().to_string(), 1));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn put_zero_count_is_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let out_path = dir.path().join("out.txt");
+        let mut ed = editor_with_lines(&["alpha"]);
+        ed.current_line = 1;
+        let result = ed.execute(&Command::Put(out_path.to_str().unwrap().to_string(), 0));
         assert!(result.is_err());
     }
 
