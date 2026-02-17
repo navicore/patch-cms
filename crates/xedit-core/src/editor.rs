@@ -715,6 +715,8 @@ impl Editor {
             } => self.cmd_change(from, to, target.as_ref(), *count),
             Command::Input(text) => self.cmd_input(text.as_deref()),
             Command::Delete(target) => self.cmd_delete(target.as_ref()),
+            Command::Replace(text) => self.cmd_replace(text),
+            Command::Reset => self.cmd_reset(),
             Command::File => self.cmd_file(),
             Command::Save => self.cmd_save(),
             Command::Quit => self.cmd_quit(),
@@ -1031,6 +1033,44 @@ impl Editor {
             _ => Err(XeditError::InvalidCommand(
                 "Invalid target for DELETE".to_string(),
             )),
+        }
+    }
+
+    fn cmd_replace(&mut self, text: &str) -> Result<CommandResult> {
+        if self.current_line == 0 {
+            return Err(XeditError::InvalidCommand(
+                "Cannot replace at Top of File".to_string(),
+            ));
+        }
+        if self.current_line > self.buffer.len() {
+            return Err(XeditError::InvalidCommand("No line to replace".to_string()));
+        }
+        if self.buffer.line_text(self.current_line) == Some(text) {
+            return Ok(CommandResult::ok());
+        }
+        self.snapshot_for_undo();
+        if let Some(line) = self.buffer.get_mut(self.current_line) {
+            line.set_text(text);
+        }
+        self.alt_count += 1;
+        // Advance to next line per IBM XEDIT semantics
+        if self.current_line < self.buffer.len() {
+            self.current_line += 1;
+        }
+        Ok(CommandResult::ok())
+    }
+
+    fn cmd_reset(&mut self) -> Result<CommandResult> {
+        let had_pending = self.pending_block.is_some()
+            || self.pending_operation.is_some()
+            || self.all_filter.is_some();
+        self.pending_block = None;
+        self.pending_operation = None;
+        self.all_filter = None;
+        if had_pending {
+            Ok(CommandResult::with_message("Reset"))
+        } else {
+            Ok(CommandResult::ok())
         }
     }
 
@@ -2054,5 +2094,131 @@ if ftype.1 = 'RS' then
         // "alpha" was push_front, "beta" was push_back
         assert_eq!(ed.data_stack_pop().as_deref(), Some("alpha"));
         assert_eq!(ed.data_stack_pop().as_deref(), Some("beta"));
+    }
+
+    // -- REPLACE tests --
+
+    #[test]
+    fn replace_current_line() {
+        let mut ed = editor_with_lines(&["hello", "world"]);
+        ed.current_line = 1;
+        ed.execute(&Command::Replace("goodbye".to_string()))
+            .unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("goodbye"));
+        assert_eq!(ed.buffer().line_text(2), Some("world"));
+        // Advances to next line per IBM XEDIT semantics
+        assert_eq!(ed.current_line(), 2);
+    }
+
+    #[test]
+    fn replace_with_empty_string() {
+        let mut ed = editor_with_lines(&["hello", "world"]);
+        ed.current_line = 1;
+        ed.execute(&Command::Replace(String::new())).unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some(""));
+    }
+
+    #[test]
+    fn replace_at_tof_errors() {
+        let mut ed = editor_with_lines(&["hello"]);
+        ed.current_line = 0;
+        let result = ed.execute(&Command::Replace("x".to_string()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn replace_increments_alt_count() {
+        let mut ed = editor_with_lines(&["hello"]);
+        ed.current_line = 1;
+        let before = ed.alt_count();
+        ed.execute(&Command::Replace("new".to_string())).unwrap();
+        assert_eq!(ed.alt_count(), before + 1);
+    }
+
+    #[test]
+    fn replace_undo_restores_original() {
+        let mut ed = editor_with_lines(&["original"]);
+        ed.current_line = 1;
+        ed.execute(&Command::Replace("replaced".to_string()))
+            .unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("replaced"));
+        ed.execute(&Command::Undo).unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("original"));
+    }
+
+    #[test]
+    fn replace_at_last_line_stays() {
+        let mut ed = editor_with_lines(&["only"]);
+        ed.current_line = 1;
+        ed.execute(&Command::Replace("changed".to_string()))
+            .unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("changed"));
+        // At last line, current_line stays (no line to advance to)
+        assert_eq!(ed.current_line(), 1);
+    }
+
+    #[test]
+    fn replace_noop_does_not_dirtify() {
+        let mut ed = editor_with_lines(&["same text"]);
+        ed.current_line = 1;
+        let before_alt = ed.alt_count();
+        ed.execute(&Command::Replace("same text".to_string()))
+            .unwrap();
+        assert_eq!(ed.alt_count(), before_alt);
+    }
+
+    #[test]
+    fn replace_on_empty_buffer_errors() {
+        let mut ed = Editor::new();
+        // Force current_line past end on empty buffer to exercise the > len guard
+        ed.current_line = 1;
+        let result = ed.execute(&Command::Replace("text".to_string()));
+        assert!(result.is_err());
+    }
+
+    // -- RESET tests --
+
+    #[test]
+    fn reset_clears_pending_block() {
+        let mut ed = editor_with_lines(&["a", "b", "c"]);
+        ed.execute_prefix(1, &PrefixCommand::DeleteBlock).unwrap();
+        assert!(ed.has_pending_block());
+        ed.execute(&Command::Reset).unwrap();
+        assert!(!ed.has_pending_block());
+    }
+
+    #[test]
+    fn reset_clears_pending_operation() {
+        let mut ed = editor_with_lines(&["a", "b", "c"]);
+        ed.execute_prefix(1, &PrefixCommand::Copy).unwrap();
+        ed.execute(&Command::Reset).unwrap();
+        // Verify F now errors (no pending operation)
+        let result = ed.execute_prefix(2, &PrefixCommand::Following);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reset_with_nothing_pending_ok() {
+        let mut ed = editor_with_lines(&["a"]);
+        let result = ed.execute(&Command::Reset).unwrap();
+        assert!(result.message.is_none());
+    }
+
+    #[test]
+    fn reset_shows_message_when_clearing() {
+        let mut ed = editor_with_lines(&["a", "b"]);
+        ed.execute_prefix(1, &PrefixCommand::DeleteBlock).unwrap();
+        let result = ed.execute(&Command::Reset).unwrap();
+        assert_eq!(result.message.as_deref(), Some("Reset"));
+    }
+
+    #[test]
+    fn reset_clears_all_filter() {
+        let mut ed = editor_with_lines(&["apple", "banana", "apricot"]);
+        ed.execute(&Command::All(Some(Target::StringForward("ap".into()))))
+            .unwrap();
+        assert!(ed.all_filter_active());
+        ed.execute(&Command::Reset).unwrap();
+        assert!(!ed.all_filter_active());
     }
 }
