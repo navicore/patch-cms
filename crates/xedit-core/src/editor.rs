@@ -716,12 +716,14 @@ impl Editor {
             Command::Input(text) => self.cmd_input(text.as_deref()),
             Command::Delete(target) => self.cmd_delete(target.as_ref()),
             Command::Replace(text) => self.cmd_replace(text),
+            Command::Duplicat(n) => self.cmd_duplicat(*n),
             Command::Reset => self.cmd_reset(),
             Command::File => self.cmd_file(),
             Command::Save => self.cmd_save(),
             Command::Quit => self.cmd_quit(),
             Command::QQuit => Ok(CommandResult::quit()),
             Command::Get(filename) => self.cmd_get(filename),
+            Command::Put(filename, count) => self.cmd_put(filename, *count),
             Command::Undo => self.cmd_undo(),
             Command::Stack(n) => self.cmd_stack(*n),
             Command::Queue(n) => self.cmd_queue(*n),
@@ -1060,6 +1062,31 @@ impl Editor {
         Ok(CommandResult::ok())
     }
 
+    fn cmd_duplicat(&mut self, count: usize) -> Result<CommandResult> {
+        if self.current_line == 0 {
+            return Err(XeditError::InvalidCommand(
+                "Cannot duplicate at Top of File".to_string(),
+            ));
+        }
+        if let Some(line) = self.buffer.get(self.current_line) {
+            let text = line.text().to_string();
+            self.snapshot_for_undo();
+            for i in 0..count {
+                self.buffer
+                    .insert_after(self.current_line + i, text.clone());
+            }
+            self.alt_count += count;
+            Ok(CommandResult::with_message(format!(
+                "{} line(s) duplicated",
+                count
+            )))
+        } else {
+            Err(XeditError::InvalidCommand(
+                "No line to duplicate".to_string(),
+            ))
+        }
+    }
+
     fn cmd_reset(&mut self) -> Result<CommandResult> {
         let had_pending = self.pending_block.is_some()
             || self.pending_operation.is_some()
@@ -1104,6 +1131,31 @@ impl Editor {
         Ok(CommandResult::with_message(format!(
             "{} line(s) read from {}",
             count, filename
+        )))
+    }
+
+    fn cmd_put(&mut self, filename: &str, count: usize) -> Result<CommandResult> {
+        if self.current_line == 0 {
+            return Err(XeditError::InvalidCommand(
+                "Cannot PUT at Top of File".to_string(),
+            ));
+        }
+        let start = self.current_line;
+        let end = (start + count - 1).min(self.buffer.len());
+        let actual_count = end - start + 1;
+        let content: String = (start..=end)
+            .filter_map(|i| self.buffer.line_text(i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let content = if content.is_empty() {
+            String::new()
+        } else {
+            content + "\n"
+        };
+        self.fs.write_file(filename, &content)?;
+        Ok(CommandResult::with_message(format!(
+            "{} line(s) written to {}",
+            actual_count, filename
         )))
     }
 
@@ -2220,5 +2272,109 @@ if ftype.1 = 'RS' then
         assert!(ed.all_filter_active());
         ed.execute(&Command::Reset).unwrap();
         assert!(!ed.all_filter_active());
+    }
+
+    // -- DUPLICAT tests --
+
+    #[test]
+    fn duplicat_single() {
+        let mut ed = editor_with_lines(&["alpha", "beta", "gamma"]);
+        ed.current_line = 2;
+        ed.execute(&Command::Duplicat(1)).unwrap();
+        assert_eq!(ed.buffer().len(), 4);
+        assert_eq!(ed.buffer().line_text(2), Some("beta"));
+        assert_eq!(ed.buffer().line_text(3), Some("beta"));
+        assert_eq!(ed.buffer().line_text(4), Some("gamma"));
+    }
+
+    #[test]
+    fn duplicat_with_count() {
+        let mut ed = editor_with_lines(&["alpha", "beta"]);
+        ed.current_line = 1;
+        ed.execute(&Command::Duplicat(3)).unwrap();
+        assert_eq!(ed.buffer().len(), 5);
+        assert_eq!(ed.buffer().line_text(1), Some("alpha"));
+        assert_eq!(ed.buffer().line_text(2), Some("alpha"));
+        assert_eq!(ed.buffer().line_text(3), Some("alpha"));
+        assert_eq!(ed.buffer().line_text(4), Some("alpha"));
+        assert_eq!(ed.buffer().line_text(5), Some("beta"));
+    }
+
+    #[test]
+    fn duplicat_at_tof_errors() {
+        let mut ed = editor_with_lines(&["alpha"]);
+        ed.current_line = 0;
+        let result = ed.execute(&Command::Duplicat(1));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn duplicat_increments_alt_count() {
+        let mut ed = editor_with_lines(&["alpha"]);
+        ed.current_line = 1;
+        let before = ed.alt_count();
+        ed.execute(&Command::Duplicat(3)).unwrap();
+        assert_eq!(ed.alt_count(), before + 3);
+    }
+
+    #[test]
+    fn duplicat_undo_restores_buffer() {
+        let mut ed = editor_with_lines(&["alpha", "beta"]);
+        ed.current_line = 1;
+        ed.execute(&Command::Duplicat(2)).unwrap();
+        assert_eq!(ed.buffer().len(), 4);
+        ed.execute(&Command::Undo).unwrap();
+        assert_eq!(ed.buffer().len(), 2);
+        assert_eq!(ed.buffer().line_text(1), Some("alpha"));
+        assert_eq!(ed.buffer().line_text(2), Some("beta"));
+    }
+
+    // -- PUT tests --
+
+    #[test]
+    fn put_single_line() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let out_path = dir.path().join("out.txt");
+        let mut ed = editor_with_lines(&["alpha", "beta", "gamma"]);
+        ed.current_line = 2;
+        ed.execute(&Command::Put(out_path.to_str().unwrap().to_string(), 1))
+            .unwrap();
+        let content = std::fs::read_to_string(&out_path).unwrap();
+        assert_eq!(content, "beta\n");
+    }
+
+    #[test]
+    fn put_multiple_lines() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let out_path = dir.path().join("out.txt");
+        let mut ed = editor_with_lines(&["alpha", "beta", "gamma", "delta"]);
+        ed.current_line = 1;
+        ed.execute(&Command::Put(out_path.to_str().unwrap().to_string(), 3))
+            .unwrap();
+        let content = std::fs::read_to_string(&out_path).unwrap();
+        assert_eq!(content, "alpha\nbeta\ngamma\n");
+    }
+
+    #[test]
+    fn put_at_tof_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let out_path = dir.path().join("out.txt");
+        let mut ed = editor_with_lines(&["alpha"]);
+        ed.current_line = 0;
+        let result = ed.execute(&Command::Put(out_path.to_str().unwrap().to_string(), 1));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn put_clamps_to_buffer_end() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let out_path = dir.path().join("out.txt");
+        let mut ed = editor_with_lines(&["alpha", "beta"]);
+        ed.current_line = 1;
+        // Request 10 lines but only 2 available
+        ed.execute(&Command::Put(out_path.to_str().unwrap().to_string(), 10))
+            .unwrap();
+        let content = std::fs::read_to_string(&out_path).unwrap();
+        assert_eq!(content, "alpha\nbeta\n");
     }
 }

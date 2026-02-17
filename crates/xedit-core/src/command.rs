@@ -26,6 +26,7 @@ pub enum Command {
     Input(Option<String>),
     Delete(Option<Target>),
     Replace(String),
+    Duplicat(usize), // number of times to duplicate current line
 
     // File operations
     File,
@@ -33,6 +34,7 @@ pub enum Command {
     Quit,
     QQuit,
     Get(String),
+    Put(String, usize), // (filename, line_count)
 
     // Settings
     Set(SetCommand),
@@ -200,6 +202,7 @@ const COMMAND_TABLE: &[(&str, usize)] = &[
     ("CURSOR", 3),   // CUR
     ("DELETE", 3),   // DEL
     ("DOWN", 2),     // DO
+    ("DUPLICAT", 3), // DUP
     ("FILE", 4),     // FILE
     ("FORWARD", 1),  // F
     ("GET", 3),      // GET
@@ -209,6 +212,7 @@ const COMMAND_TABLE: &[(&str, usize)] = &[
     ("LOCATE", 1),   // L (but see disambiguation below)
     ("MACRO", 5),    // MACRO
     ("NEXT", 1),     // N
+    ("PUT", 3),      // PUT
     ("QQUIT", 2),    // QQ
     ("QUERY", 2),    // QU
     ("QUEUE", 3),    // QUE (avoids conflict with QUERY at QU)
@@ -334,6 +338,21 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
         "QUEUE" => Ok(Command::Queue(parse_optional_count(args)?)),
         "UNDO" => Ok(Command::Undo),
         "XEDIT" => Ok(Command::Xedit(args.to_string())),
+        "DUPLICAT" => Ok(Command::Duplicat(parse_optional_count(args)?)),
+        "PUT" => {
+            if args.is_empty() {
+                Err("PUT requires a filename".to_string())
+            } else {
+                let (filename, rest) = split_first_word(args);
+                let count = if rest.is_empty() {
+                    1
+                } else {
+                    rest.parse::<usize>()
+                        .map_err(|_| format!("Invalid count: {}", rest))?
+                };
+                Ok(Command::Put(filename.to_string(), count))
+            }
+        }
         "REPLACE" => {
             // Preserve leading whitespace in replacement text: re-extract
             // from the original input instead of using `args` (which is trimmed).
@@ -1157,6 +1176,55 @@ mod tests {
             Command::Reset => {}
             other => panic!("Expected Reset, got {:?}", other),
         }
+    }
+
+    // -- DUPLICAT tests --
+
+    #[test]
+    fn parse_duplicat_abbreviated() {
+        match parse_command("dup").unwrap() {
+            Command::Duplicat(1) => {}
+            other => panic!("Expected Duplicat(1), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_duplicat_with_count() {
+        match parse_command("dup 3").unwrap() {
+            Command::Duplicat(3) => {}
+            other => panic!("Expected Duplicat(3), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_duplicat_full() {
+        match parse_command("duplicat 5").unwrap() {
+            Command::Duplicat(5) => {}
+            other => panic!("Expected Duplicat(5), got {:?}", other),
+        }
+    }
+
+    // -- PUT tests --
+
+    #[test]
+    fn parse_put_filename() {
+        match parse_command("put myfile.txt").unwrap() {
+            Command::Put(ref f, 1) => assert_eq!(f, "myfile.txt"),
+            other => panic!("Expected Put(\"myfile.txt\", 1), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_put_filename_with_count() {
+        match parse_command("put myfile.txt 5").unwrap() {
+            Command::Put(ref f, 5) => assert_eq!(f, "myfile.txt"),
+            other => panic!("Expected Put(\"myfile.txt\", 5), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_put_requires_filename() {
+        assert!(parse_command("put").is_err());
     }
 
     #[test]
