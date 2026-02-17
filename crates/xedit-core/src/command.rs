@@ -25,6 +25,7 @@ pub enum Command {
     // Editing
     Input(Option<String>),
     Delete(Option<Target>),
+    Replace(String),
 
     // File operations
     File,
@@ -64,6 +65,9 @@ pub enum Command {
 
     // Ring / file switching
     Xedit(String), // file_id (empty string = cycle ring)
+
+    // Reset
+    Reset,
 
     // Display
     Refresh,
@@ -210,6 +214,8 @@ const COMMAND_TABLE: &[(&str, usize)] = &[
     ("QUEUE", 3),    // QUE (avoids conflict with QUERY at QU)
     ("QUIT", 4),     // QUIT
     ("REFRESH", 3),  // REF
+    ("REPLACE", 3),  // REP
+    ("RESET", 3),    // RES
     ("RIGHT", 2),    // RI
     ("SAVE", 2),     // SA
     ("SET", 3),      // SET
@@ -328,6 +334,8 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
         "QUEUE" => Ok(Command::Queue(parse_optional_count(args)?)),
         "UNDO" => Ok(Command::Undo),
         "XEDIT" => Ok(Command::Xedit(args.to_string())),
+        "REPLACE" => Ok(Command::Replace(args.to_string())),
+        "RESET" => Ok(Command::Reset),
         "REFRESH" => Ok(Command::Refresh),
         "HELP" => Ok(Command::Help),
         _ => Err(format!("Unknown command: {}", cmd_word)),
@@ -1095,6 +1103,48 @@ mod tests {
         match parse_command("undo").unwrap() {
             Command::Undo => {}
             other => panic!("Expected Undo, got {:?}", other),
+        }
+    }
+
+    // -- REPLACE / RESET tests --
+
+    #[test]
+    fn parse_replace_with_text() {
+        match parse_command("rep hello world").unwrap() {
+            Command::Replace(ref s) => assert_eq!(s, "hello world"),
+            other => panic!("Expected Replace(\"hello world\"), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_replace_empty() {
+        match parse_command("replace").unwrap() {
+            Command::Replace(ref s) => assert_eq!(s, ""),
+            other => panic!("Expected Replace(\"\"), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_reset_abbreviated() {
+        match parse_command("res").unwrap() {
+            Command::Reset => {}
+            other => panic!("Expected Reset, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_reset_full() {
+        match parse_command("reset").unwrap() {
+            Command::Reset => {}
+            other => panic!("Expected Reset, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_ref_still_refresh() {
+        match parse_command("ref").unwrap() {
+            Command::Refresh => {}
+            other => panic!("Expected Refresh, got {:?}", other),
         }
     }
 
