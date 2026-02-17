@@ -20,7 +20,7 @@ fn main() {
             file_args_start = 3;
             match cms_support::setup_cms(base_path) {
                 Ok((processor, cms_fs)) => {
-                    app = app::App::with_cms(processor, cms_fs);
+                    app = app::App::with_cms(processor, cms_fs, base_path.to_string());
                 }
                 Err(e) => {
                     eprintln!("CMS setup error: {}", e);

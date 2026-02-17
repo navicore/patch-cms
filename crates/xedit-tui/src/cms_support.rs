@@ -54,6 +54,37 @@ pub fn setup_cms(base_path: &str) -> Result<(CommandProcessor, CmsFs), String> {
     Ok((processor, cms_fs))
 }
 
+/// Create a standalone `CmsFs` from a base directory.
+///
+/// Uses the same disk-mounting logic as `setup_cms` but only returns a `CmsFs`
+/// (no `CommandProcessor`). Used for additional files opened via the XEDIT ring.
+pub fn create_cms_fs(base_path: &str) -> Result<CmsFs, String> {
+    let base = std::path::Path::new(base_path);
+    if !base.is_dir() {
+        return Err(format!("CMS base path is not a directory: {}", base_path));
+    }
+
+    let mut fs = CmsFileSystem::new();
+
+    let a_path = base.join("a");
+    if !a_path.is_dir() {
+        return Err(format!("A-disk directory not found: {}", a_path.display()));
+    }
+    fs.access_disk('A', &a_path, AccessMode::ReadWrite)
+        .map_err(|e| e.to_string())?;
+
+    for letter in 'b'..='z' {
+        let disk_path = base.join(letter.to_string());
+        if disk_path.is_dir() {
+            let upper = letter.to_ascii_uppercase();
+            fs.access_disk(upper, &disk_path, AccessMode::ReadOnly)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(CmsFs::new(fs))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

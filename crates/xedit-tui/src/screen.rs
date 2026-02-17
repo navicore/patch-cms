@@ -57,6 +57,8 @@ const INPUT_MODE_FG: Color = Color::Red;
 pub fn render(
     frame: &mut Frame,
     editor: &Editor,
+    ring_pos: usize,
+    ring_total: usize,
     command_text: &str,
     command_cursor: usize,
     focus: &CursorFocus,
@@ -82,6 +84,8 @@ pub fn render(
         chunks[0],
         editor,
         insert_mode,
+        ring_pos,
+        ring_total,
         resolve_color(editor, "IdLine", ID_LINE_FG),
         resolve_color(editor, "IdLine", ID_LINE_BG),
     );
@@ -127,11 +131,14 @@ struct VisibleRange {
     // Maps display_idx to screen row (relative to file area)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_id_line(
     frame: &mut Frame,
     area: Rect,
     editor: &Editor,
     insert_mode: bool,
+    ring_pos: usize,
+    ring_total: usize,
     fg: Color,
     bg: Color,
 ) {
@@ -148,8 +155,14 @@ fn render_id_line(
 
     let mode = if insert_mode { "Ins" } else { "Ovr" };
 
+    let ring_info = if ring_total > 1 {
+        format!(" Ring {}/{}", ring_pos, ring_total)
+    } else {
+        String::new()
+    };
+
     let id_text = format!(
-        " {:<8} {:<8} {}  Trunc={} Size={} Line={} Col={} Alt={} [{}]",
+        " {:<8} {:<8} {}  Trunc={} Size={} Line={} Col={} Alt={} [{}]{}",
         filename,
         filetype,
         editor.filemode(),
@@ -159,6 +172,7 @@ fn render_id_line(
         editor.current_col(),
         editor.alt_count(),
         mode,
+        ring_info,
     );
 
     let style = Style::default().fg(fg).bg(bg);

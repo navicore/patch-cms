@@ -62,6 +62,9 @@ pub enum Command {
     // Cursor control
     Cursor(CursorTarget),
 
+    // Ring / file switching
+    Xedit(String), // file_id (empty string = cycle ring)
+
     // Display
     Refresh,
     Help,
@@ -142,6 +145,7 @@ pub enum CommandAction {
     Quit,
     EnterInput,
     Refresh,
+    OpenFile(String),
 }
 
 impl CommandResult {
@@ -214,6 +218,7 @@ const COMMAND_TABLE: &[(&str, usize)] = &[
     ("TOP", 1),      // T
     ("UNDO", 4),     // UNDO
     ("UP", 1),       // U
+    ("XEDIT", 1),    // X
 ];
 
 fn lookup_command(input: &str) -> Option<&'static str> {
@@ -322,6 +327,7 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
         "STACK" => Ok(Command::Stack(parse_optional_count(args)?)),
         "QUEUE" => Ok(Command::Queue(parse_optional_count(args)?)),
         "UNDO" => Ok(Command::Undo),
+        "XEDIT" => Ok(Command::Xedit(args.to_string())),
         "REFRESH" => Ok(Command::Refresh),
         "HELP" => Ok(Command::Help),
         _ => Err(format!("Unknown command: {}", cmd_word)),
@@ -1093,6 +1099,32 @@ mod tests {
     }
 
     // -- Error handling tests --
+
+    // -- XEDIT command tests --
+
+    #[test]
+    fn parse_xedit_with_file() {
+        match parse_command("x PROFILE EXEC A").unwrap() {
+            Command::Xedit(ref s) => assert_eq!(s, "PROFILE EXEC A"),
+            other => panic!("Expected Xedit, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_xedit_full_name() {
+        match parse_command("xedit somefile.txt").unwrap() {
+            Command::Xedit(ref s) => assert_eq!(s, "somefile.txt"),
+            other => panic!("Expected Xedit, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_xedit_bare() {
+        match parse_command("x").unwrap() {
+            Command::Xedit(ref s) => assert!(s.is_empty()),
+            other => panic!("Expected Xedit with empty args, got {:?}", other),
+        }
+    }
 
     #[test]
     fn parse_unknown_command() {

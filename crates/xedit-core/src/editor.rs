@@ -205,6 +205,10 @@ impl Editor {
         &self.filemode
     }
 
+    pub fn file_id(&self) -> Option<&str> {
+        self.file_id.as_deref()
+    }
+
     pub fn trunc(&self) -> usize {
         self.trunc
     }
@@ -729,6 +733,10 @@ impl Editor {
             } => self.cmd_sort(target.as_ref(), *ascending, *col_start, *col_end),
             Command::Set(subcmd) => self.cmd_set(subcmd),
             Command::Query(what) => self.cmd_query(what),
+            Command::Xedit(file_id) => Ok(CommandResult {
+                action: CommandAction::OpenFile(file_id.clone()),
+                message: None,
+            }),
             Command::Refresh => Ok(CommandResult::refresh()),
             Command::Help => self.cmd_help(),
             #[cfg(feature = "rexx")]

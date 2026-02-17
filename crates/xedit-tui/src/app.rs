@@ -10,6 +10,7 @@ use ratatui::Terminal;
 use xedit_core::command::{parse_command, Command, CommandAction};
 use xedit_core::editor::{CursorRequest, Editor};
 use xedit_core::prefix::PrefixCommand;
+use xedit_core::ring::Ring;
 
 use crate::input::{read_action, Action};
 use crate::screen;
@@ -28,7 +29,7 @@ pub enum CursorFocus {
 
 /// Application state
 pub struct App {
-    editor: Editor,
+    ring: Ring,
     focus: CursorFocus,
 
     // Command line state
@@ -62,12 +63,16 @@ pub struct App {
     // CMS command processor (only present when built with --features cms)
     #[cfg(feature = "cms")]
     cms_processor: Option<cms_core::CommandProcessor>,
+    #[cfg(feature = "cms")]
+    cms_base_path: Option<String>,
 }
 
 impl App {
     pub fn new() -> Self {
+        let mut ring = Ring::new();
+        ring.add_empty();
         Self {
-            editor: Editor::new(),
+            ring,
             focus: CursorFocus::CommandLine,
             command_text: String::new(),
             command_cursor: 0,
@@ -82,15 +87,24 @@ impl App {
             file_area_edited: false,
             #[cfg(feature = "cms")]
             cms_processor: None,
+            #[cfg(feature = "cms")]
+            cms_base_path: None,
         }
     }
 
     /// Construct an App in CMS mode with a command processor and CMS filesystem.
     #[cfg(feature = "cms")]
-    pub fn with_cms(processor: cms_core::CommandProcessor, cms_fs: cms_core::CmsFs) -> Self {
+    pub fn with_cms(
+        processor: cms_core::CommandProcessor,
+        cms_fs: cms_core::CmsFs,
+        base_path: String,
+    ) -> Self {
+        let mut ring = Ring::new();
+        ring.add_empty_with_fs(Box::new(cms_fs));
         Self {
-            editor: Editor::with_fs(Box::new(cms_fs)),
+            ring,
             cms_processor: Some(processor),
+            cms_base_path: Some(base_path),
             focus: CursorFocus::CommandLine,
             command_text: String::new(),
             command_cursor: 0,
@@ -106,12 +120,22 @@ impl App {
         }
     }
 
+    // -- Accessor helpers --
+
+    fn editor(&self) -> &Editor {
+        self.ring.current().expect("Ring is empty")
+    }
+
+    fn editor_mut(&mut self) -> &mut Editor {
+        self.ring.current_mut().expect("Ring is empty")
+    }
+
     pub fn load_file(&mut self, file_id: &str) -> xedit_core::error::Result<()> {
-        self.editor.load_file(file_id)?;
+        self.editor_mut().load_file(file_id)?;
         // Run PROFILE XEDIT macro if it exists (customizes settings on file open)
         #[cfg(feature = "rexx")]
-        self.editor.run_profile();
-        self.file_line = self.editor.current_line().max(1);
+        self.editor_mut().run_profile();
+        self.file_line = self.editor().current_line().max(1);
         Ok(())
     }
 
@@ -137,13 +161,18 @@ impl App {
     ) -> io::Result<()> {
         loop {
             let size = terminal.size()?;
-            self.editor
+            self.editor_mut()
                 .set_page_size(size.height.saturating_sub(3) as usize);
+
+            let editor = self.ring.current().expect("Ring is empty");
+            let (ring_pos, ring_total) = self.ring.ring_position();
 
             terminal.draw(|frame| {
                 screen::render(
                     frame,
-                    &self.editor,
+                    editor,
+                    ring_pos,
+                    ring_total,
                     &self.command_text,
                     self.command_cursor,
                     &self.focus,
@@ -229,30 +258,30 @@ impl App {
                 }
             }
             Action::ArrowUp => {
-                if self.editor.history_len() > 0 {
+                if self.editor().history_len() > 0 {
                     // Browse history backward (older)
                     let new_idx = match self.history_index {
                         Some(idx) => idx.saturating_sub(1),
-                        None => self.editor.history_len().saturating_sub(1),
+                        None => self.editor().history_len().saturating_sub(1),
                     };
                     self.history_index = Some(new_idx);
-                    if let Some(cmd) = self.editor.history_get(new_idx) {
+                    if let Some(cmd) = self.editor().history_get(new_idx) {
                         self.command_text = cmd.to_string();
                         self.command_cursor = self.command_text.len();
                     }
                 } else {
-                    let _ = self.editor.execute(&Command::Up(1));
+                    let _ = self.editor_mut().execute(&Command::Up(1));
                     self.sync_file_cursor_to_editor();
                 }
             }
             Action::ArrowDown => {
                 if let Some(idx) = self.history_index {
                     // Browse history forward (newer)
-                    let max_idx = self.editor.history_len().saturating_sub(1);
+                    let max_idx = self.editor().history_len().saturating_sub(1);
                     if idx < max_idx {
                         let new_idx = idx + 1;
                         self.history_index = Some(new_idx);
-                        if let Some(cmd) = self.editor.history_get(new_idx) {
+                        if let Some(cmd) = self.editor().history_get(new_idx) {
                             self.command_text = cmd.to_string();
                             self.command_cursor = self.command_text.len();
                         }
@@ -263,7 +292,7 @@ impl App {
                         self.command_cursor = 0;
                     }
                 } else {
-                    let _ = self.editor.execute(&Command::Down(1));
+                    let _ = self.editor_mut().execute(&Command::Down(1));
                     self.sync_file_cursor_to_editor();
                 }
             }
@@ -277,15 +306,15 @@ impl App {
                 // Switch to file area
                 self.focus = CursorFocus::FileArea;
                 // Position cursor on current line, in data area
-                self.file_line = self.editor.current_line().max(1);
+                self.file_line = self.editor().current_line().max(1);
                 self.file_col = 7; // first data column
             }
             Action::PageUp => {
-                let _ = self.editor.execute(&Command::Backward(1));
+                let _ = self.editor_mut().execute(&Command::Backward(1));
                 self.sync_file_cursor_to_editor();
             }
             Action::PageDown => {
-                let _ = self.editor.execute(&Command::Forward(1));
+                let _ = self.editor_mut().execute(&Command::Forward(1));
                 self.sync_file_cursor_to_editor();
             }
             Action::Escape => {
@@ -300,7 +329,7 @@ impl App {
 
     fn handle_file_area(&mut self, action: Action) {
         let in_prefix = self.file_col >= 1 && self.file_col <= 5;
-        let buf_len = self.editor.buffer().len();
+        let buf_len = self.editor().buffer().len();
 
         match action {
             Action::Char(c) => {
@@ -318,10 +347,11 @@ impl App {
                 }
             }
             Action::Delete => {
-                if !in_prefix && self.file_line >= 1 && self.file_line <= buf_len {
+                let file_line = self.file_line;
+                if !in_prefix && file_line >= 1 && file_line <= buf_len {
                     self.ensure_screen_edit_snapshot();
                     let data_col = self.file_col.saturating_sub(PREFIX_COLS + 1);
-                    self.editor.delete_char(self.file_line, data_col);
+                    self.editor_mut().delete_char(file_line, data_col);
                 }
             }
             Action::Enter => {
@@ -349,13 +379,15 @@ impl App {
             Action::ArrowUp => {
                 if self.file_line > 1 {
                     self.file_line -= 1;
-                    self.editor.set_current_line(self.file_line);
+                    let fl = self.file_line;
+                    self.editor_mut().set_current_line(fl);
                 }
             }
             Action::ArrowDown => {
                 if self.file_line < buf_len {
                     self.file_line += 1;
-                    self.editor.set_current_line(self.file_line);
+                    let fl = self.file_line;
+                    self.editor_mut().set_current_line(fl);
                 }
             }
             Action::ArrowLeft => {
@@ -384,16 +416,16 @@ impl App {
             Action::End => {
                 if in_prefix {
                     self.file_col = 5;
-                } else if let Some(text) = self.editor.buffer().line_text(self.file_line) {
+                } else if let Some(text) = self.editor().buffer().line_text(self.file_line) {
                     self.file_col = PREFIX_COLS + 1 + text.len();
                 }
             }
             Action::PageUp => {
-                let _ = self.editor.execute(&Command::Backward(1));
+                let _ = self.editor_mut().execute(&Command::Backward(1));
                 self.sync_file_cursor_to_editor();
             }
             Action::PageDown => {
-                let _ = self.editor.execute(&Command::Forward(1));
+                let _ = self.editor_mut().execute(&Command::Forward(1));
                 self.sync_file_cursor_to_editor();
             }
             Action::InsertToggle => {
@@ -403,7 +435,7 @@ impl App {
                 } else {
                     "Overtype mode"
                 };
-                self.editor.set_message(mode);
+                self.editor_mut().set_message(mode);
             }
             Action::Escape => {
                 // Escape in file area: return to command line, clear pending prefixes
@@ -419,7 +451,7 @@ impl App {
 
     fn type_in_prefix(&mut self, c: char) {
         let line = self.file_line;
-        if line == 0 || line > self.editor.buffer().len() {
+        if line == 0 || line > self.editor().buffer().len() {
             return;
         }
 
@@ -475,14 +507,14 @@ impl App {
     /// Snapshot once per file-area editing session (first keystroke)
     fn ensure_screen_edit_snapshot(&mut self) {
         if !self.file_area_edited {
-            self.editor.snapshot_for_undo();
+            self.editor_mut().snapshot_for_undo();
             self.file_area_edited = true;
         }
     }
 
     fn type_in_data(&mut self, c: char) {
         let line = self.file_line;
-        if line == 0 || line > self.editor.buffer().len() {
+        if line == 0 || line > self.editor().buffer().len() {
             return;
         }
 
@@ -490,9 +522,9 @@ impl App {
         let data_col = self.file_col.saturating_sub(PREFIX_COLS + 1);
 
         if self.insert_mode {
-            self.editor.insert_char(line, data_col, c);
+            self.editor_mut().insert_char(line, data_col, c);
         } else {
-            self.editor.overtype_char(line, data_col, c);
+            self.editor_mut().overtype_char(line, data_col, c);
         }
 
         self.file_col += 1;
@@ -508,7 +540,7 @@ impl App {
         self.ensure_screen_edit_snapshot();
         self.file_col -= 1;
         let data_col = self.file_col.saturating_sub(PREFIX_COLS + 1);
-        self.editor.delete_char(line, data_col);
+        self.editor_mut().delete_char(line, data_col);
     }
 
     // -- Enter processing (batch commit) --
@@ -544,14 +576,14 @@ impl App {
 
         // Execute in priority order
         for (line_num, cmd) in &parsed {
-            match self.editor.execute_prefix(*line_num, cmd) {
+            match self.editor_mut().execute_prefix(*line_num, cmd) {
                 Ok(result) => {
                     if let Some(msg) = result.message {
-                        self.editor.set_message(msg);
+                        self.editor_mut().set_message(msg);
                     }
                 }
                 Err(e) => {
-                    self.editor.set_message(e.to_string());
+                    self.editor_mut().set_message(e.to_string());
                 }
             }
         }
@@ -585,7 +617,7 @@ impl App {
                 } else {
                     let text = self.input_text.clone();
                     self.input_text.clear();
-                    self.editor.input_line(&text);
+                    self.editor_mut().input_line(&text);
                     self.sync_file_cursor_to_editor();
                 }
             }
@@ -611,49 +643,122 @@ impl App {
             self.process_enter();
         }
 
-        if let Some(cmd_text) = self.editor.pf_key(num) {
+        if let Some(cmd_text) = self.editor().pf_key(num) {
             let cmd_text = cmd_text.to_string();
             self.execute_command_text(&cmd_text);
         } else {
-            self.editor.set_message(format!("PF{} is not defined", num));
+            self.editor_mut()
+                .set_message(format!("PF{} is not defined", num));
         }
     }
 
-    // -- Helpers --
+    // -- Ring-aware helpers --
+
+    /// Create a filesystem for new ring editors (CMS or native)
+    fn create_fs(&self) -> Box<dyn xedit_core::filesystem::FileSystem> {
+        #[cfg(feature = "cms")]
+        if let Some(ref base_path) = self.cms_base_path {
+            if let Ok(cms_fs) = crate::cms_support::create_cms_fs(base_path) {
+                return Box::new(cms_fs);
+            }
+        }
+        Box::new(xedit_core::filesystem::NativeFs)
+    }
+
+    /// Reset UI state for the current editor after switching ring files
+    fn reset_for_current_editor(&mut self) {
+        self.file_line = self.editor().current_line().max(1);
+        self.file_col = 7;
+        self.prefix_inputs.clear();
+        self.command_text.clear();
+        self.command_cursor = 0;
+        self.history_index = None;
+        self.file_area_edited = false;
+        self.in_input_mode = false;
+        self.input_text.clear();
+        self.focus = CursorFocus::CommandLine;
+    }
+
+    /// Open a file in the ring (or cycle/switch if already open)
+    fn open_file_in_ring(&mut self, file_id: &str) {
+        if file_id.is_empty() {
+            // Bare "X" — cycle to next file
+            if self.ring.len() > 1 {
+                let _ = self.ring.cycle_next();
+                self.reset_for_current_editor();
+                let (pos, total) = self.ring.ring_position();
+                self.editor_mut()
+                    .set_message(format!("Ring {}/{}", pos, total));
+            } else {
+                self.editor_mut().set_message("Only one file in ring");
+            }
+            return;
+        }
+
+        // Check if file already in ring
+        if self.ring.switch_to_file(file_id) {
+            self.reset_for_current_editor();
+            self.editor_mut()
+                .set_message(format!("Switched to {}", file_id));
+            return;
+        }
+
+        // Open new file
+        let fs = self.create_fs();
+        if let Err(e) = self.ring.add_file_with_fs(file_id, fs) {
+            self.editor_mut().set_message(e.to_string());
+            return;
+        }
+        #[cfg(feature = "rexx")]
+        self.editor_mut().run_profile();
+        self.reset_for_current_editor();
+    }
+
+    // -- Command execution --
 
     fn execute_command_text(&mut self, text: &str) {
         let trimmed = text.trim();
 
         // `?` (PF6): recall last command into command line
         if trimmed == "?" {
-            if let Some(last) = self.editor.last_command() {
+            if let Some(last) = self.editor().last_command() {
                 self.command_text = last.to_string();
                 self.command_cursor = self.command_text.len();
             } else {
-                self.editor.set_message("No commands in history");
+                self.editor_mut().set_message("No commands in history");
             }
             return;
         }
 
         // `=` (PF9): re-execute last command
         if trimmed == "=" {
-            if let Some(last) = self.editor.last_command() {
+            if let Some(last) = self.editor().last_command() {
                 let last = last.to_string();
                 self.execute_command_text(&last);
             } else {
-                self.editor.set_message("No commands in history");
+                self.editor_mut().set_message("No commands in history");
             }
             return;
         }
 
         // Record in history before executing
-        self.editor.push_history(trimmed);
+        self.editor_mut().push_history(trimmed);
         self.history_index = None;
 
         match parse_command(text) {
-            Ok(cmd) => match self.editor.execute(&cmd) {
+            Ok(cmd) => match self.editor_mut().execute(&cmd) {
                 Ok(result) => match result.action {
-                    CommandAction::Quit => self.should_quit = true,
+                    CommandAction::Quit => {
+                        self.ring.remove_current();
+                        if self.ring.is_empty() {
+                            self.should_quit = true;
+                        } else {
+                            self.reset_for_current_editor();
+                        }
+                    }
+                    CommandAction::OpenFile(file_id) => {
+                        self.open_file_in_ring(&file_id);
+                    }
                     CommandAction::EnterInput => {
                         self.in_input_mode = true;
                         self.input_text.clear();
@@ -661,17 +766,19 @@ impl App {
                     CommandAction::Refresh | CommandAction::Continue => {}
                 },
                 Err(e) => {
-                    self.editor.set_message(e.to_string());
+                    self.editor_mut().set_message(e.to_string());
                 }
             },
             Err(xedit_err) => {
                 if !self.try_cms_command(text) {
-                    self.editor.set_message(xedit_err);
+                    self.editor_mut().set_message(xedit_err);
                 }
             }
         }
-        self.sync_file_cursor_to_editor();
-        self.apply_cursor_request();
+        if !self.should_quit && !self.ring.is_empty() {
+            self.sync_file_cursor_to_editor();
+            self.apply_cursor_request();
+        }
     }
 
     /// Try to execute a command via the CMS command processor.
@@ -687,7 +794,7 @@ impl App {
                 } else {
                     result.messages.join(" | ")
                 };
-                self.editor.set_message(msg);
+                self.editor_mut().set_message(msg);
                 return true;
             }
         }
@@ -700,7 +807,7 @@ impl App {
     }
 
     fn apply_cursor_request(&mut self) {
-        if let Some(req) = self.editor.take_cursor_request() {
+        if let Some(req) = self.editor_mut().take_cursor_request() {
             match req {
                 CursorRequest::Home => {
                     self.focus = CursorFocus::CommandLine;
@@ -708,10 +815,12 @@ impl App {
                     self.command_cursor = 0;
                 }
                 CursorRequest::File { line, col } => {
+                    let buf_len = self.editor().buffer().len();
                     self.focus = CursorFocus::FileArea;
-                    self.file_line = line.max(1).min(self.editor.buffer().len());
+                    self.file_line = line.max(1).min(buf_len);
                     self.file_col = PREFIX_COLS + 1 + col.saturating_sub(1);
-                    self.editor.set_current_line(self.file_line);
+                    let fl = self.file_line;
+                    self.editor_mut().set_current_line(fl);
                 }
             }
         }
@@ -719,11 +828,11 @@ impl App {
 
     /// Keep the file area cursor in sync with the editor's current line
     fn sync_file_cursor_to_editor(&mut self) {
-        let current = self.editor.current_line();
+        let current = self.editor().current_line();
         if current > 0 {
             self.file_line = current;
         } else {
-            self.file_line = 1.min(self.editor.buffer().len());
+            self.file_line = 1.min(self.editor().buffer().len());
         }
     }
 }

@@ -104,6 +104,33 @@ impl Ring {
     pub fn current_index(&self) -> usize {
         self.current
     }
+
+    /// Find a file in the ring by file_id and switch to it
+    pub fn switch_to_file(&mut self, file_id: &str) -> bool {
+        for (i, editor) in self.editors.iter().enumerate() {
+            if editor.file_id() == Some(file_id) {
+                self.current = i;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Return (1-based position, total) for status display
+    pub fn ring_position(&self) -> (usize, usize) {
+        if self.editors.is_empty() {
+            (0, 0)
+        } else {
+            (self.current + 1, self.editors.len())
+        }
+    }
+
+    /// Add a new empty editor with a custom filesystem to the ring
+    pub fn add_empty_with_fs(&mut self, fs: Box<dyn FileSystem>) -> &mut Editor {
+        self.editors.push(Editor::with_fs(fs));
+        self.current = self.editors.len() - 1;
+        &mut self.editors[self.current]
+    }
 }
 
 impl Default for Ring {
@@ -261,6 +288,59 @@ mod tests {
 
         let mut empty_ring = Ring::new();
         assert!(empty_ring.current_mut().is_none());
+    }
+
+    #[test]
+    fn switch_to_file_found() {
+        let mut tmp1 = NamedTempFile::new().unwrap();
+        writeln!(tmp1, "file1").unwrap();
+        tmp1.flush().unwrap();
+        let mut tmp2 = NamedTempFile::new().unwrap();
+        writeln!(tmp2, "file2").unwrap();
+        tmp2.flush().unwrap();
+
+        let mut ring = Ring::new();
+        ring.add_file(tmp1.path().to_str().unwrap()).unwrap();
+        ring.add_file(tmp2.path().to_str().unwrap()).unwrap();
+        assert_eq!(ring.current_index(), 1);
+
+        // Switch back to first file
+        let found = ring.switch_to_file(tmp1.path().to_str().unwrap());
+        assert!(found);
+        assert_eq!(ring.current_index(), 0);
+    }
+
+    #[test]
+    fn switch_to_file_not_found() {
+        let mut ring = Ring::new();
+        ring.add_empty();
+        assert!(!ring.switch_to_file("nonexistent"));
+    }
+
+    #[test]
+    fn ring_position_empty() {
+        let ring = Ring::new();
+        assert_eq!(ring.ring_position(), (0, 0));
+    }
+
+    #[test]
+    fn ring_position_with_files() {
+        let mut ring = Ring::new();
+        ring.add_empty();
+        ring.add_empty();
+        ring.add_empty();
+        assert_eq!(ring.ring_position(), (3, 3)); // current is last added
+        ring.cycle_next().unwrap(); // wraps to 0
+        assert_eq!(ring.ring_position(), (1, 3));
+    }
+
+    #[test]
+    fn add_empty_with_fs() {
+        let mut ring = Ring::new();
+        let fs = Box::new(crate::filesystem::NativeFs);
+        ring.add_empty_with_fs(fs);
+        assert_eq!(ring.len(), 1);
+        assert!(ring.current().is_some());
     }
 
     #[test]
