@@ -1045,6 +1045,9 @@ impl Editor {
         if self.current_line > self.buffer.len() {
             return Err(XeditError::InvalidCommand("No line to replace".to_string()));
         }
+        if self.buffer.line_text(self.current_line) == Some(text) {
+            return Ok(CommandResult::ok());
+        }
         self.snapshot_for_undo();
         if let Some(line) = self.buffer.get_mut(self.current_line) {
             line.set_text(text);
@@ -2135,6 +2138,24 @@ if ftype.1 = 'RS' then
         assert_eq!(ed.buffer().line_text(1), Some("replaced"));
         ed.execute(&Command::Undo).unwrap();
         assert_eq!(ed.buffer().line_text(1), Some("original"));
+    }
+
+    #[test]
+    fn replace_noop_does_not_dirtify() {
+        let mut ed = editor_with_lines(&["same text"]);
+        ed.current_line = 1;
+        let before_alt = ed.alt_count();
+        ed.execute(&Command::Replace("same text".to_string()))
+            .unwrap();
+        assert_eq!(ed.alt_count(), before_alt);
+    }
+
+    #[test]
+    fn replace_on_empty_buffer_errors() {
+        let mut ed = Editor::new();
+        ed.execute(&Command::Down(1)).ok();
+        let result = ed.execute(&Command::Replace("text".to_string()));
+        assert!(result.is_err());
     }
 
     // -- RESET tests --

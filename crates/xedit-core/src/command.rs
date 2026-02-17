@@ -338,7 +338,10 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
             // Preserve leading whitespace in replacement text: re-extract
             // from the original input instead of using `args` (which is trimmed).
             let raw_args = match input.find(char::is_whitespace) {
-                Some(pos) => &input[pos + 1..],
+                Some(pos) => {
+                    let ch = input[pos..].chars().next().unwrap();
+                    &input[pos + ch.len_utf8()..]
+                }
                 None => "",
             };
             Ok(Command::Replace(raw_args.to_string()))
