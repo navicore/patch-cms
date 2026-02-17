@@ -1042,20 +1042,24 @@ impl Editor {
                 "Cannot replace at Top of File".to_string(),
             ));
         }
+        if self.current_line > self.buffer.len() {
+            return Err(XeditError::InvalidCommand("No line to replace".to_string()));
+        }
         self.snapshot_for_undo();
         if let Some(line) = self.buffer.get_mut(self.current_line) {
             line.set_text(text);
-            self.alt_count += 1;
-            Ok(CommandResult::ok())
-        } else {
-            Err(XeditError::InvalidCommand("No line to replace".to_string()))
         }
+        self.alt_count += 1;
+        Ok(CommandResult::ok())
     }
 
     fn cmd_reset(&mut self) -> Result<CommandResult> {
-        let had_pending = self.pending_block.is_some() || self.pending_operation.is_some();
+        let had_pending = self.pending_block.is_some()
+            || self.pending_operation.is_some()
+            || self.all_filter.is_some();
         self.pending_block = None;
         self.pending_operation = None;
+        self.all_filter = None;
         if had_pending {
             Ok(CommandResult::with_message("Reset"))
         } else {
@@ -2167,5 +2171,15 @@ if ftype.1 = 'RS' then
         ed.execute_prefix(1, &PrefixCommand::DeleteBlock).unwrap();
         let result = ed.execute(&Command::Reset).unwrap();
         assert_eq!(result.message.as_deref(), Some("Reset"));
+    }
+
+    #[test]
+    fn reset_clears_all_filter() {
+        let mut ed = editor_with_lines(&["apple", "banana", "apricot"]);
+        ed.execute(&Command::All(Some(Target::StringForward("ap".into()))))
+            .unwrap();
+        assert!(ed.all_filter_active());
+        ed.execute(&Command::Reset).unwrap();
+        assert!(!ed.all_filter_active());
     }
 }

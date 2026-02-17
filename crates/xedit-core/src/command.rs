@@ -334,7 +334,15 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
         "QUEUE" => Ok(Command::Queue(parse_optional_count(args)?)),
         "UNDO" => Ok(Command::Undo),
         "XEDIT" => Ok(Command::Xedit(args.to_string())),
-        "REPLACE" => Ok(Command::Replace(args.to_string())),
+        "REPLACE" => {
+            // Preserve leading whitespace in replacement text: re-extract
+            // from the original input instead of using `args` (which is trimmed).
+            let raw_args = match input.find(char::is_whitespace) {
+                Some(pos) => &input[pos + 1..],
+                None => "",
+            };
+            Ok(Command::Replace(raw_args.to_string()))
+        }
         "RESET" => Ok(Command::Reset),
         "REFRESH" => Ok(Command::Refresh),
         "HELP" => Ok(Command::Help),
@@ -1121,6 +1129,14 @@ mod tests {
         match parse_command("replace").unwrap() {
             Command::Replace(ref s) => assert_eq!(s, ""),
             other => panic!("Expected Replace(\"\"), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_replace_preserves_leading_whitespace() {
+        match parse_command("rep   leading spaces").unwrap() {
+            Command::Replace(ref s) => assert_eq!(s, "  leading spaces"),
+            other => panic!("Expected Replace with leading spaces, got {:?}", other),
         }
     }
 
