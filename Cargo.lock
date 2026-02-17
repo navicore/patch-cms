@@ -962,8 +962,10 @@ dependencies = [
 name = "xedit-tui"
 version = "0.1.0"
 dependencies = [
+ "cms-core",
  "crossterm",
  "ratatui",
+ "tempfile",
  "xedit-core",
 ]
 

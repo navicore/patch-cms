@@ -12,8 +12,13 @@ path = "src/main.rs"
 [features]
 default = ["rexx"]
 rexx = ["xedit-core/rexx"]
+cms = ["dep:cms-core"]
 
 [dependencies]
 xedit-core = { path = "../xedit-core", default-features = false }
+cms-core = { path = "../cms-core", optional = true }
 crossterm = "0.28"
 ratatui = "0.29"
+
+[dev-dependencies]
+tempfile = "3"

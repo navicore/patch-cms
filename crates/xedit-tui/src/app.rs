@@ -58,6 +58,10 @@ pub struct App {
 
     // Track whether we've snapshotted for the current file-area editing session
     file_area_edited: bool,
+
+    // CMS command processor (only present when built with --features cms)
+    #[cfg(feature = "cms")]
+    cms_processor: Option<cms_core::CommandProcessor>,
 }
 
 impl App {
@@ -69,6 +73,29 @@ impl App {
             command_cursor: 0,
             file_line: 1,
             file_col: 7, // start in data area
+            prefix_inputs: HashMap::new(),
+            history_index: None,
+            insert_mode: false,
+            in_input_mode: false,
+            input_text: String::new(),
+            should_quit: false,
+            file_area_edited: false,
+            #[cfg(feature = "cms")]
+            cms_processor: None,
+        }
+    }
+
+    /// Construct an App in CMS mode with a command processor and CMS filesystem.
+    #[cfg(feature = "cms")]
+    pub fn with_cms(processor: cms_core::CommandProcessor, cms_fs: cms_core::CmsFs) -> Self {
+        Self {
+            editor: Editor::with_fs(Box::new(cms_fs)),
+            cms_processor: Some(processor),
+            focus: CursorFocus::CommandLine,
+            command_text: String::new(),
+            command_cursor: 0,
+            file_line: 1,
+            file_col: 7,
             prefix_inputs: HashMap::new(),
             history_index: None,
             insert_mode: false,
@@ -637,12 +664,39 @@ impl App {
                     self.editor.set_message(e.to_string());
                 }
             },
-            Err(e) => {
-                self.editor.set_message(e);
+            Err(xedit_err) => {
+                if !self.try_cms_command(text) {
+                    self.editor.set_message(xedit_err);
+                }
             }
         }
         self.sync_file_cursor_to_editor();
         self.apply_cursor_request();
+    }
+
+    /// Try to execute a command via the CMS command processor.
+    /// Returns true if CMS recognized and handled the command.
+    #[cfg(feature = "cms")]
+    fn try_cms_command(&mut self, text: &str) -> bool {
+        use cms_core::command::parse_cms_command;
+        if let Some(ref mut proc) = self.cms_processor {
+            if parse_cms_command(text).is_ok() {
+                let result = proc.execute(text);
+                let msg = if result.messages.is_empty() {
+                    format!("RC={}", result.rc)
+                } else {
+                    result.messages.join(" | ")
+                };
+                self.editor.set_message(msg);
+                return true;
+            }
+        }
+        false
+    }
+
+    #[cfg(not(feature = "cms"))]
+    fn try_cms_command(&mut self, _text: &str) -> bool {
+        false
     }
 
     fn apply_cursor_request(&mut self) {
