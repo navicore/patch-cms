@@ -338,7 +338,13 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
         "QUEUE" => Ok(Command::Queue(parse_optional_count(args)?)),
         "UNDO" => Ok(Command::Undo),
         "XEDIT" => Ok(Command::Xedit(args.to_string())),
-        "DUPLICAT" => Ok(Command::Duplicat(parse_optional_count(args)?)),
+        "DUPLICAT" => {
+            let n = parse_optional_count(args)?;
+            if n == 0 {
+                return Err("DUPLICAT count must be at least 1".to_string());
+            }
+            Ok(Command::Duplicat(n))
+        }
         "PUT" => {
             if args.is_empty() {
                 Err("PUT requires a filename".to_string())
@@ -1207,6 +1213,11 @@ mod tests {
             Command::Duplicat(5) => {}
             other => panic!("Expected Duplicat(5), got {:?}", other),
         }
+    }
+
+    #[test]
+    fn parse_duplicat_zero_count_is_error() {
+        assert!(parse_command("dup 0").is_err());
     }
 
     // -- PUT tests --

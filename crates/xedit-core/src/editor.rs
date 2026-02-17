@@ -1076,10 +1076,8 @@ impl Editor {
         if let Some(line) = self.buffer.get(self.current_line) {
             let text = line.text().to_string();
             self.snapshot_for_undo();
-            for i in 0..count {
-                self.buffer
-                    .insert_after(self.current_line + i, text.clone());
-            }
+            let copies = vec![text; count];
+            self.buffer.insert_lines_after(self.current_line, copies);
             self.alt_count += count;
             Ok(CommandResult::with_message(format!(
                 "{} line(s) duplicated",
@@ -1152,15 +1150,14 @@ impl Editor {
         }
         let start = self.current_line;
         let end = (start + count - 1).min(self.buffer.len());
-        let actual_count = end - start + 1;
-        let content: String = (start..=end)
+        let lines: Vec<&str> = (start..=end)
             .filter_map(|i| self.buffer.line_text(i))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let content = if content.is_empty() {
+            .collect();
+        let actual_count = lines.len();
+        let content = if lines.is_empty() {
             String::new()
         } else {
-            content + "\n"
+            lines.join("\n") + "\n"
         };
         self.fs.write_file(filename, &content)?;
         Ok(CommandResult::with_message(format!(
