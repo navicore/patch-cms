@@ -51,6 +51,136 @@ const CMD_PROMPT_FG: Color = Color::Cyan;
 const MSG_FG: Color = Color::Yellow;
 const SHADOW_FG: Color = Color::DarkGray;
 const INPUT_MODE_FG: Color = Color::Red;
+const SCALE_FG: Color = Color::Cyan;
+const HEX_FG: Color = Color::DarkGray;
+const BLANK_PREFIX: &str = "      ";
+const _: () = assert!(
+    BLANK_PREFIX.len() == PREFIX_WIDTH,
+    "BLANK_PREFIX must equal PREFIX_WIDTH spaces"
+);
+
+// ---------------------------------------------------------------------------
+// Layout types
+// ---------------------------------------------------------------------------
+
+/// A single screen row in the pre-computed layout.
+#[derive(Debug, Clone)]
+enum RenderRow {
+    Tof {
+        is_current: bool,
+    },
+    DataLine {
+        line_num: usize,
+        is_current: bool,
+    },
+    HexHigh {
+        line_num: usize,
+    },
+    HexLow {
+        line_num: usize,
+    },
+    WrapCont {
+        line_num: usize,
+        is_current: bool,
+        chunk_idx: usize,
+    },
+    Shadow {
+        count: usize,
+    },
+    Eof,
+    Scale,
+    Reserved {
+        text: String,
+    },
+    Empty,
+}
+
+/// Complete screen layout: one `RenderRow` per screen row plus cursor mapping.
+struct ScreenLayout {
+    rows: Vec<RenderRow>,
+    line_to_first_row: HashMap<usize, usize>,
+}
+
+// ---------------------------------------------------------------------------
+// Pure helper functions
+// ---------------------------------------------------------------------------
+
+/// Convert a 4-bit nibble (0–15) to its hex character ('0'–'F').
+fn to_hex_char(nibble: u8) -> char {
+    match nibble {
+        0..=9 => (b'0' + nibble) as char,
+        10..=15 => (b'A' + nibble - 10) as char,
+        _ => '.',
+    }
+}
+
+/// Build a hex-nibble line (blank prefix + column-aligned nibbles).
+///
+/// `high` selects the high nibble (true) or low nibble (false).
+/// Uses the first byte of each character's UTF-8 encoding for the nibble
+/// value, keeping 1:1 column alignment with the text row.
+fn make_hex_nibble_line(text: &str, data_width: usize, high: bool) -> Line<'static> {
+    let mut nibbles = String::with_capacity(data_width);
+    let mut buf = [0u8; 4];
+    for ch in text.chars().take(data_width) {
+        ch.encode_utf8(&mut buf);
+        // Uses only the first byte of the UTF-8 encoding. For ASCII this
+        // matches the code-point value exactly; for multi-byte characters
+        // (e.g. '€' = E2 82 AC) only the leading byte is shown. This is a
+        // known limitation vs IBM XEDIT's EBCDIC 1-byte-per-column model.
+        let b = buf[0];
+        if high {
+            nibbles.push(to_hex_char((b >> 4) & 0xF));
+        } else {
+            nibbles.push(to_hex_char(b & 0xF));
+        }
+    }
+    let padded = format!("{}{:<dw$}", BLANK_PREFIX, nibbles, dw = data_width);
+    Line::from(Span::styled(padded, Style::default().fg(HEX_FG)))
+}
+
+/// Split `text` into char-based chunks of at most `chunk_size` characters.
+///
+/// NOTE: This function is only used in tests. Production WrapCont rendering uses
+/// inline `skip(chunk_idx * data_width).take(data_width)` to avoid allocating
+/// intermediate `Vec<String>`s — each continuation row only needs one chunk.
+#[cfg(test)]
+fn char_chunks(text: &str, chunk_size: usize) -> Vec<String> {
+    if chunk_size == 0 {
+        return vec![text.to_string()];
+    }
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return vec![String::new()];
+    }
+    chars
+        .chunks(chunk_size)
+        .map(|c| c.iter().collect())
+        .collect()
+}
+
+/// Build an IBM XEDIT–style column ruler (scale line).
+fn make_scale_line(width: usize) -> Line<'static> {
+    let data_width = width.saturating_sub(PREFIX_WIDTH);
+    let mut ruler = String::with_capacity(data_width);
+
+    for col in 1..=data_width {
+        if col == 1 || col == data_width {
+            // IBM XEDIT: `|` at first and last column
+            ruler.push('|');
+        } else if col % 10 == 0 {
+            let digit = ((col / 10) % 10) as u32;
+            ruler.push(char::from_digit(digit, 10).unwrap_or('.'));
+        } else if col % 5 == 0 {
+            ruler.push('+');
+        } else {
+            ruler.push('.');
+        }
+    }
+
+    let text = format!("{}{}", BLANK_PREFIX, ruler);
+    Line::from(Span::styled(text, Style::default().fg(SCALE_FG)))
+}
 
 /// Render the complete XEDIT screen
 #[allow(clippy::too_many_arguments)]
@@ -125,10 +255,10 @@ pub fn render(
     );
 }
 
-/// Info about what's visible in the file area, for cursor positioning
+/// Info about what's visible in the file area, for cursor positioning.
 struct VisibleRange {
-    first_display_idx: usize,
-    // Maps display_idx to screen row (relative to file area)
+    /// Maps line_num → first screen row (relative to file area).
+    line_to_first_row: HashMap<usize, usize>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -208,7 +338,7 @@ fn build_display_list(editor: &Editor) -> Vec<DisplayItem> {
                 if shadow > 0 && editor.show_shadow() {
                     items.push(DisplayItem::Shadow(shadow));
                 }
-                i += shadow;
+                i += shadow.max(1);
             }
         }
     } else {
@@ -221,6 +351,237 @@ fn build_display_list(editor: &Editor) -> Vec<DisplayItem> {
     items
 }
 
+// ---------------------------------------------------------------------------
+// Screen layout builder
+// ---------------------------------------------------------------------------
+
+fn build_screen_layout(editor: &Editor, height: usize, width: usize) -> ScreenLayout {
+    let current = editor.current_line();
+    let data_width = width.saturating_sub(PREFIX_WIDTH);
+    let hex_mode = editor.hex();
+    // HEX takes priority over WRAP (IBM XEDIT behavior)
+    let wrap_mode = editor.wrap() && !hex_mode;
+    let scale_mode = editor.show_scale();
+
+    let display_list = build_display_list(editor);
+
+    // Count reserved rows (1-based row within file area)
+    let reserved_count = (1..=height)
+        .filter(|r| editor.reserved_line(*r).is_some())
+        .count();
+    let available = height.saturating_sub(reserved_count);
+
+    if available == 0 {
+        // All rows reserved — nothing to lay out.
+        // Note: `to_string()` allocates per frame per reserved line, but there
+        // are typically 0–2 reserved lines so the cost is negligible.
+        let mut rows = Vec::with_capacity(height);
+        for screen_row in 0..height {
+            if let Some(text) = editor.reserved_line(screen_row + 1) {
+                rows.push(RenderRow::Reserved {
+                    text: text.to_string(),
+                });
+            } else {
+                rows.push(RenderRow::Empty);
+            }
+        }
+        return ScreenLayout {
+            rows,
+            line_to_first_row: HashMap::new(),
+        };
+    }
+
+    // Compute how many screen rows each display item occupies
+    let row_counts: Vec<usize> = display_list
+        .iter()
+        .map(|item| match item {
+            DisplayItem::FileLine(n) => {
+                if hex_mode {
+                    3
+                } else if wrap_mode && data_width > 0 {
+                    let text_len = editor
+                        .buffer()
+                        .line_text(*n)
+                        .map(|t| t.chars().count())
+                        .unwrap_or(0);
+                    if text_len <= data_width {
+                        1
+                    } else {
+                        text_len.div_ceil(data_width)
+                    }
+                } else {
+                    1
+                }
+            }
+            _ => 1,
+        })
+        .collect();
+
+    // Find which display item corresponds to the current line.
+    // If the current line is hidden (e.g. by an ALL filter), fall back to the
+    // nearest visible FileLine rather than silently centering on TOF.
+    let current_idx = display_list
+        .iter()
+        .position(|item| match item {
+            DisplayItem::Tof => current == 0,
+            DisplayItem::FileLine(n) => *n == current,
+            _ => false,
+        })
+        .unwrap_or_else(|| {
+            // Current line not in display list — find nearest visible FileLine
+            let mut best = 0usize;
+            let mut best_dist = usize::MAX;
+            for (i, item) in display_list.iter().enumerate() {
+                if let DisplayItem::FileLine(n) = item {
+                    let dist = (*n as isize - current as isize).unsigned_abs();
+                    if dist < best_dist {
+                        best_dist = dist;
+                        best = i;
+                    }
+                }
+            }
+            best
+        });
+
+    // Desired screen row for the current line (within available rows)
+    let curline_row = match editor.curline_position() {
+        CurLinePosition::Middle => available / 2,
+        CurLinePosition::Row(r) => (*r).min(available.saturating_sub(1)),
+    };
+
+    // Scale steals one row above the current line
+    let scale_rows = if scale_mode && current > 0 { 1 } else { 0 };
+    let target_before = curline_row.saturating_sub(scale_rows);
+
+    // Walk backward from the current item to find the first visible item
+    let mut rows_above = 0;
+    let mut first_idx = current_idx;
+    for i in (0..current_idx).rev() {
+        let rc = row_counts[i];
+        if rows_above + rc > target_before {
+            break;
+        }
+        rows_above += rc;
+        first_idx = i;
+    }
+
+    // Expand display items into flat RenderRow entries (one per screen row,
+    // excluding reserved lines which are interleaved later).
+    let mut content_rows: Vec<RenderRow> = Vec::new();
+    let mut idx = first_idx;
+
+    while content_rows.len() < available && idx < display_list.len() {
+        // Insert scale line immediately before the current-line item.
+        // The `current > 0` guard skips scale at TOF: display_list[0] is always
+        // Tof (built first in build_display_list), so current==0 means TOF.
+        // Only insert the scale row when there is at least one further slot
+        // for the data line — otherwise the scale consumes the only available
+        // row and the current line disappears.
+        if scale_mode && current > 0 && idx == current_idx && content_rows.len() + 1 < available {
+            content_rows.push(RenderRow::Scale);
+        }
+
+        match &display_list[idx] {
+            DisplayItem::Tof => {
+                content_rows.push(RenderRow::Tof {
+                    is_current: current == 0,
+                });
+            }
+            DisplayItem::FileLine(n) => {
+                let is_current = *n == current;
+                let rc = row_counts[idx];
+
+                if hex_mode {
+                    content_rows.push(RenderRow::DataLine {
+                        line_num: *n,
+                        is_current,
+                    });
+                    if content_rows.len() < available {
+                        content_rows.push(RenderRow::HexHigh { line_num: *n });
+                    }
+                    if content_rows.len() < available {
+                        content_rows.push(RenderRow::HexLow { line_num: *n });
+                    }
+                } else if wrap_mode && rc > 1 {
+                    content_rows.push(RenderRow::DataLine {
+                        line_num: *n,
+                        is_current,
+                    });
+                    for chunk in 1..rc {
+                        if content_rows.len() >= available {
+                            break;
+                        }
+                        content_rows.push(RenderRow::WrapCont {
+                            line_num: *n,
+                            is_current,
+                            chunk_idx: chunk,
+                        });
+                    }
+                } else {
+                    content_rows.push(RenderRow::DataLine {
+                        line_num: *n,
+                        is_current,
+                    });
+                }
+            }
+            DisplayItem::Shadow(count) => {
+                content_rows.push(RenderRow::Shadow { count: *count });
+            }
+            DisplayItem::Eof => {
+                content_rows.push(RenderRow::Eof);
+            }
+        }
+
+        idx += 1;
+    }
+
+    // Pad to available height
+    while content_rows.len() < available {
+        content_rows.push(RenderRow::Empty);
+    }
+
+    // Interleave reserved lines at their fixed screen-row positions (1-based).
+    // Reserved rows with positions beyond `height` are silently ignored — they
+    // simply fall outside the visible area.
+    let mut final_rows: Vec<RenderRow> = Vec::with_capacity(height);
+    let mut content_iter = content_rows.into_iter();
+
+    for screen_row in 0..height {
+        if let Some(text) = editor.reserved_line(screen_row + 1) {
+            final_rows.push(RenderRow::Reserved {
+                text: text.to_string(),
+            });
+        } else if let Some(row) = content_iter.next() {
+            final_rows.push(row);
+        } else {
+            final_rows.push(RenderRow::Empty);
+        }
+    }
+
+    // Build line_to_first_row: maps line_num → first screen row for that line
+    let mut line_to_first_row = HashMap::new();
+    for (screen_row, row) in final_rows.iter().enumerate() {
+        match row {
+            RenderRow::Tof { .. } => {
+                line_to_first_row.entry(0).or_insert(screen_row);
+            }
+            RenderRow::DataLine { line_num, .. } => {
+                line_to_first_row.entry(*line_num).or_insert(screen_row);
+            }
+            _ => {}
+        }
+    }
+
+    ScreenLayout {
+        rows: final_rows,
+        line_to_first_row,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Paint: render file area using pre-computed layout
+// ---------------------------------------------------------------------------
+
 fn render_file_area(
     frame: &mut Frame,
     area: Rect,
@@ -228,95 +589,112 @@ fn render_file_area(
     prefix_inputs: &HashMap<usize, String>,
 ) -> VisibleRange {
     let height = area.height as usize;
-    let current = editor.current_line();
     let width = area.width as usize;
+    let layout = build_screen_layout(editor, height, width);
 
-    let display_list = build_display_list(editor);
-
-    let curline_row = match editor.curline_position() {
-        CurLinePosition::Middle => height / 2,
-        CurLinePosition::Row(r) => (*r).min(height.saturating_sub(1)),
-    };
-
-    // Find which display item corresponds to the current line
-    let current_item_idx = display_list
-        .iter()
-        .position(|item| match item {
-            DisplayItem::Tof => current == 0,
-            DisplayItem::FileLine(n) => *n == current,
-            _ => false,
-        })
-        .unwrap_or(0);
-
-    let first_item = current_item_idx.saturating_sub(curline_row);
-
-    // The first_display_idx for cursor positioning: we need to map back to line numbers
-    let first_display_idx = match display_list.get(first_item) {
-        Some(DisplayItem::Tof) => 0,
-        Some(DisplayItem::FileLine(n)) => *n,
-        _ => 0,
-    };
-
-    let _data_fg = resolve_color(editor, "FileArea", DATA_FG);
-    let _prefix_fg = resolve_color(editor, "Prefix", PREFIX_FG);
-    let _curline_fg = resolve_color(editor, "CurLine", CURRENT_LINE_FG);
-    let _curline_bg = resolve_color(editor, "CurLine", CURRENT_LINE_BG);
     let shadow_fg = resolve_color(editor, "Shadow", SHADOW_FG);
+    let data_width = width.saturating_sub(PREFIX_WIDTH);
 
     let mut lines: Vec<Line> = Vec::with_capacity(height);
-    let mut reserved_offset = 0usize;
 
-    for row in 0..height {
-        // Check for reserved lines (1-based row in file area)
-        if let Some(reserved_text) = editor.reserved_line(row + 1) {
-            let padded = format!("{:<width$}", reserved_text, width = width);
-            lines.push(Line::from(Span::styled(
-                padded,
-                Style::default().fg(Color::White).bg(Color::Blue),
-            )));
-            reserved_offset += 1;
-            continue;
-        }
-
-        let item_idx = first_item + row - reserved_offset;
-        let item = display_list.get(item_idx);
-
-        let line = match item {
-            Some(DisplayItem::Tof) => {
-                let is_current = current == 0;
-                make_marker_line(TOF_MARKER, is_current, width)
+    for render_row in &layout.rows {
+        match render_row {
+            RenderRow::Tof { is_current } => {
+                lines.push(make_marker_line(TOF_MARKER, *is_current, width));
             }
-            Some(DisplayItem::FileLine(line_num)) => {
-                let is_current = *line_num == current;
+            RenderRow::DataLine {
+                line_num,
+                is_current,
+            } => {
                 let prefix_text = prefix_inputs.get(line_num);
                 if let Some(text) = editor.buffer().line_text(*line_num) {
-                    make_data_line(
+                    // make_data_line already truncates to data_width by chars,
+                    // so no pre-truncation needed here.
+                    lines.push(make_data_line(
                         *line_num,
                         text,
-                        is_current,
+                        *is_current,
                         editor.show_number(),
                         width,
                         prefix_text,
-                    )
+                    ));
                 } else {
-                    make_empty_row(width)
+                    lines.push(make_empty_row(width));
                 }
             }
-            Some(DisplayItem::Shadow(count)) => {
+            RenderRow::HexHigh { line_num } => {
+                let text = editor.buffer().line_text(*line_num).unwrap_or("");
+                lines.push(make_hex_nibble_line(text, data_width, true));
+            }
+            RenderRow::HexLow { line_num } => {
+                let text = editor.buffer().line_text(*line_num).unwrap_or("");
+                lines.push(make_hex_nibble_line(text, data_width, false));
+            }
+            RenderRow::WrapCont {
+                line_num,
+                is_current,
+                chunk_idx,
+            } => {
+                debug_assert!(
+                    data_width > 0,
+                    "WrapCont should not exist when data_width == 0"
+                );
+                let text = editor.buffer().line_text(*line_num).unwrap_or("");
+                let chunk_text: String = text
+                    .chars()
+                    .skip(*chunk_idx * data_width)
+                    .take(data_width)
+                    .collect();
+                let padded_data = format!("{:<dw$}", chunk_text, dw = data_width);
+
+                if *is_current {
+                    let full = format!("{}{}", BLANK_PREFIX, padded_data);
+                    lines.push(Line::from(Span::styled(
+                        full,
+                        Style::default()
+                            .fg(CURRENT_LINE_FG)
+                            .bg(CURRENT_LINE_BG)
+                            .add_modifier(Modifier::BOLD),
+                    )));
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::styled(BLANK_PREFIX.to_string(), Style::default().fg(PREFIX_FG)),
+                        Span::styled(padded_data, Style::default().fg(DATA_FG)),
+                    ]));
+                }
+            }
+            RenderRow::Shadow { count } => {
                 let text = format!("      --- {} line(s) not displayed ---", count);
                 let padded = format!("{:<width$}", text, width = width);
-                Line::from(Span::styled(padded, Style::default().fg(shadow_fg)))
+                lines.push(Line::from(Span::styled(
+                    padded,
+                    Style::default().fg(shadow_fg),
+                )));
             }
-            Some(DisplayItem::Eof) => make_marker_line(EOF_MARKER, false, width),
-            None => make_empty_row(width),
-        };
-
-        lines.push(line);
+            RenderRow::Eof => {
+                lines.push(make_marker_line(EOF_MARKER, false, width));
+            }
+            RenderRow::Scale => {
+                lines.push(make_scale_line(width));
+            }
+            RenderRow::Reserved { text } => {
+                let padded = format!("{:<width$}", text, width = width);
+                lines.push(Line::from(Span::styled(
+                    padded,
+                    Style::default().fg(Color::White).bg(Color::Blue),
+                )));
+            }
+            RenderRow::Empty => {
+                lines.push(make_empty_row(width));
+            }
+        }
     }
 
     frame.render_widget(Paragraph::new(lines), area);
 
-    VisibleRange { first_display_idx }
+    VisibleRange {
+        line_to_first_row: layout.line_to_first_row,
+    }
 }
 
 fn make_marker_line(marker: &str, is_current: bool, width: usize) -> Line<'static> {
@@ -346,16 +724,18 @@ fn make_data_line(
     prefix_input: Option<&String>,
 ) -> Line<'static> {
     let data_width = width.saturating_sub(PREFIX_WIDTH);
-    let display_text = if text.len() > data_width {
-        &text[..data_width]
+    // Truncate by char count, not byte count, to avoid panicking on multi-byte UTF-8
+    let display_text: String = if text.chars().count() > data_width {
+        text.chars().take(data_width).collect()
     } else {
-        text
+        text.to_string()
     };
 
     // Build prefix string
     let prefix_str = if let Some(input) = prefix_input {
         // Show the user's prefix input (padded/truncated to 5 chars)
-        format!("{:<5} ", &input[..input.len().min(5)])
+        let truncated: String = input.chars().take(5).collect();
+        format!("{:<5} ", truncated)
     } else if is_current {
         if show_number {
             format!("{:>04}> ", line_num)
@@ -460,10 +840,12 @@ fn render_command_line(
     };
 
     let remaining = (area.width as usize).saturating_sub(prompt.len() + 1);
-    let display_text = if text.len() > remaining {
-        &text[text.len() - remaining..]
+    // Truncate by char count to avoid panicking on multi-byte UTF-8
+    let char_count = text.chars().count();
+    let display_text: String = if char_count > remaining {
+        text.chars().skip(char_count - remaining).collect()
     } else {
-        text
+        text.to_string()
     };
 
     let line = Line::from(vec![
@@ -471,7 +853,7 @@ fn render_command_line(
             format!("{} ", prompt),
             Style::default().fg(cmd_fg).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(display_text.to_string(), Style::default().fg(DATA_FG)),
+        Span::styled(display_text, Style::default().fg(DATA_FG)),
     ]);
 
     frame.render_widget(Paragraph::new(line), area);
@@ -494,32 +876,569 @@ fn position_cursor(
     if in_input_mode {
         // Cursor at end of input text in command line area
         let prompt_len = 7; // "input> "
-        let x = cmd_area.x + prompt_len + input_text.len() as u16;
-        frame.set_cursor_position((x.min(cmd_area.x + cmd_area.width - 1), cmd_area.y));
+        let x = cmd_area.x + prompt_len + input_text.chars().count() as u16;
+        frame.set_cursor_position((
+            x.min(cmd_area.x.saturating_add(cmd_area.width.saturating_sub(1))),
+            cmd_area.y,
+        ));
         return;
     }
 
     match focus {
         CursorFocus::CommandLine => {
-            let prompt_len = 6u16; // "=====> "
+            let prompt_len = 6u16; // "====> " (5 chars + space = 6)
             let x = cmd_area.x + prompt_len + command_cursor as u16;
-            frame.set_cursor_position((x.min(cmd_area.x + cmd_area.width - 1), cmd_area.y));
+            frame.set_cursor_position((
+                x.min(cmd_area.x.saturating_add(cmd_area.width.saturating_sub(1))),
+                cmd_area.y,
+            ));
         }
         CursorFocus::FileArea => {
-            // Find which screen row the file_line maps to
-            let display_idx = if file_line == 0 { 0 } else { file_line };
-            if display_idx >= visible.first_display_idx {
-                let row = display_idx - visible.first_display_idx;
+            // Look up the screen row for the current line from the layout map
+            if let Some(&row) = visible.line_to_first_row.get(&file_line) {
                 if row < file_area.height as usize {
                     let screen_y = file_area.y + row as u16;
-                    // file_col is 1-based; screen column is 0-based from area.x
-                    let screen_x = file_area.x + (file_col as u16).saturating_sub(1);
+                    // file_col is 1-based within the data area; clamp to data width
+                    debug_assert!(file_col >= 1, "file_col is 1-based");
+                    let data_col = (file_col as u16)
+                        .saturating_sub(1)
+                        .min(file_area.width.saturating_sub(PREFIX_WIDTH as u16 + 1));
+                    let screen_x = file_area.x + PREFIX_WIDTH as u16 + data_col;
                     frame.set_cursor_position((
-                        screen_x.min(file_area.x + file_area.width - 1),
+                        screen_x.min(
+                            file_area
+                                .x
+                                .saturating_add(file_area.width.saturating_sub(1)),
+                        ),
                         screen_y,
                     ));
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xedit_core::command::{Command, SetCommand};
+
+    // --- to_hex_char ---
+
+    #[test]
+    fn hex_char_digits() {
+        for n in 0..=9u8 {
+            assert_eq!(to_hex_char(n), (b'0' + n) as char);
+        }
+    }
+
+    #[test]
+    fn hex_char_letters() {
+        assert_eq!(to_hex_char(10), 'A');
+        assert_eq!(to_hex_char(11), 'B');
+        assert_eq!(to_hex_char(12), 'C');
+        assert_eq!(to_hex_char(13), 'D');
+        assert_eq!(to_hex_char(14), 'E');
+        assert_eq!(to_hex_char(15), 'F');
+    }
+
+    #[test]
+    fn hex_char_out_of_range() {
+        assert_eq!(to_hex_char(16), '.');
+        assert_eq!(to_hex_char(255), '.');
+    }
+
+    // --- char_chunks ---
+
+    #[test]
+    fn chunks_basic() {
+        assert_eq!(char_chunks("hello", 3), vec!["hel", "lo"]);
+    }
+
+    #[test]
+    fn chunks_empty() {
+        assert_eq!(char_chunks("", 5), vec![""]);
+    }
+
+    #[test]
+    fn chunks_no_wrap() {
+        assert_eq!(char_chunks("hi", 10), vec!["hi"]);
+    }
+
+    #[test]
+    fn chunks_exact_fit() {
+        assert_eq!(char_chunks("abcdef", 3), vec!["abc", "def"]);
+    }
+
+    #[test]
+    fn chunks_zero_size() {
+        assert_eq!(char_chunks("abc", 0), vec!["abc"]);
+    }
+
+    #[test]
+    fn chunks_multibyte() {
+        // Each char is one chunk unit regardless of byte width
+        assert_eq!(char_chunks("aöü", 2), vec!["aö", "ü"]);
+    }
+
+    // --- make_scale_line ---
+
+    #[test]
+    fn scale_line_80() {
+        let line = make_scale_line(80);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        // PREFIX_WIDTH = 6 blank chars, then ruler starts
+        let ruler = &text[PREFIX_WIDTH..];
+        assert_eq!(ruler.chars().nth(0), Some('|'), "col 1 = |");
+        assert_eq!(ruler.chars().nth(4), Some('+'), "col 5 = +");
+        assert_eq!(ruler.chars().nth(9), Some('1'), "col 10 = 1");
+        assert_eq!(ruler.chars().nth(14), Some('+'), "col 15 = +");
+        assert_eq!(ruler.chars().nth(19), Some('2'), "col 20 = 2");
+        // IBM XEDIT: trailing `|` at last column (data_width = 74)
+        assert_eq!(ruler.chars().nth(73), Some('|'), "last col = |");
+    }
+
+    #[test]
+    fn scale_line_20() {
+        let line = make_scale_line(20);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let ruler = &text[PREFIX_WIDTH..];
+        // data_width = 14, so ruler has 14 columns
+        assert_eq!(ruler.chars().count(), 14);
+        assert_eq!(ruler.chars().nth(0), Some('|'));
+        assert_eq!(ruler.chars().nth(9), Some('1'));
+        // IBM XEDIT: trailing `|` at last column (data_width = 14)
+        assert_eq!(ruler.chars().nth(13), Some('|'), "last col = |");
+    }
+
+    #[test]
+    fn scale_line_single_column() {
+        // data_width = 1: both first-column and last-column guards fire → single '|'
+        let line = make_scale_line(7);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let ruler = &text[PREFIX_WIDTH..];
+        assert_eq!(ruler.chars().count(), 1);
+        assert_eq!(ruler.chars().nth(0), Some('|'));
+    }
+
+    #[test]
+    fn scale_line_narrow() {
+        // Width <= PREFIX_WIDTH means data_width = 0, ruler is empty
+        let line = make_scale_line(6);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text.chars().count(), 6);
+    }
+
+    // --- hex line rendering ---
+
+    #[test]
+    fn hex_nibbles_hello() {
+        // 'H' = 0x48, 'e' = 0x65, 'l' = 0x6C, 'l' = 0x6C, 'o' = 0x6F
+        // Uses first byte of UTF-8 encoding (same as codepoint for ASCII)
+        let expected_high = "46666";
+        let expected_low = "85CCF";
+        let text = "Hello";
+        let mut high = String::new();
+        let mut low = String::new();
+        let mut buf = [0u8; 4];
+        for ch in text.chars() {
+            ch.encode_utf8(&mut buf);
+            let b = buf[0];
+            high.push(to_hex_char((b >> 4) & 0xF));
+            low.push(to_hex_char(b & 0xF));
+        }
+        assert_eq!(high, expected_high);
+        assert_eq!(low, expected_low);
+    }
+
+    #[test]
+    fn hex_nibbles_multibyte() {
+        // '€' = U+20AC, UTF-8: E2 82 AC — first byte is 0xE2
+        let mut buf = [0u8; 4];
+        '€'.encode_utf8(&mut buf);
+        let b = buf[0]; // 0xE2
+        assert_eq!(to_hex_char((b >> 4) & 0xF), 'E');
+        assert_eq!(to_hex_char(b & 0xF), '2');
+    }
+
+    // --- Layout tests using Editor ---
+
+    fn make_test_editor(lines: &[&str]) -> Editor {
+        let mut ed = Editor::new();
+        for line in lines {
+            ed.input_line(line);
+        }
+        // Reset to line 1
+        ed.execute(&Command::Top).unwrap();
+        ed.execute(&Command::Down(1)).unwrap();
+        ed
+    }
+
+    #[test]
+    fn layout_normal_line_to_row_mapping() {
+        let ed = make_test_editor(&["a", "b", "c"]);
+        let layout = build_screen_layout(&ed, 10, 80);
+        // In normal mode, each line takes 1 row
+        let row1 = layout
+            .line_to_first_row
+            .get(&1)
+            .copied()
+            .expect("line 1 should be visible in layout");
+        let row2 = layout
+            .line_to_first_row
+            .get(&2)
+            .copied()
+            .expect("line 2 should be visible in layout");
+        // Rows should be sequential (offset by centering)
+        assert_eq!(row2, row1 + 1);
+    }
+
+    #[test]
+    fn layout_hex_mode_3x_spacing() {
+        let mut ed = make_test_editor(&["a", "b"]);
+        ed.execute(&Command::Set(SetCommand::Hex(true))).unwrap();
+        let layout = build_screen_layout(&ed, 20, 80);
+        // In hex mode, each line takes 3 rows
+        let r1 = layout
+            .line_to_first_row
+            .get(&1)
+            .copied()
+            .expect("line 1 should be visible");
+        let r2 = layout
+            .line_to_first_row
+            .get(&2)
+            .copied()
+            .expect("line 2 should be visible");
+        assert_eq!(r2 - r1, 3, "hex lines should be 3 rows apart");
+    }
+
+    #[test]
+    fn layout_wrap_mode_variable_spacing() {
+        let mut ed = make_test_editor(&[
+            "short",
+            &"x".repeat(200), // long line that wraps
+            "end",
+        ]);
+        ed.execute(&Command::Set(SetCommand::Wrap(true))).unwrap();
+
+        let layout = build_screen_layout(&ed, 40, 80);
+
+        // data_width = 80 - 6 = 74
+        // "short" fits in 1 row, "x"*200 needs ceil(200/74) = 3 rows
+        let r1 = layout
+            .line_to_first_row
+            .get(&1)
+            .copied()
+            .expect("line 1 visible");
+        let r2 = layout
+            .line_to_first_row
+            .get(&2)
+            .copied()
+            .expect("line 2 visible");
+        let r3 = layout
+            .line_to_first_row
+            .get(&3)
+            .copied()
+            .expect("line 3 visible");
+        // line 1 ("short") takes 1 row
+        assert_eq!(r2 - r1, 1);
+        // line 2 ("x"*200) takes 3 rows (200/74 = 2.7 → 3)
+        assert_eq!(r3 - r2, 3);
+    }
+
+    #[test]
+    fn layout_scale_adds_row() {
+        let mut ed = make_test_editor(&["a", "b", "c"]);
+        let layout_no_scale = build_screen_layout(&ed, 10, 80);
+
+        ed.execute(&Command::Set(SetCommand::Scale(true))).unwrap();
+        let layout_with_scale = build_screen_layout(&ed, 10, 80);
+
+        // With scale on, current line should be shifted down by 1
+        let row_no_scale = layout_no_scale
+            .line_to_first_row
+            .get(&1)
+            .copied()
+            .expect("line 1 should be visible in layout");
+        let row_with_scale = layout_with_scale
+            .line_to_first_row
+            .get(&1)
+            .copied()
+            .expect("line 1 should be visible with scale");
+        assert_eq!(
+            row_with_scale,
+            row_no_scale + 1,
+            "scale line shifts current line down by 1"
+        );
+    }
+
+    #[test]
+    fn layout_scale_has_scale_row_before_current() {
+        let mut ed = make_test_editor(&["a", "b", "c"]);
+        ed.execute(&Command::Set(SetCommand::Scale(true))).unwrap();
+        let layout = build_screen_layout(&ed, 10, 80);
+
+        // The row before the current line should be a Scale
+        let cur_row = layout
+            .line_to_first_row
+            .get(&1)
+            .copied()
+            .expect("line 1 should be visible in layout");
+        assert!(
+            cur_row > 0,
+            "current line should not be at row 0 with scale"
+        );
+        assert!(
+            matches!(layout.rows[cur_row - 1], RenderRow::Scale),
+            "row before current line should be Scale"
+        );
+    }
+
+    #[test]
+    fn layout_scale_not_at_tof() {
+        let mut ed = make_test_editor(&["a"]);
+        // Move to TOF
+        ed.execute(&Command::Top).unwrap();
+        ed.execute(&Command::Set(SetCommand::Scale(true))).unwrap();
+        let layout = build_screen_layout(&ed, 10, 80);
+
+        // No Scale row should appear when current line is TOF (0)
+        assert!(
+            !layout.rows.iter().any(|r| matches!(r, RenderRow::Scale)),
+            "no scale when at TOF"
+        );
+    }
+
+    #[test]
+    fn layout_scale_with_curline_row_zero() {
+        let mut ed = make_test_editor(&["a", "b", "c"]);
+        ed.execute(&Command::Set(SetCommand::Scale(true))).unwrap();
+        ed.execute(&Command::Set(SetCommand::CurLine(
+            xedit_core::command::CurLinePosition::Row(0),
+        )))
+        .unwrap();
+        let layout = build_screen_layout(&ed, 10, 80);
+
+        // Scale should appear at row 0, pushing current line to row 1
+        assert!(
+            matches!(layout.rows[0], RenderRow::Scale),
+            "scale at row 0 when curline is row 0"
+        );
+        let cur_row = layout
+            .line_to_first_row
+            .get(&1)
+            .copied()
+            .expect("line 1 should be visible");
+        assert_eq!(cur_row, 1, "current line at row 1 (after scale)");
+    }
+
+    #[test]
+    fn layout_hex_wins_over_wrap() {
+        let mut ed = make_test_editor(&[&"x".repeat(200)]);
+        // Enable both — hex should win
+        ed.execute(&Command::Set(SetCommand::Hex(true))).unwrap();
+        ed.execute(&Command::Set(SetCommand::Wrap(true))).unwrap();
+
+        let layout = build_screen_layout(&ed, 20, 80);
+
+        // Should have HexHigh/HexLow rows, not WrapCont
+        assert!(
+            layout
+                .rows
+                .iter()
+                .any(|r| matches!(r, RenderRow::HexHigh { .. })),
+            "hex rows present"
+        );
+        assert!(
+            !layout
+                .rows
+                .iter()
+                .any(|r| matches!(r, RenderRow::WrapCont { .. })),
+            "no wrap rows when hex is on"
+        );
+    }
+
+    #[test]
+    fn layout_wrap_short_text_no_continuation() {
+        let mut ed = make_test_editor(&["short"]);
+        ed.execute(&Command::Set(SetCommand::Wrap(true))).unwrap();
+        let layout = build_screen_layout(&ed, 10, 80);
+
+        // "short" fits in data_width, so no WrapCont rows
+        assert!(
+            !layout
+                .rows
+                .iter()
+                .any(|r| matches!(r, RenderRow::WrapCont { .. })),
+            "no wrap continuation for short text"
+        );
+    }
+
+    #[test]
+    fn layout_wrap_exact_fit_no_continuation() {
+        // data_width = 80 - 6 = 74, text exactly 74 chars
+        let mut ed = make_test_editor(&[&"a".repeat(74)]);
+        ed.execute(&Command::Set(SetCommand::Wrap(true))).unwrap();
+        let layout = build_screen_layout(&ed, 10, 80);
+
+        assert!(
+            !layout
+                .rows
+                .iter()
+                .any(|r| matches!(r, RenderRow::WrapCont { .. })),
+            "no wrap continuation when text exactly fits"
+        );
+    }
+
+    #[test]
+    fn layout_empty_buffer() {
+        let ed = Editor::new();
+        let layout = build_screen_layout(&ed, 10, 80);
+        // Should have TOF and EOF, no crashes
+        assert!(layout
+            .rows
+            .iter()
+            .any(|r| matches!(r, RenderRow::Tof { .. })));
+        assert!(layout.rows.iter().any(|r| matches!(r, RenderRow::Eof)));
+    }
+
+    #[test]
+    fn layout_scale_plus_hex() {
+        let mut ed = make_test_editor(&["Hello"]);
+        ed.execute(&Command::Set(SetCommand::Hex(true))).unwrap();
+        ed.execute(&Command::Set(SetCommand::Scale(true))).unwrap();
+        let layout = build_screen_layout(&ed, 20, 80);
+
+        // Should have Scale before current line, then DataLine + HexHigh + HexLow
+        let cur_row = layout
+            .line_to_first_row
+            .get(&1)
+            .copied()
+            .expect("line 1 should be visible in layout");
+        assert!(cur_row > 0);
+        assert!(matches!(layout.rows[cur_row - 1], RenderRow::Scale));
+        assert!(matches!(
+            layout.rows[cur_row],
+            RenderRow::DataLine { line_num: 1, .. }
+        ));
+        assert!(matches!(
+            layout.rows[cur_row + 1],
+            RenderRow::HexHigh { line_num: 1 }
+        ));
+        assert!(matches!(
+            layout.rows[cur_row + 2],
+            RenderRow::HexLow { line_num: 1 }
+        ));
+    }
+
+    // --- WrapCont text content ---
+
+    #[test]
+    fn layout_wrap_cont_text_matches_chunks() {
+        // data_width = 80 - 6 = 74. Text of 150 chars produces 3 chunks:
+        // chunk 0: chars 0..74 (DataLine), chunk 1: chars 74..148, chunk 2: chars 148..150
+        let text = "A".repeat(74).to_string() + &"B".repeat(74) + "CC";
+        let mut ed = make_test_editor(&[&text]);
+        ed.execute(&Command::Set(SetCommand::Wrap(true))).unwrap();
+        let layout = build_screen_layout(&ed, 20, 80);
+
+        let data_width = 74usize;
+        let wrap_conts: Vec<_> = layout
+            .rows
+            .iter()
+            .filter_map(|r| match r {
+                RenderRow::WrapCont { chunk_idx, .. } => Some(*chunk_idx),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(wrap_conts, vec![1, 2], "should have chunk_idx 1 and 2");
+
+        // Verify that skip/take on the original text produces the expected chunks
+        let chunk1: String = text.chars().skip(1 * data_width).take(data_width).collect();
+        assert_eq!(chunk1, "B".repeat(74));
+        let chunk2: String = text.chars().skip(2 * data_width).take(data_width).collect();
+        assert_eq!(chunk2, "CC");
+    }
+
+    // --- Reserved rows in layout ---
+
+    #[test]
+    fn layout_reserved_rows_interleaved() {
+        let mut ed = make_test_editor(&["a", "b", "c"]);
+        // Reserve row 1 (top of screen)
+        ed.execute(&Command::Set(SetCommand::Reserved(1, "Header".to_string())))
+            .unwrap();
+        let layout = build_screen_layout(&ed, 10, 80);
+
+        // Row 0 (screen row 1, 1-based) should be Reserved
+        assert!(
+            matches!(&layout.rows[0], RenderRow::Reserved { text } if text == "Header"),
+            "row 0 should be reserved 'Header'"
+        );
+        // Content rows should still be present after the reserved row
+        assert!(
+            layout
+                .rows
+                .iter()
+                .skip(1)
+                .any(|r| matches!(r, RenderRow::DataLine { .. })),
+            "file content should follow reserved row"
+        );
+        // Total layout height should match requested height
+        assert_eq!(layout.rows.len(), 10);
+    }
+
+    // --- Edge-case tests ---
+
+    #[test]
+    fn layout_scale_available_one_drops_scale_not_data() {
+        // With only 1 available row, scale should be suppressed so the
+        // current data line is still visible.
+        let mut ed = make_test_editor(&["a"]);
+        ed.execute(&Command::Set(SetCommand::Scale(true))).unwrap();
+        ed.execute(&Command::Set(SetCommand::CurLine(
+            xedit_core::command::CurLinePosition::Row(0),
+        )))
+        .unwrap();
+        let layout = build_screen_layout(&ed, 1, 80);
+
+        // The single row should be a DataLine (or Tof), not Scale
+        assert!(
+            !layout.rows.iter().any(|r| matches!(r, RenderRow::Scale)),
+            "scale should be suppressed when available == 1"
+        );
+        assert!(
+            layout.line_to_first_row.get(&1).is_some(),
+            "current data line should still be present"
+        );
+    }
+
+    #[test]
+    fn layout_current_line_off_screen_no_panic() {
+        // Large buffer where current line might not fit in a tiny window.
+        // Ensure position_cursor handles empty line_to_first_row gracefully.
+        let lines: Vec<&str> = (0..100).map(|_| "x").collect();
+        let mut ed = make_test_editor(&lines);
+        // Move to line 100
+        ed.execute(&Command::Bottom).unwrap();
+        // Build layout with very small height
+        let layout = build_screen_layout(&ed, 3, 80);
+
+        // Even if current line is present, the layout shouldn't panic
+        assert_eq!(layout.rows.len(), 3);
+    }
+
+    #[test]
+    fn hex_nibble_line_zero_data_width() {
+        // width == PREFIX_WIDTH means data_width = 0
+        let line = make_hex_nibble_line("Hello", 0, true);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        // Should be just the blank prefix, no panic or garbled output
+        assert_eq!(text.trim(), "");
+        assert!(text.len() >= PREFIX_WIDTH);
     }
 }
