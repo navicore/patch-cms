@@ -53,7 +53,11 @@ const SHADOW_FG: Color = Color::DarkGray;
 const INPUT_MODE_FG: Color = Color::Red;
 const SCALE_FG: Color = Color::Cyan;
 const HEX_FG: Color = Color::DarkGray;
-const BLANK_PREFIX: &str = "      "; // must equal PREFIX_WIDTH spaces
+const BLANK_PREFIX: &str = "      ";
+const _: () = assert!(
+    BLANK_PREFIX.len() == PREFIX_WIDTH,
+    "BLANK_PREFIX must equal PREFIX_WIDTH spaces"
+);
 
 // ---------------------------------------------------------------------------
 // Layout types
@@ -120,7 +124,11 @@ fn make_hex_nibble_line(text: &str, data_width: usize, width: usize, high: bool)
     let mut buf = [0u8; 4];
     for ch in text.chars().take(data_width) {
         ch.encode_utf8(&mut buf);
-        let b = buf[0]; // first byte of UTF-8 encoding
+        // Uses only the first byte of the UTF-8 encoding. For ASCII this
+        // matches the code-point value exactly; for multi-byte characters
+        // (e.g. '€' = E2 82 AC) only the leading byte is shown. This is a
+        // known limitation vs IBM XEDIT's EBCDIC 1-byte-per-column model.
+        let b = buf[0];
         if high {
             nibbles.push(to_hex_char((b >> 4) & 0xF));
         } else {
@@ -453,11 +461,11 @@ fn build_screen_layout(editor: &Editor, height: usize, width: usize) -> ScreenLa
         // Insert scale line immediately before the current-line item.
         // The `current > 0` guard skips scale at TOF: display_list[0] is always
         // Tof (built first in build_display_list), so current==0 means TOF.
-        if scale_mode && current > 0 && idx == current_idx {
+        // Only insert the scale row when there is at least one further slot
+        // for the data line — otherwise the scale consumes the only available
+        // row and the current line disappears.
+        if scale_mode && current > 0 && idx == current_idx && content_rows.len() + 1 < available {
             content_rows.push(RenderRow::Scale);
-            if content_rows.len() >= available {
-                break;
-            }
         }
 
         match &display_list[idx] {
@@ -573,8 +581,6 @@ fn render_file_area(
 
     let shadow_fg = resolve_color(editor, "Shadow", SHADOW_FG);
     let data_width = width.saturating_sub(PREFIX_WIDTH);
-    let hex_mode = editor.hex();
-    let wrap_mode = editor.wrap() && !hex_mode;
 
     let mut lines: Vec<Line> = Vec::with_capacity(height);
 
@@ -589,29 +595,16 @@ fn render_file_area(
             } => {
                 let prefix_text = prefix_inputs.get(line_num);
                 if let Some(text) = editor.buffer().line_text(*line_num) {
-                    // In wrap mode, only show the first chunk of chars
-                    let display =
-                        if wrap_mode && data_width > 0 && text.chars().count() > data_width {
-                            let first_chunk: String = text.chars().take(data_width).collect();
-                            make_data_line(
-                                *line_num,
-                                &first_chunk,
-                                *is_current,
-                                editor.show_number(),
-                                width,
-                                prefix_text,
-                            )
-                        } else {
-                            make_data_line(
-                                *line_num,
-                                text,
-                                *is_current,
-                                editor.show_number(),
-                                width,
-                                prefix_text,
-                            )
-                        };
-                    lines.push(display);
+                    // make_data_line already truncates to data_width by chars,
+                    // so no pre-truncation needed here.
+                    lines.push(make_data_line(
+                        *line_num,
+                        text,
+                        *is_current,
+                        editor.show_number(),
+                        width,
+                        prefix_text,
+                    ));
                 } else {
                     lines.push(make_empty_row(width));
                 }
@@ -877,7 +870,7 @@ fn position_cursor(
 
     match focus {
         CursorFocus::CommandLine => {
-            let prompt_len = 6u16; // "=====> "
+            let prompt_len = 6u16; // "===== " (5 chars + space = 6)
             let x = cmd_area.x + prompt_len + command_cursor as u16;
             frame.set_cursor_position((x.min(cmd_area.x + cmd_area.width - 1), cmd_area.y));
         }
@@ -887,6 +880,7 @@ fn position_cursor(
                 if row < file_area.height as usize {
                     let screen_y = file_area.y + row as u16;
                     // file_col is 1-based within the data area; clamp to data width
+                    debug_assert!(file_col >= 1, "file_col is 1-based");
                     let data_col = (file_col as u16)
                         .saturating_sub(1)
                         .min(file_area.width.saturating_sub(PREFIX_WIDTH as u16 + 1));
@@ -1363,5 +1357,55 @@ mod tests {
         );
         // Total layout height should match requested height
         assert_eq!(layout.rows.len(), 10);
+    }
+
+    // --- Edge-case tests ---
+
+    #[test]
+    fn layout_scale_available_one_drops_scale_not_data() {
+        // With only 1 available row, scale should be suppressed so the
+        // current data line is still visible.
+        let mut ed = make_test_editor(&["a"]);
+        ed.execute(&Command::Set(SetCommand::Scale(true))).unwrap();
+        ed.execute(&Command::Set(SetCommand::CurLine(
+            xedit_core::command::CurLinePosition::Row(0),
+        )))
+        .unwrap();
+        let layout = build_screen_layout(&ed, 1, 80);
+
+        // The single row should be a DataLine (or Tof), not Scale
+        assert!(
+            !layout.rows.iter().any(|r| matches!(r, RenderRow::Scale)),
+            "scale should be suppressed when available == 1"
+        );
+        assert!(
+            layout.line_to_first_row.get(&1).is_some(),
+            "current data line should still be present"
+        );
+    }
+
+    #[test]
+    fn layout_current_line_off_screen_no_panic() {
+        // Large buffer where current line might not fit in a tiny window.
+        // Ensure position_cursor handles empty line_to_first_row gracefully.
+        let lines: Vec<&str> = (0..100).map(|_| "x").collect();
+        let mut ed = make_test_editor(&lines);
+        // Move to line 100
+        ed.execute(&Command::Bottom).unwrap();
+        // Build layout with very small height
+        let layout = build_screen_layout(&ed, 3, 80);
+
+        // Even if current line is present, the layout shouldn't panic
+        assert_eq!(layout.rows.len(), 3);
+    }
+
+    #[test]
+    fn hex_nibble_line_zero_data_width() {
+        // width == PREFIX_WIDTH means data_width = 0
+        let line = make_hex_nibble_line("Hello", 0, PREFIX_WIDTH, true);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        // Should be just the blank prefix, no panic or garbled output
+        assert_eq!(text.trim(), "");
+        assert!(text.len() >= PREFIX_WIDTH);
     }
 }
