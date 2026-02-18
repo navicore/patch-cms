@@ -53,6 +53,7 @@ const SHADOW_FG: Color = Color::DarkGray;
 const INPUT_MODE_FG: Color = Color::Red;
 const SCALE_FG: Color = Color::Cyan;
 const HEX_FG: Color = Color::DarkGray;
+const BLANK_PREFIX: &str = "      "; // must equal PREFIX_WIDTH spaces
 
 // ---------------------------------------------------------------------------
 // Layout types
@@ -115,7 +116,6 @@ fn to_hex_char(nibble: u8) -> char {
 /// Uses the first byte of each character's UTF-8 encoding for the nibble
 /// value, keeping 1:1 column alignment with the text row.
 fn make_hex_nibble_line(text: &str, data_width: usize, width: usize, high: bool) -> Line<'static> {
-    let prefix = " ".repeat(PREFIX_WIDTH);
     let mut nibbles = String::with_capacity(data_width);
     let mut buf = [0u8; 4];
     for ch in text.chars().take(data_width) {
@@ -129,7 +129,7 @@ fn make_hex_nibble_line(text: &str, data_width: usize, width: usize, high: bool)
     }
     let padded = format!(
         "{}{:<dw$}",
-        prefix,
+        BLANK_PREFIX,
         nibbles,
         dw = width.saturating_sub(PREFIX_WIDTH)
     );
@@ -137,6 +137,7 @@ fn make_hex_nibble_line(text: &str, data_width: usize, width: usize, high: bool)
 }
 
 /// Split `text` into char-based chunks of at most `chunk_size` characters.
+#[cfg(test)]
 fn char_chunks(text: &str, chunk_size: usize) -> Vec<String> {
     if chunk_size == 0 {
         return vec![text.to_string()];
@@ -154,7 +155,6 @@ fn char_chunks(text: &str, chunk_size: usize) -> Vec<String> {
 /// Build an IBM XEDIT–style column ruler (scale line).
 fn make_scale_line(width: usize) -> Line<'static> {
     let data_width = width.saturating_sub(PREFIX_WIDTH);
-    let prefix = " ".repeat(PREFIX_WIDTH);
     let mut ruler = String::with_capacity(data_width);
 
     for col in 1..=data_width {
@@ -170,7 +170,7 @@ fn make_scale_line(width: usize) -> Line<'static> {
         }
     }
 
-    let text = format!("{}{}", prefix, ruler);
+    let text = format!("{}{}", BLANK_PREFIX, ruler);
     Line::from(Span::styled(text, Style::default().fg(SCALE_FG)))
 }
 
@@ -330,7 +330,7 @@ fn build_display_list(editor: &Editor) -> Vec<DisplayItem> {
                 if shadow > 0 && editor.show_shadow() {
                     items.push(DisplayItem::Shadow(shadow));
                 }
-                i += shadow;
+                i += shadow.max(1);
             }
         }
     } else {
@@ -625,13 +625,15 @@ fn render_file_area(
                     "WrapCont should not exist when data_width == 0"
                 );
                 let text = editor.buffer().line_text(*line_num).unwrap_or("");
-                let chunks = char_chunks(text, data_width);
-                let chunk_text = chunks.get(*chunk_idx).map(|s| s.as_str()).unwrap_or("");
-                let blank_prefix = " ".repeat(PREFIX_WIDTH);
+                let chunk_text: String = text
+                    .chars()
+                    .skip(*chunk_idx * data_width)
+                    .take(data_width)
+                    .collect();
                 let padded_data = format!("{:<dw$}", chunk_text, dw = data_width);
 
                 if *is_current {
-                    let full = format!("{}{}", blank_prefix, padded_data);
+                    let full = format!("{}{}", BLANK_PREFIX, padded_data);
                     lines.push(Line::from(Span::styled(
                         full,
                         Style::default()
@@ -641,7 +643,7 @@ fn render_file_area(
                     )));
                 } else {
                     lines.push(Line::from(vec![
-                        Span::styled(blank_prefix, Style::default().fg(PREFIX_FG)),
+                        Span::styled(BLANK_PREFIX.to_string(), Style::default().fg(PREFIX_FG)),
                         Span::styled(padded_data, Style::default().fg(DATA_FG)),
                     ]));
                 }
@@ -822,10 +824,12 @@ fn render_command_line(
     };
 
     let remaining = (area.width as usize).saturating_sub(prompt.len() + 1);
-    let display_text = if text.len() > remaining {
-        &text[text.len() - remaining..]
+    // Truncate by char count to avoid panicking on multi-byte UTF-8
+    let char_count = text.chars().count();
+    let display_text: String = if char_count > remaining {
+        text.chars().skip(char_count - remaining).collect()
     } else {
-        text
+        text.to_string()
     };
 
     let line = Line::from(vec![
@@ -833,7 +837,7 @@ fn render_command_line(
             format!("{} ", prompt),
             Style::default().fg(cmd_fg).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(display_text.to_string(), Style::default().fg(DATA_FG)),
+        Span::styled(display_text, Style::default().fg(DATA_FG)),
     ]);
 
     frame.render_widget(Paragraph::new(line), area);
@@ -872,9 +876,11 @@ fn position_cursor(
             if let Some(&row) = visible.line_to_first_row.get(&file_line) {
                 if row < file_area.height as usize {
                     let screen_y = file_area.y + row as u16;
-                    // file_col is 1-based within the data area; add PREFIX_WIDTH
-                    let screen_x =
-                        file_area.x + PREFIX_WIDTH as u16 + (file_col as u16).saturating_sub(1);
+                    // file_col is 1-based within the data area; clamp to data width
+                    let data_col = (file_col as u16)
+                        .saturating_sub(1)
+                        .min(file_area.width.saturating_sub(PREFIX_WIDTH as u16 + 1));
+                    let screen_x = file_area.x + PREFIX_WIDTH as u16 + data_col;
                     frame.set_cursor_position((
                         screen_x.min(file_area.x + file_area.width - 1),
                         screen_y,
