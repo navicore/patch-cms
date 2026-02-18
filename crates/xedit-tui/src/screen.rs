@@ -137,6 +137,10 @@ fn make_hex_nibble_line(text: &str, data_width: usize, width: usize, high: bool)
 }
 
 /// Split `text` into char-based chunks of at most `chunk_size` characters.
+///
+/// NOTE: This function is only used in tests. Production WrapCont rendering uses
+/// inline `skip(chunk_idx * data_width).take(data_width)` to avoid allocating
+/// intermediate `Vec<String>`s — each continuation row only needs one chunk.
 #[cfg(test)]
 fn char_chunks(text: &str, chunk_size: usize) -> Vec<String> {
     if chunk_size == 0 {
@@ -158,7 +162,8 @@ fn make_scale_line(width: usize) -> Line<'static> {
     let mut ruler = String::with_capacity(data_width);
 
     for col in 1..=data_width {
-        if col == 1 {
+        if col == 1 || col == data_width {
+            // IBM XEDIT: `|` at first and last column
             ruler.push('|');
         } else if col % 10 == 0 {
             let digit = ((col / 10) % 10) as u32;
@@ -445,7 +450,9 @@ fn build_screen_layout(editor: &Editor, height: usize, width: usize) -> ScreenLa
     let mut idx = first_idx;
 
     while content_rows.len() < available && idx < display_list.len() {
-        // Insert scale line immediately before the current-line item
+        // Insert scale line immediately before the current-line item.
+        // The `current > 0` guard skips scale at TOF: display_list[0] is always
+        // Tof (built first in build_display_list), so current==0 means TOF.
         if scale_mode && current > 0 && idx == current_idx {
             content_rows.push(RenderRow::Scale);
             if content_rows.len() >= available {
@@ -512,7 +519,9 @@ fn build_screen_layout(editor: &Editor, height: usize, width: usize) -> ScreenLa
         content_rows.push(RenderRow::Empty);
     }
 
-    // Interleave reserved lines at their fixed screen-row positions
+    // Interleave reserved lines at their fixed screen-row positions (1-based).
+    // Reserved rows with positions beyond `height` are silently ignored — they
+    // simply fall outside the visible area.
     let mut final_rows: Vec<RenderRow> = Vec::with_capacity(height);
     let mut content_iter = content_rows.into_iter();
 
@@ -719,7 +728,8 @@ fn make_data_line(
     // Build prefix string
     let prefix_str = if let Some(input) = prefix_input {
         // Show the user's prefix input (padded/truncated to 5 chars)
-        format!("{:<5} ", &input[..input.len().min(5)])
+        let truncated: String = input.chars().take(5).collect();
+        format!("{:<5} ", truncated)
     } else if is_current {
         if show_number {
             format!("{:>04}> ", line_num)
@@ -860,7 +870,7 @@ fn position_cursor(
     if in_input_mode {
         // Cursor at end of input text in command line area
         let prompt_len = 7; // "input> "
-        let x = cmd_area.x + prompt_len + input_text.len() as u16;
+        let x = cmd_area.x + prompt_len + input_text.chars().count() as u16;
         frame.set_cursor_position((x.min(cmd_area.x + cmd_area.width - 1), cmd_area.y));
         return;
     }
@@ -971,6 +981,8 @@ mod tests {
         assert_eq!(ruler.chars().nth(9), Some('1'), "col 10 = 1");
         assert_eq!(ruler.chars().nth(14), Some('+'), "col 15 = +");
         assert_eq!(ruler.chars().nth(19), Some('2'), "col 20 = 2");
+        // IBM XEDIT: trailing `|` at last column (data_width = 74)
+        assert_eq!(ruler.chars().nth(73), Some('|'), "last col = |");
     }
 
     #[test]
@@ -982,6 +994,8 @@ mod tests {
         assert_eq!(ruler.chars().count(), 14);
         assert_eq!(ruler.chars().nth(0), Some('|'));
         assert_eq!(ruler.chars().nth(9), Some('1'));
+        // IBM XEDIT: trailing `|` at last column (data_width = 14)
+        assert_eq!(ruler.chars().nth(13), Some('|'), "last col = |");
     }
 
     #[test]
@@ -1292,5 +1306,62 @@ mod tests {
             layout.rows[cur_row + 2],
             RenderRow::HexLow { line_num: 1 }
         ));
+    }
+
+    // --- WrapCont text content ---
+
+    #[test]
+    fn layout_wrap_cont_text_matches_chunks() {
+        // data_width = 80 - 6 = 74. Text of 150 chars produces 3 chunks:
+        // chunk 0: chars 0..74 (DataLine), chunk 1: chars 74..148, chunk 2: chars 148..150
+        let text = "A".repeat(74).to_string() + &"B".repeat(74) + "CC";
+        let mut ed = make_test_editor(&[&text]);
+        ed.execute(&Command::Set(SetCommand::Wrap(true))).unwrap();
+        let layout = build_screen_layout(&ed, 20, 80);
+
+        let data_width = 74usize;
+        let wrap_conts: Vec<_> = layout
+            .rows
+            .iter()
+            .filter_map(|r| match r {
+                RenderRow::WrapCont { chunk_idx, .. } => Some(*chunk_idx),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(wrap_conts, vec![1, 2], "should have chunk_idx 1 and 2");
+
+        // Verify that skip/take on the original text produces the expected chunks
+        let chunk1: String = text.chars().skip(1 * data_width).take(data_width).collect();
+        assert_eq!(chunk1, "B".repeat(74));
+        let chunk2: String = text.chars().skip(2 * data_width).take(data_width).collect();
+        assert_eq!(chunk2, "CC");
+    }
+
+    // --- Reserved rows in layout ---
+
+    #[test]
+    fn layout_reserved_rows_interleaved() {
+        let mut ed = make_test_editor(&["a", "b", "c"]);
+        // Reserve row 1 (top of screen)
+        ed.execute(&Command::Set(SetCommand::Reserved(1, "Header".to_string())))
+            .unwrap();
+        let layout = build_screen_layout(&ed, 10, 80);
+
+        // Row 0 (screen row 1, 1-based) should be Reserved
+        assert!(
+            matches!(&layout.rows[0], RenderRow::Reserved { text } if text == "Header"),
+            "row 0 should be reserved 'Header'"
+        );
+        // Content rows should still be present after the reserved row
+        assert!(
+            layout
+                .rows
+                .iter()
+                .skip(1)
+                .any(|r| matches!(r, RenderRow::DataLine { .. })),
+            "file content should follow reserved row"
+        );
+        // Total layout height should match requested height
+        assert_eq!(layout.rows.len(), 10);
     }
 }
