@@ -109,7 +109,35 @@ fn to_hex_char(nibble: u8) -> char {
     }
 }
 
+/// Build a hex-nibble line (blank prefix + column-aligned nibbles).
+///
+/// `high` selects the high nibble (true) or low nibble (false).
+/// Uses the first byte of each character's UTF-8 encoding for the nibble
+/// value, keeping 1:1 column alignment with the text row.
+fn make_hex_nibble_line(text: &str, data_width: usize, width: usize, high: bool) -> Line<'static> {
+    let prefix = " ".repeat(PREFIX_WIDTH);
+    let mut nibbles = String::with_capacity(data_width);
+    let mut buf = [0u8; 4];
+    for ch in text.chars().take(data_width) {
+        ch.encode_utf8(&mut buf);
+        let b = buf[0]; // first byte of UTF-8 encoding
+        if high {
+            nibbles.push(to_hex_char((b >> 4) & 0xF));
+        } else {
+            nibbles.push(to_hex_char(b & 0xF));
+        }
+    }
+    let padded = format!(
+        "{}{:<dw$}",
+        prefix,
+        nibbles,
+        dw = width.saturating_sub(PREFIX_WIDTH)
+    );
+    Line::from(Span::styled(padded, Style::default().fg(HEX_FG)))
+}
+
 /// Split `text` into char-based chunks of at most `chunk_size` characters.
+#[cfg(test)]
 fn char_chunks(text: &str, chunk_size: usize) -> Vec<String> {
     if chunk_size == 0 {
         return vec![text.to_string()];
@@ -143,7 +171,7 @@ fn make_scale_line(width: usize) -> Line<'static> {
         }
     }
 
-    let text = format!("{}{:<dw$}", prefix, ruler, dw = data_width);
+    let text = format!("{}{}", prefix, ruler);
     Line::from(Span::styled(text, Style::default().fg(SCALE_FG)))
 }
 
@@ -582,42 +610,28 @@ fn render_file_area(
             }
             RenderRow::HexHigh { line_num } => {
                 let text = editor.buffer().line_text(*line_num).unwrap_or("");
-                let display_chars: String = text.chars().take(data_width).collect();
-                let prefix = " ".repeat(PREFIX_WIDTH);
-                let mut nibbles = String::with_capacity(data_width);
-                for ch in display_chars.chars() {
-                    let b = (ch as u32 & 0xFF) as u8;
-                    nibbles.push(to_hex_char((b >> 4) & 0xF));
-                }
-                let padded = format!("{}{:<dw$}", prefix, nibbles, dw = data_width);
-                lines.push(Line::from(Span::styled(
-                    padded,
-                    Style::default().fg(HEX_FG),
-                )));
+                lines.push(make_hex_nibble_line(text, data_width, width, true));
             }
             RenderRow::HexLow { line_num } => {
                 let text = editor.buffer().line_text(*line_num).unwrap_or("");
-                let display_chars: String = text.chars().take(data_width).collect();
-                let prefix = " ".repeat(PREFIX_WIDTH);
-                let mut nibbles = String::with_capacity(data_width);
-                for ch in display_chars.chars() {
-                    let b = (ch as u32 & 0xFF) as u8;
-                    nibbles.push(to_hex_char(b & 0xF));
-                }
-                let padded = format!("{}{:<dw$}", prefix, nibbles, dw = data_width);
-                lines.push(Line::from(Span::styled(
-                    padded,
-                    Style::default().fg(HEX_FG),
-                )));
+                lines.push(make_hex_nibble_line(text, data_width, width, false));
             }
             RenderRow::WrapCont {
                 line_num,
                 is_current,
                 chunk_idx,
             } => {
+                debug_assert!(
+                    data_width > 0,
+                    "WrapCont should not exist when data_width == 0"
+                );
                 let text = editor.buffer().line_text(*line_num).unwrap_or("");
-                let chunks = char_chunks(text, data_width);
-                let chunk_text = chunks.get(*chunk_idx).map(|s| s.as_str()).unwrap_or("");
+                // Skip/take avoids rebuilding all chunks per continuation row
+                let chunk_text: String = text
+                    .chars()
+                    .skip(*chunk_idx * data_width)
+                    .take(data_width)
+                    .collect();
                 let blank_prefix = " ".repeat(PREFIX_WIDTH);
                 let padded_data = format!("{:<dw$}", chunk_text, dw = data_width);
 
@@ -972,7 +986,7 @@ mod tests {
         // Width <= PREFIX_WIDTH means data_width = 0, ruler is empty
         let line = make_scale_line(6);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text.len(), 6);
+        assert_eq!(text.chars().count(), 6);
     }
 
     // --- hex line rendering ---
@@ -980,18 +994,31 @@ mod tests {
     #[test]
     fn hex_nibbles_hello() {
         // 'H' = 0x48, 'e' = 0x65, 'l' = 0x6C, 'l' = 0x6C, 'o' = 0x6F
+        // Uses first byte of UTF-8 encoding (same as codepoint for ASCII)
         let expected_high = "46666";
         let expected_low = "85CCF";
         let text = "Hello";
         let mut high = String::new();
         let mut low = String::new();
+        let mut buf = [0u8; 4];
         for ch in text.chars() {
-            let b = (ch as u32 & 0xFF) as u8;
+            ch.encode_utf8(&mut buf);
+            let b = buf[0];
             high.push(to_hex_char((b >> 4) & 0xF));
             low.push(to_hex_char(b & 0xF));
         }
         assert_eq!(high, expected_high);
         assert_eq!(low, expected_low);
+    }
+
+    #[test]
+    fn hex_nibbles_multibyte() {
+        // '€' = U+20AC, UTF-8: E2 82 AC — first byte is 0xE2
+        let mut buf = [0u8; 4];
+        '€'.encode_utf8(&mut buf);
+        let b = buf[0]; // 0xE2
+        assert_eq!(to_hex_char((b >> 4) & 0xF), 'E');
+        assert_eq!(to_hex_char(b & 0xF), '2');
     }
 
     // --- Layout tests using Editor ---
@@ -1012,12 +1039,18 @@ mod tests {
         let ed = make_test_editor(&["a", "b", "c"]);
         let layout = build_screen_layout(&ed, 10, 80);
         // In normal mode, each line takes 1 row
-        assert!(layout.line_to_first_row.contains_key(&1));
+        let row1 = layout
+            .line_to_first_row
+            .get(&1)
+            .copied()
+            .expect("line 1 should be visible in layout");
+        let row2 = layout
+            .line_to_first_row
+            .get(&2)
+            .copied()
+            .expect("line 2 should be visible in layout");
         // Rows should be sequential (offset by centering)
-        let row1 = layout.line_to_first_row[&1];
-        if let Some(&row2) = layout.line_to_first_row.get(&2) {
-            assert_eq!(row2, row1 + 1);
-        }
+        assert_eq!(row2, row1 + 1);
     }
 
     #[test]
@@ -1026,12 +1059,17 @@ mod tests {
         ed.execute(&Command::Set(SetCommand::Hex(true))).unwrap();
         let layout = build_screen_layout(&ed, 20, 80);
         // In hex mode, each line takes 3 rows
-        if let (Some(&r1), Some(&r2)) = (
-            layout.line_to_first_row.get(&1),
-            layout.line_to_first_row.get(&2),
-        ) {
-            assert_eq!(r2 - r1, 3, "hex lines should be 3 rows apart");
-        }
+        let r1 = layout
+            .line_to_first_row
+            .get(&1)
+            .copied()
+            .expect("line 1 should be visible");
+        let r2 = layout
+            .line_to_first_row
+            .get(&2)
+            .copied()
+            .expect("line 2 should be visible");
+        assert_eq!(r2 - r1, 3, "hex lines should be 3 rows apart");
     }
 
     #[test]
@@ -1047,20 +1085,25 @@ mod tests {
 
         // data_width = 80 - 6 = 74
         // "short" fits in 1 row, "x"*200 needs ceil(200/74) = 3 rows
-        if let (Some(&r1), Some(&r2)) = (
-            layout.line_to_first_row.get(&1),
-            layout.line_to_first_row.get(&2),
-        ) {
-            // line 1 ("short") takes 1 row
-            assert_eq!(r2 - r1, 1);
-        }
-        if let (Some(&r2), Some(&r3)) = (
-            layout.line_to_first_row.get(&2),
-            layout.line_to_first_row.get(&3),
-        ) {
-            // line 2 ("x"*200) takes 3 rows (200/74 = 2.7 → 3)
-            assert_eq!(r3 - r2, 3);
-        }
+        let r1 = layout
+            .line_to_first_row
+            .get(&1)
+            .copied()
+            .expect("line 1 visible");
+        let r2 = layout
+            .line_to_first_row
+            .get(&2)
+            .copied()
+            .expect("line 2 visible");
+        let r3 = layout
+            .line_to_first_row
+            .get(&3)
+            .copied()
+            .expect("line 3 visible");
+        // line 1 ("short") takes 1 row
+        assert_eq!(r2 - r1, 1);
+        // line 2 ("x"*200) takes 3 rows (200/74 = 2.7 → 3)
+        assert_eq!(r3 - r2, 3);
     }
 
     #[test]
@@ -1072,8 +1115,16 @@ mod tests {
         let layout_with_scale = build_screen_layout(&ed, 10, 80);
 
         // With scale on, current line should be shifted down by 1
-        let row_no_scale = layout_no_scale.line_to_first_row[&1];
-        let row_with_scale = layout_with_scale.line_to_first_row[&1];
+        let row_no_scale = layout_no_scale
+            .line_to_first_row
+            .get(&1)
+            .copied()
+            .expect("line 1 should be visible in layout");
+        let row_with_scale = layout_with_scale
+            .line_to_first_row
+            .get(&1)
+            .copied()
+            .expect("line 1 should be visible with scale");
         assert_eq!(
             row_with_scale,
             row_no_scale + 1,
@@ -1088,7 +1139,11 @@ mod tests {
         let layout = build_screen_layout(&ed, 10, 80);
 
         // The row before the current line should be a Scale
-        let cur_row = layout.line_to_first_row[&1];
+        let cur_row = layout
+            .line_to_first_row
+            .get(&1)
+            .copied()
+            .expect("line 1 should be visible in layout");
         assert!(
             cur_row > 0,
             "current line should not be at row 0 with scale"
@@ -1192,7 +1247,11 @@ mod tests {
         let layout = build_screen_layout(&ed, 20, 80);
 
         // Should have Scale before current line, then DataLine + HexHigh + HexLow
-        let cur_row = layout.line_to_first_row[&1];
+        let cur_row = layout
+            .line_to_first_row
+            .get(&1)
+            .copied()
+            .expect("line 1 should be visible in layout");
         assert!(cur_row > 0);
         assert!(matches!(layout.rows[cur_row - 1], RenderRow::Scale));
         assert!(matches!(
