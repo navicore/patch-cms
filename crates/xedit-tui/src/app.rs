@@ -763,6 +763,12 @@ impl App {
                         self.in_input_mode = true;
                         self.input_text.clear();
                     }
+                    CommandAction::Transfer(target, count) => {
+                        match self.ring.execute_transfer(&target, count) {
+                            Ok(msg) => self.editor_mut().set_message(msg),
+                            Err(e) => self.editor_mut().set_message(e.to_string()),
+                        }
+                    }
                     CommandAction::Refresh | CommandAction::Continue => {}
                 },
                 Err(e) => {

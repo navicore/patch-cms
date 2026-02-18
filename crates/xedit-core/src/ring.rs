@@ -125,6 +125,58 @@ impl Ring {
         }
     }
 
+    /// Execute a TRANSFER command: copy lines from current editor to a target editor.
+    pub fn execute_transfer(&mut self, target_file_id: &str, count: usize) -> Result<String> {
+        if self.editors.is_empty() {
+            return Err(XeditError::NoFile);
+        }
+
+        let source = &self.editors[self.current];
+        if source.current_line() == 0 {
+            return Err(XeditError::InvalidCommand(
+                "Cannot TRANSFER at Top of File".to_string(),
+            ));
+        }
+
+        // Collect lines from source
+        let available = source.buffer().len() - source.current_line() + 1;
+        let actual_count = count.min(available);
+        let mut lines = Vec::with_capacity(actual_count);
+        for i in source.current_line()..source.current_line() + actual_count {
+            if let Some(text) = source.buffer().line_text(i) {
+                lines.push(text.to_string());
+            }
+        }
+
+        // Find target editor (excluding current)
+        let target_idx = self
+            .editors
+            .iter()
+            .enumerate()
+            .find(|(i, ed)| *i != self.current && ed.file_id() == Some(target_file_id))
+            .map(|(i, _)| i);
+
+        let target_idx = match target_idx {
+            Some(idx) => idx,
+            None => {
+                return Err(XeditError::InvalidCommand(format!(
+                    "Target file not found in ring: {}",
+                    target_file_id
+                )));
+            }
+        };
+
+        // Insert into target
+        let target = &mut self.editors[target_idx];
+        let after_line = target.current_line();
+        target.insert_lines_externally(after_line, lines);
+
+        Ok(format!(
+            "{} line(s) transferred to {}",
+            actual_count, target_file_id
+        ))
+    }
+
     /// Add a new empty editor with a custom filesystem to the ring
     pub fn add_empty_with_fs(&mut self, fs: Box<dyn FileSystem>) -> &mut Editor {
         self.editors.push(Editor::with_fs(fs));
@@ -356,5 +408,151 @@ mod tests {
         ring.add_empty();
         assert_eq!(ring.current_index(), 0);
         assert!(ring.current().is_some());
+    }
+
+    // -- TRANSFER tests --
+
+    #[test]
+    fn transfer_basic() {
+        let mut tmp1 = NamedTempFile::new().unwrap();
+        writeln!(tmp1, "alpha").unwrap();
+        writeln!(tmp1, "beta").unwrap();
+        writeln!(tmp1, "gamma").unwrap();
+        tmp1.flush().unwrap();
+        let mut tmp2 = NamedTempFile::new().unwrap();
+        writeln!(tmp2, "one").unwrap();
+        writeln!(tmp2, "two").unwrap();
+        tmp2.flush().unwrap();
+
+        let path1 = tmp1.path().to_str().unwrap().to_string();
+        let path2 = tmp2.path().to_str().unwrap().to_string();
+
+        let mut ring = Ring::new();
+        ring.add_file(&path1).unwrap();
+        ring.add_file(&path2).unwrap();
+        // Switch to source (file 1)
+        ring.cycle_next().unwrap();
+        assert_eq!(ring.current_index(), 0);
+
+        // Transfer 1 line from source to target
+        let msg = ring.execute_transfer(&path2, 1).unwrap();
+        assert!(msg.contains("1 line(s) transferred"));
+
+        // Check target got the line
+        // Target is at index 1
+        let target = &ring.editors[1];
+        assert_eq!(target.buffer().len(), 3); // was 2, now 3
+    }
+
+    #[test]
+    fn transfer_multiple_lines() {
+        let mut tmp1 = NamedTempFile::new().unwrap();
+        writeln!(tmp1, "alpha").unwrap();
+        writeln!(tmp1, "beta").unwrap();
+        writeln!(tmp1, "gamma").unwrap();
+        tmp1.flush().unwrap();
+        let mut tmp2 = NamedTempFile::new().unwrap();
+        writeln!(tmp2, "one").unwrap();
+        tmp2.flush().unwrap();
+
+        let path1 = tmp1.path().to_str().unwrap().to_string();
+        let path2 = tmp2.path().to_str().unwrap().to_string();
+
+        let mut ring = Ring::new();
+        ring.add_file(&path1).unwrap();
+        ring.add_file(&path2).unwrap();
+        ring.cycle_next().unwrap();
+
+        let msg = ring.execute_transfer(&path2, 2).unwrap();
+        assert!(msg.contains("2 line(s) transferred"));
+
+        let target = &ring.editors[1];
+        assert_eq!(target.buffer().len(), 3); // 1 original + 2 transferred
+    }
+
+    #[test]
+    fn transfer_clamps_to_available() {
+        let mut tmp1 = NamedTempFile::new().unwrap();
+        writeln!(tmp1, "alpha").unwrap();
+        tmp1.flush().unwrap();
+        let mut tmp2 = NamedTempFile::new().unwrap();
+        writeln!(tmp2, "one").unwrap();
+        tmp2.flush().unwrap();
+
+        let path1 = tmp1.path().to_str().unwrap().to_string();
+        let path2 = tmp2.path().to_str().unwrap().to_string();
+
+        let mut ring = Ring::new();
+        ring.add_file(&path1).unwrap();
+        ring.add_file(&path2).unwrap();
+        ring.cycle_next().unwrap();
+
+        // Request 100 but only 1 available
+        let msg = ring.execute_transfer(&path2, 100).unwrap();
+        assert!(msg.contains("1 line(s) transferred"));
+    }
+
+    #[test]
+    fn transfer_target_not_found() {
+        let mut tmp1 = NamedTempFile::new().unwrap();
+        writeln!(tmp1, "alpha").unwrap();
+        tmp1.flush().unwrap();
+
+        let path1 = tmp1.path().to_str().unwrap().to_string();
+
+        let mut ring = Ring::new();
+        ring.add_file(&path1).unwrap();
+
+        let result = ring.execute_transfer("nonexistent.txt", 1);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn transfer_at_tof_errors() {
+        let mut tmp1 = NamedTempFile::new().unwrap();
+        writeln!(tmp1, "alpha").unwrap();
+        tmp1.flush().unwrap();
+        let mut tmp2 = NamedTempFile::new().unwrap();
+        writeln!(tmp2, "one").unwrap();
+        tmp2.flush().unwrap();
+
+        let path1 = tmp1.path().to_str().unwrap().to_string();
+        let path2 = tmp2.path().to_str().unwrap().to_string();
+
+        let mut ring = Ring::new();
+        ring.add_file(&path1).unwrap();
+        ring.add_file(&path2).unwrap();
+        ring.cycle_next().unwrap();
+
+        // Move source to TOF
+        ring.current_mut().unwrap().set_current_line(0);
+        let result = ring.execute_transfer(&path2, 1);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn transfer_does_not_remove_from_source() {
+        let mut tmp1 = NamedTempFile::new().unwrap();
+        writeln!(tmp1, "alpha").unwrap();
+        writeln!(tmp1, "beta").unwrap();
+        tmp1.flush().unwrap();
+        let mut tmp2 = NamedTempFile::new().unwrap();
+        writeln!(tmp2, "one").unwrap();
+        tmp2.flush().unwrap();
+
+        let path1 = tmp1.path().to_str().unwrap().to_string();
+        let path2 = tmp2.path().to_str().unwrap().to_string();
+
+        let mut ring = Ring::new();
+        ring.add_file(&path1).unwrap();
+        ring.add_file(&path2).unwrap();
+        ring.cycle_next().unwrap();
+
+        ring.execute_transfer(&path2, 1).unwrap();
+
+        // Source should still have its lines
+        let source = ring.current().unwrap();
+        assert_eq!(source.buffer().len(), 2);
+        assert_eq!(source.buffer().line_text(1), Some("alpha"));
     }
 }
