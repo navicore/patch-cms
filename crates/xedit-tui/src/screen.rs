@@ -137,7 +137,6 @@ fn make_hex_nibble_line(text: &str, data_width: usize, width: usize, high: bool)
 }
 
 /// Split `text` into char-based chunks of at most `chunk_size` characters.
-#[cfg(test)]
 fn char_chunks(text: &str, chunk_size: usize) -> Vec<String> {
     if chunk_size == 0 {
         return vec![text.to_string()];
@@ -464,7 +463,7 @@ fn build_screen_layout(editor: &Editor, height: usize, width: usize) -> ScreenLa
                 let is_current = *n == current;
                 let rc = row_counts[idx];
 
-                if hex_mode && rc == 3 {
+                if hex_mode {
                     content_rows.push(RenderRow::DataLine {
                         line_num: *n,
                         is_current,
@@ -626,12 +625,8 @@ fn render_file_area(
                     "WrapCont should not exist when data_width == 0"
                 );
                 let text = editor.buffer().line_text(*line_num).unwrap_or("");
-                // Skip/take avoids rebuilding all chunks per continuation row
-                let chunk_text: String = text
-                    .chars()
-                    .skip(*chunk_idx * data_width)
-                    .take(data_width)
-                    .collect();
+                let chunks = char_chunks(text, data_width);
+                let chunk_text = chunks.get(*chunk_idx).map(|s| s.as_str()).unwrap_or("");
                 let blank_prefix = " ".repeat(PREFIX_WIDTH);
                 let padded_data = format!("{:<dw$}", chunk_text, dw = data_width);
 
@@ -712,10 +707,11 @@ fn make_data_line(
     prefix_input: Option<&String>,
 ) -> Line<'static> {
     let data_width = width.saturating_sub(PREFIX_WIDTH);
-    let display_text = if text.len() > data_width {
-        &text[..data_width]
+    // Truncate by char count, not byte count, to avoid panicking on multi-byte UTF-8
+    let display_text: String = if text.chars().count() > data_width {
+        text.chars().take(data_width).collect()
     } else {
-        text
+        text.to_string()
     };
 
     // Build prefix string
@@ -876,8 +872,9 @@ fn position_cursor(
             if let Some(&row) = visible.line_to_first_row.get(&file_line) {
                 if row < file_area.height as usize {
                     let screen_y = file_area.y + row as u16;
-                    // file_col is 1-based; screen column is 0-based from area.x
-                    let screen_x = file_area.x + (file_col as u16).saturating_sub(1);
+                    // file_col is 1-based within the data area; add PREFIX_WIDTH
+                    let screen_x =
+                        file_area.x + PREFIX_WIDTH as u16 + (file_col as u16).saturating_sub(1);
                     frame.set_cursor_position((
                         screen_x.min(file_area.x + file_area.width - 1),
                         screen_y,
@@ -975,8 +972,8 @@ mod tests {
         let line = make_scale_line(20);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         let ruler = &text[PREFIX_WIDTH..];
-        // data_width = 14, so ruler has 14 chars
-        assert_eq!(ruler.len(), 14);
+        // data_width = 14, so ruler has 14 columns
+        assert_eq!(ruler.chars().count(), 14);
         assert_eq!(ruler.chars().nth(0), Some('|'));
         assert_eq!(ruler.chars().nth(9), Some('1'));
     }
@@ -1167,6 +1164,29 @@ mod tests {
             !layout.rows.iter().any(|r| matches!(r, RenderRow::Scale)),
             "no scale when at TOF"
         );
+    }
+
+    #[test]
+    fn layout_scale_with_curline_row_zero() {
+        let mut ed = make_test_editor(&["a", "b", "c"]);
+        ed.execute(&Command::Set(SetCommand::Scale(true))).unwrap();
+        ed.execute(&Command::Set(SetCommand::CurLine(
+            xedit_core::command::CurLinePosition::Row(0),
+        )))
+        .unwrap();
+        let layout = build_screen_layout(&ed, 10, 80);
+
+        // Scale should appear at row 0, pushing current line to row 1
+        assert!(
+            matches!(layout.rows[0], RenderRow::Scale),
+            "scale at row 0 when curline is row 0"
+        );
+        let cur_row = layout
+            .line_to_first_row
+            .get(&1)
+            .copied()
+            .expect("line 1 should be visible");
+        assert_eq!(cur_row, 1, "current line at row 1 (after scale)");
     }
 
     #[test]
