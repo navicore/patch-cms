@@ -119,7 +119,7 @@ fn to_hex_char(nibble: u8) -> char {
 /// `high` selects the high nibble (true) or low nibble (false).
 /// Uses the first byte of each character's UTF-8 encoding for the nibble
 /// value, keeping 1:1 column alignment with the text row.
-fn make_hex_nibble_line(text: &str, data_width: usize, width: usize, high: bool) -> Line<'static> {
+fn make_hex_nibble_line(text: &str, data_width: usize, high: bool) -> Line<'static> {
     let mut nibbles = String::with_capacity(data_width);
     let mut buf = [0u8; 4];
     for ch in text.chars().take(data_width) {
@@ -135,12 +135,7 @@ fn make_hex_nibble_line(text: &str, data_width: usize, width: usize, high: bool)
             nibbles.push(to_hex_char(b & 0xF));
         }
     }
-    let padded = format!(
-        "{}{:<dw$}",
-        BLANK_PREFIX,
-        nibbles,
-        dw = width.saturating_sub(PREFIX_WIDTH)
-    );
+    let padded = format!("{}{:<dw$}", BLANK_PREFIX, nibbles, dw = data_width);
     Line::from(Span::styled(padded, Style::default().fg(HEX_FG)))
 }
 
@@ -377,7 +372,9 @@ fn build_screen_layout(editor: &Editor, height: usize, width: usize) -> ScreenLa
     let available = height.saturating_sub(reserved_count);
 
     if available == 0 {
-        // All rows reserved — nothing to lay out
+        // All rows reserved — nothing to lay out.
+        // Note: `to_string()` allocates per frame per reserved line, but there
+        // are typically 0–2 reserved lines so the cost is negligible.
         let mut rows = Vec::with_capacity(height);
         for screen_row in 0..height {
             if let Some(text) = editor.reserved_line(screen_row + 1) {
@@ -420,7 +417,9 @@ fn build_screen_layout(editor: &Editor, height: usize, width: usize) -> ScreenLa
         })
         .collect();
 
-    // Find which display item corresponds to the current line
+    // Find which display item corresponds to the current line.
+    // If the current line is hidden (e.g. by an ALL filter), fall back to the
+    // nearest visible FileLine rather than silently centering on TOF.
     let current_idx = display_list
         .iter()
         .position(|item| match item {
@@ -428,7 +427,21 @@ fn build_screen_layout(editor: &Editor, height: usize, width: usize) -> ScreenLa
             DisplayItem::FileLine(n) => *n == current,
             _ => false,
         })
-        .unwrap_or(0);
+        .unwrap_or_else(|| {
+            // Current line not in display list — find nearest visible FileLine
+            let mut best = 0usize;
+            let mut best_dist = usize::MAX;
+            for (i, item) in display_list.iter().enumerate() {
+                if let DisplayItem::FileLine(n) = item {
+                    let dist = (*n as isize - current as isize).unsigned_abs();
+                    if dist < best_dist {
+                        best_dist = dist;
+                        best = i;
+                    }
+                }
+            }
+            best
+        });
 
     // Desired screen row for the current line (within available rows)
     let curline_row = match editor.curline_position() {
@@ -611,11 +624,11 @@ fn render_file_area(
             }
             RenderRow::HexHigh { line_num } => {
                 let text = editor.buffer().line_text(*line_num).unwrap_or("");
-                lines.push(make_hex_nibble_line(text, data_width, width, true));
+                lines.push(make_hex_nibble_line(text, data_width, true));
             }
             RenderRow::HexLow { line_num } => {
                 let text = editor.buffer().line_text(*line_num).unwrap_or("");
-                lines.push(make_hex_nibble_line(text, data_width, width, false));
+                lines.push(make_hex_nibble_line(text, data_width, false));
             }
             RenderRow::WrapCont {
                 line_num,
@@ -864,15 +877,21 @@ fn position_cursor(
         // Cursor at end of input text in command line area
         let prompt_len = 7; // "input> "
         let x = cmd_area.x + prompt_len + input_text.chars().count() as u16;
-        frame.set_cursor_position((x.min(cmd_area.x + cmd_area.width - 1), cmd_area.y));
+        frame.set_cursor_position((
+            x.min(cmd_area.x.saturating_add(cmd_area.width.saturating_sub(1))),
+            cmd_area.y,
+        ));
         return;
     }
 
     match focus {
         CursorFocus::CommandLine => {
-            let prompt_len = 6u16; // "===== " (5 chars + space = 6)
+            let prompt_len = 6u16; // "====> " (5 chars + space = 6)
             let x = cmd_area.x + prompt_len + command_cursor as u16;
-            frame.set_cursor_position((x.min(cmd_area.x + cmd_area.width - 1), cmd_area.y));
+            frame.set_cursor_position((
+                x.min(cmd_area.x.saturating_add(cmd_area.width.saturating_sub(1))),
+                cmd_area.y,
+            ));
         }
         CursorFocus::FileArea => {
             // Look up the screen row for the current line from the layout map
@@ -886,7 +905,11 @@ fn position_cursor(
                         .min(file_area.width.saturating_sub(PREFIX_WIDTH as u16 + 1));
                     let screen_x = file_area.x + PREFIX_WIDTH as u16 + data_col;
                     frame.set_cursor_position((
-                        screen_x.min(file_area.x + file_area.width - 1),
+                        screen_x.min(
+                            file_area
+                                .x
+                                .saturating_add(file_area.width.saturating_sub(1)),
+                        ),
                         screen_y,
                     ));
                 }
@@ -990,6 +1013,16 @@ mod tests {
         assert_eq!(ruler.chars().nth(9), Some('1'));
         // IBM XEDIT: trailing `|` at last column (data_width = 14)
         assert_eq!(ruler.chars().nth(13), Some('|'), "last col = |");
+    }
+
+    #[test]
+    fn scale_line_single_column() {
+        // data_width = 1: both first-column and last-column guards fire → single '|'
+        let line = make_scale_line(7);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let ruler = &text[PREFIX_WIDTH..];
+        assert_eq!(ruler.chars().count(), 1);
+        assert_eq!(ruler.chars().nth(0), Some('|'));
     }
 
     #[test]
@@ -1402,7 +1435,7 @@ mod tests {
     #[test]
     fn hex_nibble_line_zero_data_width() {
         // width == PREFIX_WIDTH means data_width = 0
-        let line = make_hex_nibble_line("Hello", 0, PREFIX_WIDTH, true);
+        let line = make_hex_nibble_line("Hello", 0, true);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         // Should be just the blank prefix, no panic or garbled output
         assert_eq!(text.trim(), "");
