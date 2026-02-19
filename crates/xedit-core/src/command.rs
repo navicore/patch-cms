@@ -789,11 +789,15 @@ fn parse_set_args(args: &str) -> Result<Command, String> {
         };
         Ok(Command::Set(SetCommand::MacroPath(paths)))
     } else if matches_abbrev(&subcmd_upper, "TABS", 2) {
-        if subargs.is_empty() || subargs.eq_ignore_ascii_case("OFF") {
+        let first_word = subargs.split_whitespace().next().unwrap_or("");
+        if subargs.is_empty() || first_word.eq_ignore_ascii_case("OFF") {
             // Reset to defaults
             Ok(Command::Set(SetCommand::Tabs(Vec::new())))
         } else {
             // Explicit tab stop positions (1-based columns)
+            // TODO: IBM XEDIT treats a single number as interval mode (e.g., SET TABS 8
+            // means stops every 8 cols). Consider adding SET TABS EVERY N syntax to avoid
+            // ambiguity between a single explicit stop and an interval.
             let mut stops: Vec<usize> = subargs
                 .split_whitespace()
                 .map(|s| {
@@ -1767,6 +1771,16 @@ mod tests {
     #[test]
     fn parse_set_tabs_off() {
         match parse_command("set ta off").unwrap() {
+            Command::Set(SetCommand::Tabs(ref stops)) => {
+                assert!(stops.is_empty());
+            }
+            other => panic!("Expected Set(Tabs) off, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_tabs_off_trailing_ignored() {
+        match parse_command("set ta off extra").unwrap() {
             Command::Set(SetCommand::Tabs(ref stops)) => {
                 assert!(stops.is_empty());
             }

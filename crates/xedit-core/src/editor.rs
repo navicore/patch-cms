@@ -2978,6 +2978,25 @@ if ftype.1 = 'RS' then
         assert_eq!(ed.buffer().line_text(4), Some("y"));
     }
 
+    #[test]
+    fn merge_empty_buffer_at_tof() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let src_path = dir.path().join("src.txt");
+        std::fs::write(&src_path, "x\ny\n").unwrap();
+
+        let mut ed = Editor::new();
+        // Empty buffer, current_line = 0 (TOF)
+        ed.execute(&Command::Merge(
+            src_path.to_str().unwrap().to_string(),
+            None,
+        ))
+        .unwrap();
+        assert_eq!(ed.buffer().len(), 2);
+        assert_eq!(ed.current_line(), 2);
+        assert_eq!(ed.buffer().line_text(1), Some("x"));
+        assert_eq!(ed.buffer().line_text(2), Some("y"));
+    }
+
     // -- TRANSFER tests (editor side — returns CommandAction; ring handles validation) --
 
     #[test]
@@ -3070,9 +3089,9 @@ if ftype.1 = 'RS' then
     #[test]
     fn compress_with_zone() {
         let tabs = vec![1, 9, 17, 25];
-        // 8 spaces: "12345678        next" (8 spaces starting at col 9)
+        // "12345678" occupies cols 1-8; spaces begin at col 9
         let text = "12345678        next";
-        // Zone 1-8: spaces are outside zone, should not compress them
+        // Zone ends at col 8, so spaces at cols 9+ are outside zone_end=8
         let result = compress_line(text, 1, 8, &tabs);
         assert_eq!(result, text);
     }
@@ -3085,6 +3104,17 @@ if ftype.1 = 'RS' then
         let text = "hello   world"; // spaces at cols 6, 7, 8
         let result = compress_line(text, 1, 8, &tabs);
         assert_eq!(result, "hello\tworld");
+    }
+
+    #[test]
+    fn compress_tab_beyond_last_stop_then_spaces() {
+        // Tabs at [1, 9] only. Tab at col 9 has no next stop.
+        // Spaces after it should be preserved (no stop to compress to).
+        let tabs = vec![1, 9];
+        let text = "\t\t   end"; // tab at col 1→9, tab at col 9→10 (no stop), spaces at 10-12
+        let result = compress_line(text, 1, 80, &tabs);
+        // Spaces can't reach a tab stop (none defined past 9), so preserved
+        assert_eq!(result, text);
     }
 
     #[test]

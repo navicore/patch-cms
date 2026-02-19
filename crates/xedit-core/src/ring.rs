@@ -182,7 +182,6 @@ impl Ring {
         };
 
         // Insert into target
-        let actual_count = lines.len();
         let target = &mut self.editors[target_idx];
         let after_line = target.current_line();
         target.insert_lines_externally(after_line, lines);
