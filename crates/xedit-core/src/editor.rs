@@ -1212,15 +1212,9 @@ impl Editor {
                 "No lines to transfer".to_string(),
             ));
         }
-        // Collect lines to transfer from current position
+        // Clamp count to available lines; the ring layer will re-read them
         let available = self.buffer.len() - self.current_line + 1;
         let actual_count = count.min(available);
-        let mut lines = Vec::with_capacity(actual_count);
-        for i in self.current_line..self.current_line + actual_count {
-            if let Some(text) = self.buffer.line_text(i) {
-                lines.push(text.to_string());
-            }
-        }
         // Return a Transfer action for the ring to handle
         Ok(CommandResult {
             action: CommandAction::Transfer(target.to_string(), actual_count),
@@ -1760,7 +1754,7 @@ fn sort_key(line: &str, col_start: Option<usize>, col_end: Option<usize>) -> Str
     }
 }
 
-/// Find the next tab stop at or after the given 1-based column.
+/// Find the first tab stop strictly after the given 1-based column.
 fn next_tab_stop(col: usize, tab_stops: &[usize]) -> Option<usize> {
     tab_stops.iter().copied().find(|&s| s > col)
 }

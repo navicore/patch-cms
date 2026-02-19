@@ -455,15 +455,20 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
                 let col1 = col1_str
                     .parse::<usize>()
                     .map_err(|_| format!("Invalid column: {}", col1_str))?;
+                if col1 == 0 {
+                    return Err("COMPRESS column must be at least 1".to_string());
+                }
                 let col2 = if rest.is_empty() {
                     None
                 } else {
                     let (col2_str, _) = split_first_word(rest);
-                    Some(
-                        col2_str
-                            .parse::<usize>()
-                            .map_err(|_| format!("Invalid column: {}", col2_str))?,
-                    )
+                    let c = col2_str
+                        .parse::<usize>()
+                        .map_err(|_| format!("Invalid column: {}", col2_str))?;
+                    if c == 0 {
+                        return Err("COMPRESS column must be at least 1".to_string());
+                    }
+                    Some(c)
                 };
                 Ok(Command::Compress(Some(col1), col2))
             }
@@ -476,15 +481,20 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
                 let col1 = col1_str
                     .parse::<usize>()
                     .map_err(|_| format!("Invalid column: {}", col1_str))?;
+                if col1 == 0 {
+                    return Err("EXPAND column must be at least 1".to_string());
+                }
                 let col2 = if rest.is_empty() {
                     None
                 } else {
                     let (col2_str, _) = split_first_word(rest);
-                    Some(
-                        col2_str
-                            .parse::<usize>()
-                            .map_err(|_| format!("Invalid column: {}", col2_str))?,
-                    )
+                    let c = col2_str
+                        .parse::<usize>()
+                        .map_err(|_| format!("Invalid column: {}", col2_str))?;
+                    if c == 0 {
+                        return Err("EXPAND column must be at least 1".to_string());
+                    }
+                    Some(c)
                 };
                 Ok(Command::Expand(Some(col1), col2))
             }
@@ -1666,6 +1676,16 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parse_compress_zero_col1_errors() {
+        assert!(parse_command("compress 0").is_err());
+    }
+
+    #[test]
+    fn parse_compress_zero_col2_errors() {
+        assert!(parse_command("compress 1 0").is_err());
+    }
+
     // -- EXPAND tests --
 
     #[test]
@@ -1682,6 +1702,16 @@ mod tests {
             Command::Expand(Some(5), Some(20)) => {}
             other => panic!("Expected Expand(Some(5), Some(20)), got {:?}", other),
         }
+    }
+
+    #[test]
+    fn parse_expand_zero_col1_errors() {
+        assert!(parse_command("expand 0").is_err());
+    }
+
+    #[test]
+    fn parse_expand_zero_col2_errors() {
+        assert!(parse_command("expand 1 0").is_err());
     }
 
     #[test]

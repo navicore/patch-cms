@@ -126,6 +126,8 @@ impl Ring {
     }
 
     /// Execute a TRANSFER command: copy lines from current editor to a target editor.
+    /// Note: this intentionally copies without deleting from the source, diverging
+    /// from IBM XEDIT where TRANSFER is a destructive move.
     pub fn execute_transfer(&mut self, target_file_id: &str, count: usize) -> Result<String> {
         if self.editors.is_empty() {
             return Err(XeditError::NoFile);
