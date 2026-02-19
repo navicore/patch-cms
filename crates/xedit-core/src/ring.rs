@@ -153,12 +153,7 @@ impl Ring {
             let text = source
                 .buffer()
                 .line_text(i)
-                .ok_or_else(|| {
-                    XeditError::InvalidCommand(format!(
-                        "TRANSFER: internal error — line {} missing",
-                        i
-                    ))
-                })?
+                .expect("TRANSFER: invariant broken — line index within bounds but missing")
                 .to_string();
             lines.push(text);
         }

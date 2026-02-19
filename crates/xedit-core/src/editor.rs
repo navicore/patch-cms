@@ -1116,7 +1116,6 @@ impl Editor {
                 "No line to overwrite".to_string(),
             ));
         }
-        self.snapshot_for_undo();
         let line_text = self
             .buffer
             .line_text(self.current_line)
@@ -1137,10 +1136,13 @@ impl Editor {
             }
         }
         let new_text: String = chars.into_iter().collect();
-        if let Some(line) = self.buffer.get_mut(self.current_line) {
-            line.set_text(new_text);
+        if new_text != line_text {
+            self.snapshot_for_undo();
+            if let Some(line) = self.buffer.get_mut(self.current_line) {
+                line.set_text(new_text);
+            }
+            self.alt_count += 1;
         }
-        self.alt_count += 1;
         Ok(CommandResult::ok())
     }
 
@@ -1155,7 +1157,6 @@ impl Editor {
                 "No line for CINSERT".to_string(),
             ));
         }
-        self.snapshot_for_undo();
         let line_text = self
             .buffer
             .line_text(self.current_line)
@@ -1170,10 +1171,13 @@ impl Editor {
         let insert_chars: Vec<char> = text.chars().collect();
         chars.splice(start_col..start_col, insert_chars);
         let new_text: String = chars.into_iter().collect();
-        if let Some(line) = self.buffer.get_mut(self.current_line) {
-            line.set_text(new_text);
+        if new_text != line_text {
+            self.snapshot_for_undo();
+            if let Some(line) = self.buffer.get_mut(self.current_line) {
+                line.set_text(new_text);
+            }
+            self.alt_count += 1;
         }
-        self.alt_count += 1;
         Ok(CommandResult::ok())
     }
 
@@ -2787,6 +2791,18 @@ if ftype.1 = 'RS' then
         assert_eq!(ed.buffer().line_text(1), Some("hello"));
     }
 
+    #[test]
+    fn coverwrite_noop_no_undo() {
+        let mut ed = editor_with_lines(&["hello"]);
+        ed.current_line = 1;
+        ed.current_col = 1;
+        let before = ed.alt_count();
+        // Overwrite with same text — no change
+        ed.execute(&Command::Coverwrite("hello".to_string()))
+            .unwrap();
+        assert_eq!(ed.alt_count(), before);
+    }
+
     // -- CINSERT tests --
 
     #[test]
@@ -2833,6 +2849,19 @@ if ftype.1 = 'RS' then
         assert_eq!(ed.buffer().line_text(1), Some("XXhello"));
         ed.execute(&Command::Undo).unwrap();
         assert_eq!(ed.buffer().line_text(1), Some("hello"));
+    }
+
+    #[test]
+    fn cinsert_noop_empty_at_end() {
+        // CINSERT at end of line with empty-ish content that matches — actually
+        // CINSERT always inserts so it always changes the line. Test that it
+        // does increment alt_count (it's never a no-op).
+        let mut ed = editor_with_lines(&["hello"]);
+        ed.current_line = 1;
+        ed.current_col = 6; // past end
+        let before = ed.alt_count();
+        ed.execute(&Command::Cinsert("X".to_string())).unwrap();
+        assert_eq!(ed.alt_count(), before + 1);
     }
 
     // -- MERGE tests --

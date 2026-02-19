@@ -1698,6 +1698,14 @@ mod tests {
         assert!(parse_command("compress 20 5").is_err());
     }
 
+    #[test]
+    fn parse_compress_one_col_arg() {
+        match parse_command("compress 5").unwrap() {
+            Command::Compress(Some(5), None) => {}
+            other => panic!("Expected Compress(Some(5), None), got {:?}", other),
+        }
+    }
+
     // -- EXPAND tests --
 
     #[test]
@@ -1729,6 +1737,14 @@ mod tests {
     #[test]
     fn parse_expand_inverted_cols_errors() {
         assert!(parse_command("expand 20 5").is_err());
+    }
+
+    #[test]
+    fn parse_expand_one_col_arg() {
+        match parse_command("expand 5").unwrap() {
+            Command::Expand(Some(5), None) => {}
+            other => panic!("Expected Expand(Some(5), None), got {:?}", other),
+        }
     }
 
     #[test]
