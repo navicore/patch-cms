@@ -1774,7 +1774,9 @@ fn next_tab_stop(col: usize, tab_stops: &[usize]) -> Option<usize> {
 
 /// Replace runs of spaces with tab characters within the zone.
 /// Note: tabs past the last defined tab stop are tracked as advancing 1 column.
-/// This is a known limitation for lines with tabs beyond the last stop.
+/// FIXME: tabs past the last stop advance col by only 1, causing subsequent
+/// zone checks to use wrong column positions. Ensure tab stops cover the full
+/// working width to avoid this.
 fn compress_line(text: &str, zone_start: usize, zone_end: usize, tab_stops: &[usize]) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut result = String::with_capacity(text.len());
@@ -1827,10 +1829,13 @@ fn compress_line(text: &str, zone_start: usize, zone_end: usize, tab_stops: &[us
 
 /// Replace tab characters with spaces within the zone.
 /// Note: tabs past the last defined tab stop are tracked as advancing 1 column.
-/// This is a known limitation for lines with tabs beyond the last stop.
+/// FIXME: tabs past the last stop advance col by only 1, causing subsequent
+/// zone checks to use wrong column positions. Ensure tab stops cover the full
+/// working width to avoid this.
 fn expand_line(text: &str, zone_start: usize, zone_end: usize, tab_stops: &[usize]) -> String {
     let chars: Vec<char> = text.chars().collect();
-    let mut result = String::with_capacity(text.len());
+    // Tabs expand to spaces, so output is always >= input length
+    let mut result = String::with_capacity(text.len() * 2);
     let mut col: usize = 1; // 1-based column position
 
     for &ch in &chars {
@@ -3174,6 +3179,19 @@ if ftype.1 = 'RS' then
         ed.execute(&Command::Compress(Some(5), None)).unwrap();
         let text = ed.buffer().line_text(1).unwrap();
         assert!(text.contains('\t'));
+    }
+
+    #[test]
+    fn compress_equal_zone_endpoints() {
+        // COMPRESS 5 5 — single-column zone
+        let mut ed = editor_with_lines(&["1234 rest"]);
+        ed.current_line = 1;
+        ed.execute(&Command::Set(SetCommand::Tabs(vec![1, 5, 9])))
+            .unwrap();
+        // Space at col 5 is in zone [5, 5]; no-op since single space can't reach next stop (9)
+        let before = ed.alt_count();
+        ed.execute(&Command::Compress(Some(5), Some(5))).unwrap();
+        assert_eq!(ed.alt_count(), before); // unchanged
     }
 
     #[test]

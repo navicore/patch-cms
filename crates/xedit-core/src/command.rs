@@ -789,8 +789,11 @@ fn parse_set_args(args: &str) -> Result<Command, String> {
         };
         Ok(Command::Set(SetCommand::MacroPath(paths)))
     } else if matches_abbrev(&subcmd_upper, "TABS", 2) {
+        if subargs.is_empty() {
+            return Err("SET TABS requires arguments (OFF or 2+ column positions)".to_string());
+        }
         let first_word = subargs.split_whitespace().next().unwrap_or("");
-        if subargs.is_empty() || first_word.eq_ignore_ascii_case("OFF") {
+        if first_word.eq_ignore_ascii_case("OFF") {
             // Reset to defaults
             Ok(Command::Set(SetCommand::Tabs(Vec::new())))
         } else {
@@ -1790,6 +1793,11 @@ mod tests {
     #[test]
     fn parse_set_tabs_zero_errors() {
         assert!(parse_command("set ta 0 5 10").is_err());
+    }
+
+    #[test]
+    fn parse_set_tabs_no_args_errors() {
+        assert!(parse_command("set ta").is_err());
     }
 
     #[test]
