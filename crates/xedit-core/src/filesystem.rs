@@ -23,10 +23,32 @@ pub trait FileSystem {
     fn read_file(&self, file_id: &str) -> Result<String>;
     fn write_file(&self, file_id: &str, content: &str) -> Result<()>;
     fn parse_file_id(&self, file_id: &str) -> Option<FileIdentity>;
+
+    /// Normalize user input into the filesystem's canonical file identifier.
+    ///
+    /// The default implementation is a pass-through.  `NativeFs` overrides
+    /// this to detect CMS-style space-separated filespecs (e.g.
+    /// `"PROFILE EXEC A"`) and convert them to `"profile.exec"`.
+    fn normalize_file_id(&self, input: &str) -> String {
+        input.to_string()
+    }
 }
 
 /// Default filesystem implementation that delegates to `std::fs`.
 pub struct NativeFs;
+
+impl NativeFs {
+    /// Returns `true` when the input looks like a CMS-style filespec:
+    /// 2 or 3 space-separated tokens, none containing `/`, `\`, or `.`.
+    fn is_cms_style(input: &str) -> bool {
+        let tokens: Vec<&str> = input.split_whitespace().collect();
+        let count = tokens.len();
+        (count == 2 || count == 3)
+            && tokens
+                .iter()
+                .all(|t| !t.contains('/') && !t.contains('\\') && !t.contains('.'))
+    }
+}
 
 impl FileSystem for NativeFs {
     fn read_file(&self, file_id: &str) -> Result<String> {
@@ -66,6 +88,16 @@ impl FileSystem for NativeFs {
             filetype,
             filemode: "A1".to_string(),
         })
+    }
+
+    fn normalize_file_id(&self, input: &str) -> String {
+        if Self::is_cms_style(input) {
+            let tokens: Vec<&str> = input.split_whitespace().collect();
+            // tokens[0] = filename, tokens[1] = filetype, tokens[2..] ignored
+            format!("{}.{}", tokens[0].to_lowercase(), tokens[1].to_lowercase())
+        } else {
+            input.to_string()
+        }
     }
 }
 
@@ -145,5 +177,64 @@ mod tests {
     fn parse_file_id_empty() {
         let fs = NativeFs;
         assert!(fs.parse_file_id("").is_none());
+    }
+
+    // -- normalize_file_id tests --
+
+    #[test]
+    fn normalize_three_token_cms_style() {
+        let fs = NativeFs;
+        assert_eq!(fs.normalize_file_id("PROFILE EXEC A"), "profile.exec");
+    }
+
+    #[test]
+    fn normalize_two_token_cms_style() {
+        let fs = NativeFs;
+        assert_eq!(fs.normalize_file_id("PROFILE EXEC"), "profile.exec");
+    }
+
+    #[test]
+    fn normalize_dotted_path_passthrough() {
+        let fs = NativeFs;
+        assert_eq!(fs.normalize_file_id("profile.exec"), "profile.exec");
+    }
+
+    #[test]
+    fn normalize_absolute_path_passthrough() {
+        let fs = NativeFs;
+        assert_eq!(
+            fs.normalize_file_id("/home/user/profile.exec"),
+            "/home/user/profile.exec"
+        );
+    }
+
+    #[test]
+    fn normalize_single_word_passthrough() {
+        let fs = NativeFs;
+        assert_eq!(fs.normalize_file_id("Makefile"), "Makefile");
+    }
+
+    #[test]
+    fn normalize_four_tokens_passthrough() {
+        let fs = NativeFs;
+        assert_eq!(
+            fs.normalize_file_id("one two three four"),
+            "one two three four"
+        );
+    }
+
+    #[test]
+    fn normalize_mixed_case() {
+        let fs = NativeFs;
+        assert_eq!(fs.normalize_file_id("Profile Exec A1"), "profile.exec");
+    }
+
+    #[test]
+    fn normalize_backslash_path_passthrough() {
+        let fs = NativeFs;
+        assert_eq!(
+            fs.normalize_file_id("C:\\Users\\file txt"),
+            "C:\\Users\\file txt"
+        );
     }
 }

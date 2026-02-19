@@ -695,17 +695,20 @@ impl App {
             return;
         }
 
+        // Normalize CMS-style filespecs (e.g. "PROFILE EXEC A" → "profile.exec")
+        let fs = self.create_fs();
+        let normalized = fs.normalize_file_id(file_id);
+
         // Check if file already in ring
-        if self.ring.switch_to_file(file_id) {
+        if self.ring.switch_to_file(&normalized) {
             self.reset_for_current_editor();
             self.editor_mut()
-                .set_message(format!("Switched to {}", file_id));
+                .set_message(format!("Switched to {}", normalized));
             return;
         }
 
         // Open new file
-        let fs = self.create_fs();
-        if let Err(e) = self.ring.add_file_with_fs(file_id, fs) {
+        if let Err(e) = self.ring.add_file_with_fs(&normalized, fs) {
             self.editor_mut().set_message(e.to_string());
             return;
         }
