@@ -1427,19 +1427,6 @@ impl Editor {
                     self.tab_stops = stops.clone();
                 }
             }
-            SetCommand::TabsInterval(interval) => {
-                let limit = self.trunc;
-                let mut stops = Vec::new();
-                let mut col: usize = 1;
-                while col <= limit {
-                    stops.push(col);
-                    match col.checked_add(*interval) {
-                        Some(next) => col = next,
-                        None => break,
-                    }
-                }
-                self.tab_stops = stops;
-            }
         }
         Ok(CommandResult::ok())
     }
@@ -3088,6 +3075,16 @@ if ftype.1 = 'RS' then
         // Zone 1-8: spaces are outside zone, should not compress them
         let result = compress_line(text, 1, 8, &tabs);
         assert_eq!(result, text);
+    }
+
+    #[test]
+    fn compress_zone_boundary_at_tab_stop() {
+        // Space run cols 6-8 (3 spaces), zone_end=8, tab stop at 9
+        // The space run ends at col 9 (run_end_col), which equals next_stop
+        let tabs = vec![1, 9, 17];
+        let text = "hello   world"; // spaces at cols 6, 7, 8
+        let result = compress_line(text, 1, 8, &tabs);
+        assert_eq!(result, "hello\tworld");
     }
 
     #[test]

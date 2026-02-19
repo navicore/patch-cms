@@ -113,8 +113,6 @@ pub enum SetCommand {
     MacroPath(Vec<String>),
     /// SET TABS — explicit tab stop positions (1-based)
     Tabs(Vec<usize>),
-    /// SET TABS N — interval; expanded to positions in cmd_set using trunc
-    TabsInterval(usize),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -795,32 +793,20 @@ fn parse_set_args(args: &str) -> Result<Command, String> {
             // Reset to defaults
             Ok(Command::Set(SetCommand::Tabs(Vec::new())))
         } else {
-            let parts: Vec<&str> = subargs.split_whitespace().collect();
-            if parts.len() == 1 {
-                // Single number: interval
-                let interval = parts[0]
-                    .parse::<usize>()
-                    .map_err(|_| format!("SET TABS: invalid interval: {}", parts[0]))?;
-                if interval == 0 {
-                    return Err("SET TABS: interval must be at least 1".to_string());
-                }
-                Ok(Command::Set(SetCommand::TabsInterval(interval)))
-            } else {
-                // Multiple numbers: explicit positions
-                let mut stops: Vec<usize> = parts
-                    .iter()
-                    .map(|s| {
-                        s.parse::<usize>()
-                            .map_err(|_| format!("SET TABS: invalid column: {}", s))
-                    })
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                if stops.contains(&0) {
-                    return Err("SET TABS: column must be at least 1".to_string());
-                }
-                stops.sort();
-                stops.dedup();
-                Ok(Command::Set(SetCommand::Tabs(stops)))
+            // Explicit tab stop positions (1-based columns)
+            let mut stops: Vec<usize> = subargs
+                .split_whitespace()
+                .map(|s| {
+                    s.parse::<usize>()
+                        .map_err(|_| format!("SET TABS: invalid column: {}", s))
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            if stops.contains(&0) {
+                return Err("SET TABS: column must be at least 1".to_string());
             }
+            stops.sort();
+            stops.dedup();
+            Ok(Command::Set(SetCommand::Tabs(stops)))
         }
     } else if let Some(num_str) = subcmd_upper.strip_prefix("PF") {
         // SET PFn command_text
@@ -1768,10 +1754,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_set_tabs_interval() {
+    fn parse_set_tabs_single() {
+        // Single number is an explicit stop, not an interval
         match parse_command("set ta 8").unwrap() {
-            Command::Set(SetCommand::TabsInterval(8)) => {}
-            other => panic!("Expected Set(TabsInterval(8)), got {:?}", other),
+            Command::Set(SetCommand::Tabs(ref stops)) => {
+                assert_eq!(stops, &[8]);
+            }
+            other => panic!("Expected Set(Tabs([8])), got {:?}", other),
         }
     }
 
