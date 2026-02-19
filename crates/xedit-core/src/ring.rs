@@ -454,10 +454,14 @@ mod tests {
         let msg = ring.execute_transfer(&path2, 1).unwrap();
         assert!(msg.contains("1 line(s) copied to"));
 
-        // Check target got the line
-        // Target is at index 1
+        // Check target got the line with correct content and position
         let target = &ring.editors[1];
         assert_eq!(target.buffer().len(), 3); // was 2, now 3
+                                              // Source was at line 1 ("alpha"), target was at line 1 ("one"),
+                                              // so "alpha" is inserted after target's current line 1
+        assert_eq!(target.buffer().line_text(2), Some("alpha"));
+        // current_line should advance to last inserted line
+        assert_eq!(target.current_line(), 2);
     }
 
     #[test]

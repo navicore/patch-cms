@@ -1212,12 +1212,9 @@ impl Editor {
                 "No lines to transfer".to_string(),
             ));
         }
-        // Clamp count to available lines; the ring layer will re-read them
-        let available = self.buffer.len() - self.current_line + 1;
-        let actual_count = count.min(available);
-        // Return a Transfer action for the ring to handle
+        // Pass raw count to ring layer; it will clamp to available lines
         Ok(CommandResult {
-            action: CommandAction::Transfer(target.to_string(), actual_count),
+            action: CommandAction::Transfer(target.to_string(), count),
             message: None,
         })
     }
@@ -2948,7 +2945,7 @@ if ftype.1 = 'RS' then
     }
 
     #[test]
-    fn transfer_clamps_to_available() {
+    fn transfer_passes_raw_count() {
         let mut ed = editor_with_lines(&["a", "b"]);
         ed.current_line = 2;
         let result = ed
@@ -2956,7 +2953,7 @@ if ftype.1 = 'RS' then
             .unwrap();
         match result.action {
             CommandAction::Transfer(_, count) => {
-                assert_eq!(count, 1); // only 1 line available from line 2
+                assert_eq!(count, 10); // raw count; ring layer clamps
             }
             other => panic!("Expected Transfer action, got {:?}", other),
         }

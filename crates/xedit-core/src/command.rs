@@ -417,9 +417,10 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
                 let count = if rest.is_empty() {
                     None
                 } else {
-                    let n = rest
+                    let (count_str, _) = split_first_word(rest);
+                    let n = count_str
                         .parse::<usize>()
-                        .map_err(|_| format!("Invalid count: {}", rest))?;
+                        .map_err(|_| format!("Invalid count: {}", count_str))?;
                     if n == 0 {
                         return Err("MERGE count must be at least 1".to_string());
                     }
@@ -436,9 +437,10 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
                 let count = if rest.is_empty() {
                     1
                 } else {
-                    let n = rest
+                    let (count_str, _) = split_first_word(rest);
+                    let n = count_str
                         .parse::<usize>()
-                        .map_err(|_| format!("Invalid count: {}", rest))?;
+                        .map_err(|_| format!("Invalid count: {}", count_str))?;
                     if n == 0 {
                         return Err("TRANSFER count must be at least 1".to_string());
                     }
@@ -787,7 +789,7 @@ fn parse_set_args(args: &str) -> Result<Command, String> {
         };
         Ok(Command::Set(SetCommand::MacroPath(paths)))
     } else if matches_abbrev(&subcmd_upper, "TABS", 2) {
-        if subargs.is_empty() || subargs.to_uppercase() == "OFF" {
+        if subargs.is_empty() || subargs.eq_ignore_ascii_case("OFF") {
             // Reset to defaults
             Ok(Command::Set(SetCommand::Tabs(Vec::new())))
         } else {
@@ -801,10 +803,13 @@ fn parse_set_args(args: &str) -> Result<Command, String> {
                     return Err("SET TABS: interval must be at least 1".to_string());
                 }
                 let mut stops = Vec::new();
-                let mut col = 1;
+                let mut col: usize = 1;
                 while col <= 32767 {
                     stops.push(col);
-                    col += interval;
+                    match col.checked_add(interval) {
+                        Some(next) => col = next,
+                        None => break,
+                    }
                 }
                 Ok(Command::Set(SetCommand::Tabs(stops)))
             } else {
@@ -816,6 +821,9 @@ fn parse_set_args(args: &str) -> Result<Command, String> {
                             .map_err(|_| format!("SET TABS: invalid column: {}", s))
                     })
                     .collect::<std::result::Result<Vec<_>, _>>()?;
+                if stops.contains(&0) {
+                    return Err("SET TABS: column must be at least 1".to_string());
+                }
                 stops.sort();
                 stops.dedup();
                 Ok(Command::Set(SetCommand::Tabs(stops)))
@@ -1769,6 +1777,28 @@ mod tests {
                 assert!(stops.is_empty());
             }
             other => panic!("Expected Set(Tabs) off, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_tabs_zero_errors() {
+        assert!(parse_command("set ta 0 5 10").is_err());
+    }
+
+    #[test]
+    fn parse_merge_trailing_args_ignored() {
+        // "merge file.txt 3 extra" should parse count as 3
+        match parse_command("merge file.txt 3 extra").unwrap() {
+            Command::Merge(ref f, Some(3)) => assert_eq!(f, "file.txt"),
+            other => panic!("Expected Merge with count 3, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_transfer_trailing_args_ignored() {
+        match parse_command("transfer file.txt 2 extra").unwrap() {
+            Command::Transfer(ref f, 2) => assert_eq!(f, "file.txt"),
+            other => panic!("Expected Transfer with count 2, got {:?}", other),
         }
     }
 }
