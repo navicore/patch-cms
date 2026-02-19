@@ -1192,8 +1192,9 @@ impl Editor {
             )));
         }
         self.snapshot_for_undo();
-        self.buffer.insert_lines_after(self.current_line, lines);
-        self.current_line += actual_count;
+        let insert_at = self.current_line.min(self.buffer.len());
+        self.buffer.insert_lines_after(insert_at, lines);
+        self.current_line = insert_at + actual_count;
         self.alt_count += actual_count;
         Ok(CommandResult::with_message(format!(
             "{} line(s) merged from {}",
@@ -1284,8 +1285,9 @@ impl Editor {
         }
         self.snapshot_for_undo();
         let count = lines.len();
-        self.buffer.insert_lines_after(after_line, lines);
-        self.current_line = after_line + count;
+        let insert_at = after_line.min(self.buffer.len());
+        self.buffer.insert_lines_after(insert_at, lines);
+        self.current_line = insert_at + count;
         self.alt_count += count;
     }
 
@@ -1777,6 +1779,8 @@ fn next_tab_stop(col: usize, tab_stops: &[usize]) -> Option<usize> {
 }
 
 /// Replace runs of spaces with tab characters within the zone.
+/// Note: tabs past the last defined tab stop are tracked as advancing 1 column.
+/// This is a known limitation for lines with tabs beyond the last stop.
 fn compress_line(text: &str, zone_start: usize, zone_end: usize, tab_stops: &[usize]) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut result = String::with_capacity(text.len());
@@ -1828,6 +1832,8 @@ fn compress_line(text: &str, zone_start: usize, zone_end: usize, tab_stops: &[us
 }
 
 /// Replace tab characters with spaces within the zone.
+/// Note: tabs past the last defined tab stop are tracked as advancing 1 column.
+/// This is a known limitation for lines with tabs beyond the last stop.
 fn expand_line(text: &str, zone_start: usize, zone_end: usize, tab_stops: &[usize]) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut result = String::with_capacity(text.len());
@@ -2935,6 +2941,27 @@ if ftype.1 = 'RS' then
         assert_eq!(ed.buffer().len(), 2);
     }
 
+    #[test]
+    fn merge_at_eof() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let src_path = dir.path().join("src.txt");
+        std::fs::write(&src_path, "x\ny\n").unwrap();
+
+        let mut ed = editor_with_lines(&["a", "b"]);
+        // Position past end (EOF)
+        ed.current_line = 3;
+        ed.execute(&Command::Merge(
+            src_path.to_str().unwrap().to_string(),
+            None,
+        ))
+        .unwrap();
+        assert_eq!(ed.buffer().len(), 4);
+        // Cursor should land on the last inserted line, not past it
+        assert_eq!(ed.current_line(), 4);
+        assert_eq!(ed.buffer().line_text(3), Some("x"));
+        assert_eq!(ed.buffer().line_text(4), Some("y"));
+    }
+
     // -- TRANSFER tests (editor side — returns CommandAction; ring handles validation) --
 
     #[test]
@@ -3057,6 +3084,19 @@ if ftype.1 = 'RS' then
         ed.current_line = 0;
         let result = ed.execute(&Command::Compress(None, None));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn compress_single_col_arg() {
+        // COMPRESS 5 — col1=5, col2 defaults to zone_right (72)
+        let mut ed = editor_with_lines(&["1234    rest"]);
+        ed.current_line = 1;
+        ed.execute(&Command::Set(SetCommand::Tabs(vec![1, 9, 17])))
+            .unwrap();
+        // Spaces at cols 5-8 are in zone [5, 72], should compress
+        ed.execute(&Command::Compress(Some(5), None)).unwrap();
+        let text = ed.buffer().line_text(1).unwrap();
+        assert!(text.contains('\t'));
     }
 
     #[test]
