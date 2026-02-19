@@ -145,6 +145,13 @@ impl Ring {
             ));
         }
 
+        // Reject transfer to self
+        if source.file_id() == Some(target_file_id) {
+            return Err(XeditError::InvalidCommand(
+                "Cannot TRANSFER to the current file".to_string(),
+            ));
+        }
+
         // Collect lines from source
         let available = source.buffer().len() - source.current_line() + 1;
         let actual_count = count.min(available);
@@ -573,5 +580,57 @@ mod tests {
         let source = ring.current().unwrap();
         assert_eq!(source.buffer().len(), 2);
         assert_eq!(source.buffer().line_text(1), Some("alpha"));
+    }
+
+    #[test]
+    fn transfer_to_self_errors() {
+        let mut tmp1 = NamedTempFile::new().unwrap();
+        writeln!(tmp1, "alpha").unwrap();
+        tmp1.flush().unwrap();
+
+        let path1 = tmp1.path().to_str().unwrap().to_string();
+
+        let mut ring = Ring::new();
+        ring.add_file(&path1).unwrap();
+
+        let result = ring.execute_transfer(&path1, 1);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("current file"),
+            "Expected 'current file' error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn transfer_target_at_tof_inserts_before_line_1() {
+        let mut tmp1 = NamedTempFile::new().unwrap();
+        writeln!(tmp1, "alpha").unwrap();
+        tmp1.flush().unwrap();
+        let mut tmp2 = NamedTempFile::new().unwrap();
+        writeln!(tmp2, "one").unwrap();
+        tmp2.flush().unwrap();
+
+        let path1 = tmp1.path().to_str().unwrap().to_string();
+        let path2 = tmp2.path().to_str().unwrap().to_string();
+
+        let mut ring = Ring::new();
+        ring.add_file(&path1).unwrap();
+        ring.add_file(&path2).unwrap();
+
+        // Move target (file 2) to TOF
+        ring.editors[1].set_current_line(0);
+
+        // Switch to source (file 1)
+        ring.cycle_next().unwrap();
+
+        ring.execute_transfer(&path2, 1).unwrap();
+
+        let target = &ring.editors[1];
+        assert_eq!(target.buffer().len(), 2);
+        // Inserted before line 1 (TOF behavior)
+        assert_eq!(target.buffer().line_text(1), Some("alpha"));
+        assert_eq!(target.buffer().line_text(2), Some("one"));
     }
 }

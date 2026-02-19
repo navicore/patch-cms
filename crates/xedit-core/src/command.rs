@@ -794,10 +794,9 @@ fn parse_set_args(args: &str) -> Result<Command, String> {
             // Reset to defaults
             Ok(Command::Set(SetCommand::Tabs(Vec::new())))
         } else {
-            // Explicit tab stop positions (1-based columns)
-            // TODO: IBM XEDIT treats a single number as interval mode (e.g., SET TABS 8
-            // means stops every 8 cols). Consider adding SET TABS EVERY N syntax to avoid
-            // ambiguity between a single explicit stop and an interval.
+            // Explicit tab stop positions (1-based columns).
+            // IBM XEDIT treats a single number as interval mode (SET TABS 8 means
+            // every 8 cols). We require 2+ positions; use SET TABS OFF to reset.
             let mut stops: Vec<usize> = subargs
                 .split_whitespace()
                 .map(|s| {
@@ -805,6 +804,11 @@ fn parse_set_args(args: &str) -> Result<Command, String> {
                         .map_err(|_| format!("SET TABS: invalid column: {}", s))
                 })
                 .collect::<std::result::Result<Vec<_>, _>>()?;
+            if stops.len() == 1 {
+                return Err(
+                    "SET TABS requires 2+ column positions (single-number interval mode not yet supported)".to_string()
+                );
+            }
             if stops.contains(&0) {
                 return Err("SET TABS: column must be at least 1".to_string());
             }
@@ -1758,14 +1762,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_set_tabs_single() {
-        // Single number is an explicit stop, not an interval
-        match parse_command("set ta 8").unwrap() {
-            Command::Set(SetCommand::Tabs(ref stops)) => {
-                assert_eq!(stops, &[8]);
-            }
-            other => panic!("Expected Set(Tabs([8])), got {:?}", other),
-        }
+    fn parse_set_tabs_single_errors() {
+        // Single number rejected — interval mode not yet supported
+        assert!(parse_command("set ta 8").is_err());
     }
 
     #[test]

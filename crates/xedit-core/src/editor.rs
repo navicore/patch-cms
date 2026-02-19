@@ -1181,6 +1181,8 @@ impl Editor {
         Ok(CommandResult::ok())
     }
 
+    /// MERGE inserts lines from a file after the current line.
+    /// Note: IBM XEDIT errors at TOF; we allow it (inserts before line 1).
     fn cmd_merge(&mut self, filename: &str, count: Option<usize>) -> Result<CommandResult> {
         let content = self.fs.read_file(filename)?;
         let all_lines: Vec<String> = content.lines().map(String::from).collect();
@@ -1762,7 +1764,8 @@ fn sort_key(line: &str, col_start: Option<usize>, col_end: Option<usize>) -> Str
     }
 }
 
-/// Find the first tab stop strictly after the given 1-based column.
+/// Find the first tab stop strictly greater than `col`, or `None` if none exists.
+/// A character sitting exactly on a stop advances to the *next* stop, not itself.
 /// Uses binary search since tab_stops is always sorted.
 fn next_tab_stop(col: usize, tab_stops: &[usize]) -> Option<usize> {
     let idx = tab_stops.partition_point(|&s| s <= col);
@@ -3104,6 +3107,24 @@ if ftype.1 = 'RS' then
         let text = "hello   world"; // spaces at cols 6, 7, 8
         let result = compress_line(text, 1, 8, &tabs);
         assert_eq!(result, "hello\tworld");
+    }
+
+    #[test]
+    fn compress_existing_tab_then_compressible_spaces() {
+        // Tab at col 1 advances to 9, then 8 spaces (cols 9-16) reach stop 17
+        let tabs = vec![1, 9, 17];
+        let text = "\t        end"; // tab + 8 spaces + "end"
+        let result = compress_line(text, 1, 80, &tabs);
+        assert_eq!(result, "\t\tend");
+    }
+
+    #[test]
+    fn compress_existing_tab_then_short_spaces() {
+        // Tab at col 1 advances to 9, then 3 spaces (cols 9-11) can't reach stop 17
+        let tabs = vec![1, 9, 17];
+        let text = "\t   end"; // tab + 3 spaces + "end"
+        let result = compress_line(text, 1, 80, &tabs);
+        assert_eq!(result, text); // unchanged
     }
 
     #[test]
