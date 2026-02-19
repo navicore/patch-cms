@@ -1202,17 +1202,7 @@ impl Editor {
     }
 
     fn cmd_transfer(&mut self, target: &str, count: usize) -> Result<CommandResult> {
-        if self.current_line == 0 {
-            return Err(XeditError::InvalidCommand(
-                "Cannot TRANSFER at Top of File".to_string(),
-            ));
-        }
-        if self.current_line > self.buffer.len() {
-            return Err(XeditError::InvalidCommand(
-                "No lines to transfer".to_string(),
-            ));
-        }
-        // Pass raw count to ring layer; it will clamp to available lines
+        // Validation (TOF, bounds, clamping) handled by ring::execute_transfer
         Ok(CommandResult {
             action: CommandAction::Transfer(target.to_string(), count),
             message: None,
@@ -1232,6 +1222,12 @@ impl Editor {
         }
         let zone_start = col1.unwrap_or(self.zone_left);
         let zone_end = col2.unwrap_or(self.zone_right);
+        if zone_start > zone_end {
+            return Err(XeditError::InvalidCommand(format!(
+                "COMPRESS: col1 ({}) exceeds zone end ({})",
+                zone_start, zone_end
+            )));
+        }
         let original = self
             .buffer
             .line_text(self.current_line)
@@ -1259,6 +1255,12 @@ impl Editor {
         }
         let zone_start = col1.unwrap_or(self.zone_left);
         let zone_end = col2.unwrap_or(self.zone_right);
+        if zone_start > zone_end {
+            return Err(XeditError::InvalidCommand(format!(
+                "EXPAND: col1 ({}) exceeds zone end ({})",
+                zone_start, zone_end
+            )));
+        }
         let original = self
             .buffer
             .line_text(self.current_line)
@@ -1418,6 +1420,19 @@ impl Editor {
                 } else {
                     self.tab_stops = stops.clone();
                 }
+            }
+            SetCommand::TabsInterval(interval) => {
+                let limit = self.trunc;
+                let mut stops = Vec::new();
+                let mut col: usize = 1;
+                while col <= limit {
+                    stops.push(col);
+                    match col.checked_add(*interval) {
+                        Some(next) => col = next,
+                        None => break,
+                    }
+                }
+                self.tab_stops = stops;
             }
         }
         Ok(CommandResult::ok())
@@ -1755,8 +1770,10 @@ fn sort_key(line: &str, col_start: Option<usize>, col_end: Option<usize>) -> Str
 }
 
 /// Find the first tab stop strictly after the given 1-based column.
+/// Uses binary search since tab_stops is always sorted.
 fn next_tab_stop(col: usize, tab_stops: &[usize]) -> Option<usize> {
-    tab_stops.iter().copied().find(|&s| s > col)
+    let idx = tab_stops.partition_point(|&s| s <= col);
+    tab_stops.get(idx).copied()
 }
 
 /// Replace runs of spaces with tab characters within the zone.
@@ -2918,15 +2935,7 @@ if ftype.1 = 'RS' then
         assert_eq!(ed.buffer().len(), 2);
     }
 
-    // -- TRANSFER tests (editor side only — returns CommandAction) --
-
-    #[test]
-    fn transfer_at_tof_errors() {
-        let mut ed = editor_with_lines(&["a", "b"]);
-        ed.current_line = 0;
-        let result = ed.execute(&Command::Transfer("target.txt".to_string(), 1));
-        assert!(result.is_err());
-    }
+    // -- TRANSFER tests (editor side — returns CommandAction; ring handles validation) --
 
     #[test]
     fn transfer_returns_action() {
@@ -3023,6 +3032,23 @@ if ftype.1 = 'RS' then
         // Zone 1-8: spaces are outside zone, should not compress them
         let result = compress_line(text, 1, 8, &tabs);
         assert_eq!(result, text);
+    }
+
+    #[test]
+    fn compress_col1_exceeds_zone_errors() {
+        let mut ed = editor_with_lines(&["hello   world"]);
+        ed.current_line = 1;
+        // zone_right defaults to 72, so col1=80 > zone_end=72
+        let result = ed.execute(&Command::Compress(Some(80), None));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn expand_col1_exceeds_zone_errors() {
+        let mut ed = editor_with_lines(&["hello\tworld"]);
+        ed.current_line = 1;
+        let result = ed.execute(&Command::Expand(Some(80), None));
+        assert!(result.is_err());
     }
 
     #[test]

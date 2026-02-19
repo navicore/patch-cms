@@ -111,8 +111,10 @@ pub enum SetCommand {
     Pf(usize, String),
     /// SET MACRO PATH dir1 dir2 ...
     MacroPath(Vec<String>),
-    /// SET TABS — tab stop positions (1-based)
+    /// SET TABS — explicit tab stop positions (1-based)
     Tabs(Vec<usize>),
+    /// SET TABS N — interval; expanded to positions in cmd_set using trunc
+    TabsInterval(usize),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -802,16 +804,7 @@ fn parse_set_args(args: &str) -> Result<Command, String> {
                 if interval == 0 {
                     return Err("SET TABS: interval must be at least 1".to_string());
                 }
-                let mut stops = Vec::new();
-                let mut col: usize = 1;
-                while col <= 32767 {
-                    stops.push(col);
-                    match col.checked_add(interval) {
-                        Some(next) => col = next,
-                        None => break,
-                    }
-                }
-                Ok(Command::Set(SetCommand::Tabs(stops)))
+                Ok(Command::Set(SetCommand::TabsInterval(interval)))
             } else {
                 // Multiple numbers: explicit positions
                 let mut stops: Vec<usize> = parts
@@ -1761,12 +1754,8 @@ mod tests {
     #[test]
     fn parse_set_tabs_interval() {
         match parse_command("set ta 8").unwrap() {
-            Command::Set(SetCommand::Tabs(ref stops)) => {
-                assert!(stops.contains(&1));
-                assert!(stops.contains(&9));
-                assert!(stops.contains(&17));
-            }
-            other => panic!("Expected Set(Tabs) interval, got {:?}", other),
+            Command::Set(SetCommand::TabsInterval(8)) => {}
+            other => panic!("Expected Set(TabsInterval(8)), got {:?}", other),
         }
     }
 
