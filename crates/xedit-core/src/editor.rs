@@ -1280,6 +1280,9 @@ impl Editor {
 
     /// Insert lines into this editor from an external source (used by Ring for TRANSFER)
     pub fn insert_lines_externally(&mut self, after_line: usize, lines: Vec<String>) {
+        if lines.is_empty() {
+            return;
+        }
         self.snapshot_for_undo();
         let count = lines.len();
         self.buffer.insert_lines_after(after_line, lines);

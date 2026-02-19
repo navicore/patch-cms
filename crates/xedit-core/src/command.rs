@@ -468,6 +468,9 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
                     if c == 0 {
                         return Err("COMPRESS column must be at least 1".to_string());
                     }
+                    if c < col1 {
+                        return Err(format!("COMPRESS: col2 ({}) must be >= col1 ({})", c, col1));
+                    }
                     Some(c)
                 };
                 Ok(Command::Compress(Some(col1), col2))
@@ -493,6 +496,9 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
                         .map_err(|_| format!("Invalid column: {}", col2_str))?;
                     if c == 0 {
                         return Err("EXPAND column must be at least 1".to_string());
+                    }
+                    if c < col1 {
+                        return Err(format!("EXPAND: col2 ({}) must be >= col1 ({})", c, col1));
                     }
                     Some(c)
                 };
@@ -796,7 +802,7 @@ fn parse_set_args(args: &str) -> Result<Command, String> {
                 }
                 let mut stops = Vec::new();
                 let mut col = 1;
-                while col <= 256 {
+                while col <= 32767 {
                     stops.push(col);
                     col += interval;
                 }
@@ -1686,6 +1692,11 @@ mod tests {
         assert!(parse_command("compress 1 0").is_err());
     }
 
+    #[test]
+    fn parse_compress_inverted_cols_errors() {
+        assert!(parse_command("compress 20 5").is_err());
+    }
+
     // -- EXPAND tests --
 
     #[test]
@@ -1712,6 +1723,11 @@ mod tests {
     #[test]
     fn parse_expand_zero_col2_errors() {
         assert!(parse_command("expand 1 0").is_err());
+    }
+
+    #[test]
+    fn parse_expand_inverted_cols_errors() {
+        assert!(parse_command("expand 20 5").is_err());
     }
 
     #[test]

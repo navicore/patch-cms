@@ -139,15 +139,28 @@ impl Ring {
                 "Cannot TRANSFER at Top of File".to_string(),
             ));
         }
+        if source.current_line() > source.buffer().len() {
+            return Err(XeditError::InvalidCommand(
+                "No lines to transfer".to_string(),
+            ));
+        }
 
         // Collect lines from source
         let available = source.buffer().len() - source.current_line() + 1;
         let actual_count = count.min(available);
         let mut lines = Vec::with_capacity(actual_count);
         for i in source.current_line()..source.current_line() + actual_count {
-            if let Some(text) = source.buffer().line_text(i) {
-                lines.push(text.to_string());
-            }
+            let text = source
+                .buffer()
+                .line_text(i)
+                .ok_or_else(|| {
+                    XeditError::InvalidCommand(format!(
+                        "TRANSFER: internal error — line {} missing",
+                        i
+                    ))
+                })?
+                .to_string();
+            lines.push(text);
         }
 
         // Find target editor (excluding current)
@@ -169,12 +182,13 @@ impl Ring {
         };
 
         // Insert into target
+        let actual_count = lines.len();
         let target = &mut self.editors[target_idx];
         let after_line = target.current_line();
         target.insert_lines_externally(after_line, lines);
 
         Ok(format!(
-            "{} line(s) transferred to {}",
+            "{} line(s) copied to {} (source unchanged)",
             actual_count, target_file_id
         ))
     }
@@ -438,7 +452,7 @@ mod tests {
 
         // Transfer 1 line from source to target
         let msg = ring.execute_transfer(&path2, 1).unwrap();
-        assert!(msg.contains("1 line(s) transferred"));
+        assert!(msg.contains("1 line(s) copied to"));
 
         // Check target got the line
         // Target is at index 1
@@ -466,7 +480,7 @@ mod tests {
         ring.cycle_next().unwrap();
 
         let msg = ring.execute_transfer(&path2, 2).unwrap();
-        assert!(msg.contains("2 line(s) transferred"));
+        assert!(msg.contains("2 line(s) copied to"));
 
         let target = &ring.editors[1];
         assert_eq!(target.buffer().len(), 3); // 1 original + 2 transferred
@@ -491,7 +505,7 @@ mod tests {
 
         // Request 100 but only 1 available
         let msg = ring.execute_transfer(&path2, 100).unwrap();
-        assert!(msg.contains("1 line(s) transferred"));
+        assert!(msg.contains("1 line(s) copied to"));
     }
 
     #[test]
