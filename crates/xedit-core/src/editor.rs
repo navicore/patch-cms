@@ -69,6 +69,9 @@ pub struct Editor {
     /// Search path for REXX macros (directories to check)
     macro_path: Vec<String>,
 
+    // Tab stops (1-based column positions)
+    tab_stops: Vec<usize>,
+
     // Operational state
     alt_count: usize,
     message: Option<String>,
@@ -163,6 +166,7 @@ impl Editor {
             verify_end: 80,
             pf_keys: default_pf_keys(),
             macro_path: vec![".".to_string()],
+            tab_stops: vec![1, 9, 17, 25, 33, 41, 49, 57, 65, 73],
             alt_count: 0,
             message: None,
             pending_block: None,
@@ -472,6 +476,11 @@ impl Editor {
         &self.macro_path
     }
 
+    /// Get the current tab stop positions (1-based columns)
+    pub fn tab_stops(&self) -> &[usize] {
+        &self.tab_stops
+    }
+
     // -- Display customization --
 
     pub fn reserved_line(&self, row: usize) -> Option<&str> {
@@ -717,6 +726,12 @@ impl Editor {
             Command::Delete(target) => self.cmd_delete(target.as_ref()),
             Command::Replace(text) => self.cmd_replace(text),
             Command::Duplicat(n) => self.cmd_duplicat(*n),
+            Command::Coverwrite(text) => self.cmd_coverwrite(text),
+            Command::Cinsert(text) => self.cmd_cinsert(text),
+            Command::Merge(filename, count) => self.cmd_merge(filename, *count),
+            Command::Transfer(target, count) => self.cmd_transfer(target, *count),
+            Command::Compress(col1, col2) => self.cmd_compress(*col1, *col2),
+            Command::Expand(col1, col2) => self.cmd_expand(*col1, *col2),
             Command::Reset => self.cmd_reset(),
             Command::File => self.cmd_file(),
             Command::Save => self.cmd_save(),
@@ -1090,6 +1105,198 @@ impl Editor {
         }
     }
 
+    fn cmd_coverwrite(&mut self, text: &str) -> Result<CommandResult> {
+        if self.current_line == 0 {
+            return Err(XeditError::InvalidCommand(
+                "Cannot COVERWRITE at Top of File".to_string(),
+            ));
+        }
+        if self.current_line > self.buffer.len() {
+            return Err(XeditError::InvalidCommand(
+                "No line to overwrite".to_string(),
+            ));
+        }
+        let line_text = self
+            .buffer
+            .line_text(self.current_line)
+            .unwrap_or("")
+            .to_string();
+        let mut chars: Vec<char> = line_text.chars().collect();
+        let start_col = self.current_col.saturating_sub(1); // 0-based
+                                                            // Pad with spaces if start_col > chars.len()
+        while chars.len() < start_col {
+            chars.push(' ');
+        }
+        for (i, ch) in text.chars().enumerate() {
+            let pos = start_col + i;
+            if pos < chars.len() {
+                chars[pos] = ch;
+            } else {
+                chars.push(ch);
+            }
+        }
+        let new_text: String = chars.into_iter().collect();
+        if new_text != line_text {
+            self.snapshot_for_undo();
+            if let Some(line) = self.buffer.get_mut(self.current_line) {
+                line.set_text(new_text);
+            }
+            self.alt_count += 1;
+        }
+        Ok(CommandResult::ok())
+    }
+
+    fn cmd_cinsert(&mut self, text: &str) -> Result<CommandResult> {
+        if self.current_line == 0 {
+            return Err(XeditError::InvalidCommand(
+                "Cannot CINSERT at Top of File".to_string(),
+            ));
+        }
+        if self.current_line > self.buffer.len() {
+            return Err(XeditError::InvalidCommand(
+                "No line for CINSERT".to_string(),
+            ));
+        }
+        let line_text = self
+            .buffer
+            .line_text(self.current_line)
+            .unwrap_or("")
+            .to_string();
+        let mut chars: Vec<char> = line_text.chars().collect();
+        let start_col = self.current_col.saturating_sub(1); // 0-based
+                                                            // Pad with spaces if start_col > chars.len()
+        while chars.len() < start_col {
+            chars.push(' ');
+        }
+        let insert_chars: Vec<char> = text.chars().collect();
+        chars.splice(start_col..start_col, insert_chars);
+        let new_text: String = chars.into_iter().collect();
+        if new_text != line_text {
+            self.snapshot_for_undo();
+            if let Some(line) = self.buffer.get_mut(self.current_line) {
+                line.set_text(new_text);
+            }
+            self.alt_count += 1;
+        }
+        Ok(CommandResult::ok())
+    }
+
+    /// MERGE inserts lines from a file after the current line.
+    /// Note: IBM XEDIT errors at TOF; we allow it (inserts before line 1).
+    fn cmd_merge(&mut self, filename: &str, count: Option<usize>) -> Result<CommandResult> {
+        let content = self.fs.read_file(filename)?;
+        let all_lines: Vec<String> = content.lines().map(String::from).collect();
+        let lines: Vec<String> = match count {
+            Some(n) => all_lines.into_iter().take(n).collect(),
+            None => all_lines,
+        };
+        let actual_count = lines.len();
+        if actual_count == 0 {
+            return Ok(CommandResult::with_message(format!(
+                "0 line(s) merged from {}",
+                filename
+            )));
+        }
+        self.snapshot_for_undo();
+        let insert_at = self.current_line.min(self.buffer.len());
+        self.buffer.insert_lines_after(insert_at, lines);
+        self.current_line = insert_at + actual_count;
+        self.alt_count += actual_count;
+        Ok(CommandResult::with_message(format!(
+            "{} line(s) merged from {}",
+            actual_count, filename
+        )))
+    }
+
+    fn cmd_transfer(&mut self, target: &str, count: usize) -> Result<CommandResult> {
+        // Validation (TOF, bounds, clamping) handled by ring::execute_transfer
+        Ok(CommandResult {
+            action: CommandAction::Transfer(target.to_string(), count),
+            message: None,
+        })
+    }
+
+    fn cmd_compress(&mut self, col1: Option<usize>, col2: Option<usize>) -> Result<CommandResult> {
+        if self.current_line == 0 {
+            return Err(XeditError::InvalidCommand(
+                "Cannot COMPRESS at Top of File".to_string(),
+            ));
+        }
+        if self.current_line > self.buffer.len() {
+            return Err(XeditError::InvalidCommand(
+                "No line to compress".to_string(),
+            ));
+        }
+        let zone_start = col1.unwrap_or(self.zone_left);
+        let zone_end = col2.unwrap_or(self.zone_right);
+        if zone_start > zone_end {
+            return Err(XeditError::InvalidCommand(format!(
+                "COMPRESS: col1 ({}) exceeds zone end ({})",
+                zone_start, zone_end
+            )));
+        }
+        let original = self
+            .buffer
+            .line_text(self.current_line)
+            .unwrap_or("")
+            .to_string();
+        let result = compress_line(&original, zone_start, zone_end, &self.tab_stops);
+        if result != original {
+            self.snapshot_for_undo();
+            if let Some(line) = self.buffer.get_mut(self.current_line) {
+                line.set_text(result);
+            }
+            self.alt_count += 1;
+        }
+        Ok(CommandResult::ok())
+    }
+
+    fn cmd_expand(&mut self, col1: Option<usize>, col2: Option<usize>) -> Result<CommandResult> {
+        if self.current_line == 0 {
+            return Err(XeditError::InvalidCommand(
+                "Cannot EXPAND at Top of File".to_string(),
+            ));
+        }
+        if self.current_line > self.buffer.len() {
+            return Err(XeditError::InvalidCommand("No line to expand".to_string()));
+        }
+        let zone_start = col1.unwrap_or(self.zone_left);
+        let zone_end = col2.unwrap_or(self.zone_right);
+        if zone_start > zone_end {
+            return Err(XeditError::InvalidCommand(format!(
+                "EXPAND: col1 ({}) exceeds zone end ({})",
+                zone_start, zone_end
+            )));
+        }
+        let original = self
+            .buffer
+            .line_text(self.current_line)
+            .unwrap_or("")
+            .to_string();
+        let result = expand_line(&original, zone_start, zone_end, &self.tab_stops);
+        if result != original {
+            self.snapshot_for_undo();
+            if let Some(line) = self.buffer.get_mut(self.current_line) {
+                line.set_text(result);
+            }
+            self.alt_count += 1;
+        }
+        Ok(CommandResult::ok())
+    }
+
+    /// Insert lines into this editor from an external source (used by Ring for TRANSFER)
+    pub fn insert_lines_externally(&mut self, after_line: usize, lines: Vec<String>) {
+        if lines.is_empty() {
+            return;
+        }
+        self.snapshot_for_undo();
+        let count = lines.len();
+        let insert_at = after_line.min(self.buffer.len());
+        self.buffer.insert_lines_after(insert_at, lines);
+        self.current_line = insert_at + count;
+        self.alt_count += count;
+    }
+
     fn cmd_reset(&mut self) -> Result<CommandResult> {
         let had_pending = self.pending_block.is_some()
             || self.pending_operation.is_some()
@@ -1214,6 +1421,14 @@ impl Editor {
             SetCommand::MacroPath(paths) => {
                 self.macro_path = paths.clone();
             }
+            SetCommand::Tabs(stops) => {
+                if stops.is_empty() {
+                    // Reset to defaults
+                    self.tab_stops = vec![1, 9, 17, 25, 33, 41, 49, 57, 65, 73];
+                } else {
+                    self.tab_stops = stops.clone();
+                }
+            }
         }
         Ok(CommandResult::ok())
     }
@@ -1236,6 +1451,10 @@ impl Editor {
             "ALT" => format!("Alt={}", self.alt_count),
             "LRECL" => format!("Lrecl={}", self.buffer.lrecl()),
             "RECFM" => format!("Recfm={:?}", self.buffer.recfm()),
+            "TABS" => {
+                let stops: Vec<String> = self.tab_stops.iter().map(|s| s.to_string()).collect();
+                format!("Tabs={}", stops.join(" "))
+            }
             _ => {
                 return Err(XeditError::InvalidCommand(format!(
                     "Unknown QUERY: {}",
@@ -1543,6 +1762,111 @@ fn sort_key(line: &str, col_start: Option<usize>, col_end: Option<usize>) -> Str
         }
         _ => line.to_string(),
     }
+}
+
+/// Find the first tab stop strictly greater than `col`, or `None` if none exists.
+/// A character sitting exactly on a stop advances to the *next* stop, not itself.
+/// Uses binary search since tab_stops is always sorted.
+fn next_tab_stop(col: usize, tab_stops: &[usize]) -> Option<usize> {
+    let idx = tab_stops.partition_point(|&s| s <= col);
+    tab_stops.get(idx).copied()
+}
+
+/// Replace runs of spaces with tab characters within the zone.
+/// Note: tabs past the last defined tab stop are tracked as advancing 1 column.
+/// FIXME: tabs past the last stop advance col by only 1, causing subsequent
+/// zone checks to use wrong column positions. Ensure tab stops cover the full
+/// working width to avoid this.
+fn compress_line(text: &str, zone_start: usize, zone_end: usize, tab_stops: &[usize]) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut result = String::with_capacity(text.len());
+    let mut col: usize = 1; // 1-based column position
+
+    let mut i = 0;
+    while i < chars.len() {
+        if col >= zone_start && col <= zone_end && chars[i] == ' ' {
+            // Count the run of spaces
+            let run_start_col = col;
+            while i < chars.len() && chars[i] == ' ' && col <= zone_end {
+                i += 1;
+                col += 1;
+            }
+            // Replace space runs with tabs where they reach tab stops
+            let mut cur_col = run_start_col;
+            let run_end_col = col; // one past last space
+            while cur_col < run_end_col {
+                if let Some(next_stop) = next_tab_stop(cur_col, tab_stops) {
+                    if next_stop <= run_end_col {
+                        result.push('\t');
+                        cur_col = next_stop;
+                    } else {
+                        // Not enough spaces to reach next tab stop
+                        result.push(' ');
+                        cur_col += 1;
+                    }
+                } else {
+                    result.push(' ');
+                    cur_col += 1;
+                }
+            }
+        } else {
+            result.push(chars[i]);
+            if chars[i] == '\t' {
+                // Tab advances to next tab stop
+                if let Some(stop) = next_tab_stop(col, tab_stops) {
+                    col = stop;
+                } else {
+                    col += 1;
+                }
+            } else {
+                col += 1;
+            }
+            i += 1;
+        }
+    }
+    result
+}
+
+/// Replace tab characters with spaces within the zone.
+/// Note: tabs past the last defined tab stop are tracked as advancing 1 column.
+/// FIXME: tabs past the last stop advance col by only 1, causing subsequent
+/// zone checks to use wrong column positions. Ensure tab stops cover the full
+/// working width to avoid this.
+fn expand_line(text: &str, zone_start: usize, zone_end: usize, tab_stops: &[usize]) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    // Tabs expand to spaces, so output is always >= input length
+    let mut result = String::with_capacity(text.len() * 2);
+    let mut col: usize = 1; // 1-based column position
+
+    for &ch in &chars {
+        if ch == '\t' && col >= zone_start && col <= zone_end {
+            // Expand tab to spaces up to next tab stop
+            if let Some(next_stop) = next_tab_stop(col, tab_stops) {
+                let spaces = next_stop - col;
+                for _ in 0..spaces {
+                    result.push(' ');
+                }
+                col = next_stop;
+            } else {
+                // No more tab stops, just output a space
+                result.push(' ');
+                col += 1;
+            }
+        } else {
+            result.push(ch);
+            if ch == '\t' {
+                // Outside zone: pass through but track column
+                if let Some(stop) = next_tab_stop(col, tab_stops) {
+                    col = stop;
+                } else {
+                    col += 1;
+                }
+            } else {
+                col += 1;
+            }
+        }
+    }
+    result
 }
 
 impl Default for Editor {
@@ -2401,5 +2725,594 @@ if ftype.1 = 'RS' then
             .unwrap();
         let content = std::fs::read_to_string(&out_path).unwrap();
         assert_eq!(content, "alpha\nbeta\n");
+    }
+
+    // -- COVERWRITE tests --
+
+    #[test]
+    fn coverwrite_basic() {
+        let mut ed = editor_with_lines(&["hello world"]);
+        ed.current_line = 1;
+        ed.current_col = 1; // overwrite from col 1
+        ed.execute(&Command::Coverwrite("HI".to_string())).unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("HIllo world"));
+    }
+
+    #[test]
+    fn coverwrite_middle() {
+        let mut ed = editor_with_lines(&["hello world"]);
+        ed.current_line = 1;
+        ed.current_col = 4; // overwrite starting at col 4
+        ed.execute(&Command::Coverwrite("XY".to_string())).unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("helXY world"));
+    }
+
+    #[test]
+    fn coverwrite_extends_line() {
+        let mut ed = editor_with_lines(&["short"]);
+        ed.current_line = 1;
+        ed.current_col = 4; // overwrite starting at col 4
+        ed.execute(&Command::Coverwrite("LONGTEXT".to_string()))
+            .unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("shoLONGTEXT"));
+    }
+
+    #[test]
+    fn coverwrite_at_tof_errors() {
+        let mut ed = editor_with_lines(&["hello"]);
+        ed.current_line = 0;
+        let result = ed.execute(&Command::Coverwrite("X".to_string()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn coverwrite_increments_alt_count() {
+        let mut ed = editor_with_lines(&["hello"]);
+        ed.current_line = 1;
+        ed.current_col = 1;
+        let before = ed.alt_count();
+        ed.execute(&Command::Coverwrite("X".to_string())).unwrap();
+        assert_eq!(ed.alt_count(), before + 1);
+    }
+
+    #[test]
+    fn coverwrite_undo() {
+        let mut ed = editor_with_lines(&["hello"]);
+        ed.current_line = 1;
+        ed.current_col = 1;
+        ed.execute(&Command::Coverwrite("XY".to_string())).unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("XYllo"));
+        ed.execute(&Command::Undo).unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("hello"));
+    }
+
+    #[test]
+    fn coverwrite_noop_no_undo() {
+        let mut ed = editor_with_lines(&["hello"]);
+        ed.current_line = 1;
+        ed.current_col = 1;
+        let before = ed.alt_count();
+        // Overwrite with same text — no change
+        ed.execute(&Command::Coverwrite("hello".to_string()))
+            .unwrap();
+        assert_eq!(ed.alt_count(), before);
+    }
+
+    // -- CINSERT tests --
+
+    #[test]
+    fn cinsert_basic() {
+        let mut ed = editor_with_lines(&["hello world"]);
+        ed.current_line = 1;
+        ed.current_col = 1; // insert at col 1
+        ed.execute(&Command::Cinsert("XX".to_string())).unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("XXhello world"));
+    }
+
+    #[test]
+    fn cinsert_middle() {
+        let mut ed = editor_with_lines(&["hello world"]);
+        ed.current_line = 1;
+        ed.current_col = 6; // insert before space
+        ed.execute(&Command::Cinsert("XY".to_string())).unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("helloXY world"));
+    }
+
+    #[test]
+    fn cinsert_past_end_pads() {
+        let mut ed = editor_with_lines(&["hi"]);
+        ed.current_line = 1;
+        ed.current_col = 5; // past end of "hi"
+        ed.execute(&Command::Cinsert("XX".to_string())).unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("hi  XX"));
+    }
+
+    #[test]
+    fn cinsert_at_tof_errors() {
+        let mut ed = editor_with_lines(&["hello"]);
+        ed.current_line = 0;
+        let result = ed.execute(&Command::Cinsert("X".to_string()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cinsert_undo() {
+        let mut ed = editor_with_lines(&["hello"]);
+        ed.current_line = 1;
+        ed.current_col = 1;
+        ed.execute(&Command::Cinsert("XX".to_string())).unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("XXhello"));
+        ed.execute(&Command::Undo).unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("hello"));
+    }
+
+    #[test]
+    fn cinsert_noop_empty_at_end() {
+        // CINSERT at end of line with empty-ish content that matches — actually
+        // CINSERT always inserts so it always changes the line. Test that it
+        // does increment alt_count (it's never a no-op).
+        let mut ed = editor_with_lines(&["hello"]);
+        ed.current_line = 1;
+        ed.current_col = 6; // past end
+        let before = ed.alt_count();
+        ed.execute(&Command::Cinsert("X".to_string())).unwrap();
+        assert_eq!(ed.alt_count(), before + 1);
+    }
+
+    // -- MERGE tests --
+
+    #[test]
+    fn merge_all_lines() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let src_path = dir.path().join("src.txt");
+        std::fs::write(&src_path, "x\ny\nz\n").unwrap();
+
+        let mut ed = editor_with_lines(&["a", "b"]);
+        ed.current_line = 1;
+        ed.execute(&Command::Merge(
+            src_path.to_str().unwrap().to_string(),
+            None,
+        ))
+        .unwrap();
+        assert_eq!(ed.buffer().len(), 5);
+        assert_eq!(ed.buffer().line_text(2), Some("x"));
+        assert_eq!(ed.buffer().line_text(4), Some("z"));
+        assert_eq!(ed.current_line(), 4); // advanced to last inserted
+    }
+
+    #[test]
+    fn merge_with_count() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let src_path = dir.path().join("src.txt");
+        std::fs::write(&src_path, "x\ny\nz\n").unwrap();
+
+        let mut ed = editor_with_lines(&["a", "b"]);
+        ed.current_line = 1;
+        ed.execute(&Command::Merge(
+            src_path.to_str().unwrap().to_string(),
+            Some(2),
+        ))
+        .unwrap();
+        assert_eq!(ed.buffer().len(), 4); // only 2 lines merged
+        assert_eq!(ed.buffer().line_text(2), Some("x"));
+        assert_eq!(ed.buffer().line_text(3), Some("y"));
+    }
+
+    #[test]
+    fn merge_count_exceeds_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let src_path = dir.path().join("src.txt");
+        std::fs::write(&src_path, "x\ny\n").unwrap();
+
+        let mut ed = editor_with_lines(&["a"]);
+        ed.current_line = 1;
+        ed.execute(&Command::Merge(
+            src_path.to_str().unwrap().to_string(),
+            Some(100),
+        ))
+        .unwrap();
+        assert_eq!(ed.buffer().len(), 3); // only 2 lines available
+    }
+
+    #[test]
+    fn merge_advances_current_line() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let src_path = dir.path().join("src.txt");
+        std::fs::write(&src_path, "x\ny\n").unwrap();
+
+        let mut ed = editor_with_lines(&["a", "b", "c"]);
+        ed.current_line = 1;
+        ed.execute(&Command::Merge(
+            src_path.to_str().unwrap().to_string(),
+            None,
+        ))
+        .unwrap();
+        assert_eq!(ed.current_line(), 3); // 1 + 2 inserted
+    }
+
+    #[test]
+    fn merge_at_tof() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let src_path = dir.path().join("src.txt");
+        std::fs::write(&src_path, "x\n").unwrap();
+
+        let mut ed = editor_with_lines(&["a"]);
+        ed.current_line = 0;
+        ed.execute(&Command::Merge(
+            src_path.to_str().unwrap().to_string(),
+            None,
+        ))
+        .unwrap();
+        assert_eq!(ed.buffer().len(), 2);
+        assert_eq!(ed.buffer().line_text(1), Some("x"));
+    }
+
+    #[test]
+    fn merge_undo() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let src_path = dir.path().join("src.txt");
+        std::fs::write(&src_path, "x\ny\n").unwrap();
+
+        let mut ed = editor_with_lines(&["a", "b"]);
+        ed.current_line = 1;
+        ed.execute(&Command::Merge(
+            src_path.to_str().unwrap().to_string(),
+            None,
+        ))
+        .unwrap();
+        assert_eq!(ed.buffer().len(), 4);
+        ed.execute(&Command::Undo).unwrap();
+        assert_eq!(ed.buffer().len(), 2);
+    }
+
+    #[test]
+    fn merge_at_eof() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let src_path = dir.path().join("src.txt");
+        std::fs::write(&src_path, "x\ny\n").unwrap();
+
+        let mut ed = editor_with_lines(&["a", "b"]);
+        // Position past end (EOF)
+        ed.current_line = 3;
+        ed.execute(&Command::Merge(
+            src_path.to_str().unwrap().to_string(),
+            None,
+        ))
+        .unwrap();
+        assert_eq!(ed.buffer().len(), 4);
+        // Cursor should land on the last inserted line, not past it
+        assert_eq!(ed.current_line(), 4);
+        assert_eq!(ed.buffer().line_text(3), Some("x"));
+        assert_eq!(ed.buffer().line_text(4), Some("y"));
+    }
+
+    #[test]
+    fn merge_empty_buffer_at_tof() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let src_path = dir.path().join("src.txt");
+        std::fs::write(&src_path, "x\ny\n").unwrap();
+
+        let mut ed = Editor::new();
+        // Empty buffer, current_line = 0 (TOF)
+        ed.execute(&Command::Merge(
+            src_path.to_str().unwrap().to_string(),
+            None,
+        ))
+        .unwrap();
+        assert_eq!(ed.buffer().len(), 2);
+        assert_eq!(ed.current_line(), 2);
+        assert_eq!(ed.buffer().line_text(1), Some("x"));
+        assert_eq!(ed.buffer().line_text(2), Some("y"));
+    }
+
+    // -- TRANSFER tests (editor side — returns CommandAction; ring handles validation) --
+
+    #[test]
+    fn transfer_returns_action() {
+        let mut ed = editor_with_lines(&["a", "b", "c"]);
+        ed.current_line = 1;
+        let result = ed
+            .execute(&Command::Transfer("target.txt".to_string(), 2))
+            .unwrap();
+        match result.action {
+            CommandAction::Transfer(ref target, count) => {
+                assert_eq!(target, "target.txt");
+                assert_eq!(count, 2);
+            }
+            other => panic!("Expected Transfer action, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn transfer_passes_raw_count() {
+        let mut ed = editor_with_lines(&["a", "b"]);
+        ed.current_line = 2;
+        let result = ed
+            .execute(&Command::Transfer("target.txt".to_string(), 10))
+            .unwrap();
+        match result.action {
+            CommandAction::Transfer(_, count) => {
+                assert_eq!(count, 10); // raw count; ring layer clamps
+            }
+            other => panic!("Expected Transfer action, got {:?}", other),
+        }
+    }
+
+    // -- SET TABS tests --
+
+    #[test]
+    fn set_tabs_updates_editor() {
+        let mut ed = editor_with_lines(&["a"]);
+        ed.execute(&Command::Set(SetCommand::Tabs(vec![1, 5, 9])))
+            .unwrap();
+        assert_eq!(ed.tab_stops(), &[1, 5, 9]);
+    }
+
+    #[test]
+    fn set_tabs_off_resets_defaults() {
+        let mut ed = editor_with_lines(&["a"]);
+        ed.execute(&Command::Set(SetCommand::Tabs(vec![1, 5])))
+            .unwrap();
+        assert_eq!(ed.tab_stops(), &[1, 5]);
+        ed.execute(&Command::Set(SetCommand::Tabs(Vec::new())))
+            .unwrap();
+        assert_eq!(ed.tab_stops(), &[1, 9, 17, 25, 33, 41, 49, 57, 65, 73]);
+    }
+
+    #[test]
+    fn query_tabs() {
+        let mut ed = editor_with_lines(&["a"]);
+        ed.execute(&Command::Set(SetCommand::Tabs(vec![1, 9, 17])))
+            .unwrap();
+        let result = ed.execute(&Command::Query("tabs".to_string())).unwrap();
+        assert_eq!(result.message.as_deref(), Some("Tabs=1 9 17"));
+    }
+
+    // -- COMPRESS tests --
+
+    #[test]
+    fn compress_line_basic() {
+        // Default tabs: 1, 9, 17, 25, ...
+        let tabs = vec![1, 9, 17, 25];
+        // "hello" is cols 1-5, spaces at cols 6-8, "world" at col 9
+        // Spaces from col 6 reach tab stop 9, so they compress to a tab
+        let text = "hello   world";
+        let result = compress_line(text, 1, 80, &tabs);
+        assert_eq!(result, "hello\tworld");
+
+        // 1 space at col 8, reaches tab stop 9
+        let text2 = "1234567 next";
+        let result2 = compress_line(text2, 1, 80, &tabs);
+        assert_eq!(result2, "1234567\tnext");
+    }
+
+    #[test]
+    fn compress_no_spaces_noop() {
+        let tabs = vec![1, 9, 17];
+        let text = "nospaces";
+        let result = compress_line(text, 1, 80, &tabs);
+        assert_eq!(result, text);
+    }
+
+    #[test]
+    fn compress_with_zone() {
+        let tabs = vec![1, 9, 17, 25];
+        // "12345678" occupies cols 1-8; spaces begin at col 9
+        let text = "12345678        next";
+        // Zone ends at col 8, so spaces at cols 9+ are outside zone_end=8
+        let result = compress_line(text, 1, 8, &tabs);
+        assert_eq!(result, text);
+    }
+
+    #[test]
+    fn compress_zone_boundary_at_tab_stop() {
+        // Space run cols 6-8 (3 spaces), zone_end=8, tab stop at 9
+        // The space run ends at col 9 (run_end_col), which equals next_stop
+        let tabs = vec![1, 9, 17];
+        let text = "hello   world"; // spaces at cols 6, 7, 8
+        let result = compress_line(text, 1, 8, &tabs);
+        assert_eq!(result, "hello\tworld");
+    }
+
+    #[test]
+    fn compress_existing_tab_then_compressible_spaces() {
+        // Tab at col 1 advances to 9, then 8 spaces (cols 9-16) reach stop 17
+        let tabs = vec![1, 9, 17];
+        let text = "\t        end"; // tab + 8 spaces + "end"
+        let result = compress_line(text, 1, 80, &tabs);
+        assert_eq!(result, "\t\tend");
+    }
+
+    #[test]
+    fn compress_existing_tab_then_short_spaces() {
+        // Tab at col 1 advances to 9, then 3 spaces (cols 9-11) can't reach stop 17
+        let tabs = vec![1, 9, 17];
+        let text = "\t   end"; // tab + 3 spaces + "end"
+        let result = compress_line(text, 1, 80, &tabs);
+        assert_eq!(result, text); // unchanged
+    }
+
+    #[test]
+    fn compress_tab_beyond_last_stop_then_spaces() {
+        // Tabs at [1, 9] only. Tab at col 9 has no next stop.
+        // Spaces after it should be preserved (no stop to compress to).
+        let tabs = vec![1, 9];
+        let text = "\t\t   end"; // tab at col 1→9, tab at col 9→10 (no stop), spaces at 10-12
+        let result = compress_line(text, 1, 80, &tabs);
+        // Spaces can't reach a tab stop (none defined past 9), so preserved
+        assert_eq!(result, text);
+    }
+
+    #[test]
+    fn compress_col1_exceeds_zone_errors() {
+        let mut ed = editor_with_lines(&["hello   world"]);
+        ed.current_line = 1;
+        // zone_right defaults to 72, so col1=80 > zone_end=72
+        let result = ed.execute(&Command::Compress(Some(80), None));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn expand_col1_exceeds_zone_errors() {
+        let mut ed = editor_with_lines(&["hello\tworld"]);
+        ed.current_line = 1;
+        let result = ed.execute(&Command::Expand(Some(80), None));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn compress_at_tof_errors() {
+        let mut ed = editor_with_lines(&["hello"]);
+        ed.current_line = 0;
+        let result = ed.execute(&Command::Compress(None, None));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn compress_single_col_arg() {
+        // COMPRESS 5 — col1=5, col2 defaults to zone_right (72)
+        let mut ed = editor_with_lines(&["1234    rest"]);
+        ed.current_line = 1;
+        ed.execute(&Command::Set(SetCommand::Tabs(vec![1, 9, 17])))
+            .unwrap();
+        // Spaces at cols 5-8 are in zone [5, 72], should compress
+        ed.execute(&Command::Compress(Some(5), None)).unwrap();
+        let text = ed.buffer().line_text(1).unwrap();
+        assert!(text.contains('\t'));
+    }
+
+    #[test]
+    fn compress_equal_zone_endpoints() {
+        // COMPRESS 5 5 — single-column zone
+        let mut ed = editor_with_lines(&["1234 rest"]);
+        ed.current_line = 1;
+        ed.execute(&Command::Set(SetCommand::Tabs(vec![1, 5, 9])))
+            .unwrap();
+        // Space at col 5 is in zone [5, 5]; no-op since single space can't reach next stop (9)
+        let before = ed.alt_count();
+        ed.execute(&Command::Compress(Some(5), Some(5))).unwrap();
+        assert_eq!(ed.alt_count(), before); // unchanged
+    }
+
+    #[test]
+    fn compress_noop_no_undo() {
+        let mut ed = editor_with_lines(&["nospaces"]);
+        ed.current_line = 1;
+        let before = ed.alt_count();
+        ed.execute(&Command::Compress(None, None)).unwrap();
+        assert_eq!(ed.alt_count(), before); // no change
+    }
+
+    #[test]
+    fn compress_undo() {
+        // "hello   world": spaces at cols 6-8 reach tab stop 9
+        let mut ed = editor_with_lines(&["hello   world"]);
+        ed.current_line = 1;
+        ed.execute(&Command::Set(SetCommand::Tabs(vec![1, 9, 17])))
+            .unwrap();
+        ed.execute(&Command::Compress(None, None)).unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("hello\tworld"));
+        ed.execute(&Command::Undo).unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("hello   world"));
+    }
+
+    // -- EXPAND tests --
+
+    #[test]
+    fn expand_line_basic() {
+        let tabs = vec![1, 9, 17];
+        let text = "hello\tworld";
+        let result = expand_line(text, 1, 80, &tabs);
+        // "hello" is 5 chars (cols 1-5), tab at col 6, next stop is 9
+        // So tab expands to 3 spaces
+        assert_eq!(result, "hello   world");
+    }
+
+    #[test]
+    fn expand_no_tabs_noop() {
+        let tabs = vec![1, 9, 17];
+        let text = "notabs";
+        let result = expand_line(text, 1, 80, &tabs);
+        assert_eq!(result, text);
+    }
+
+    #[test]
+    fn expand_with_zone() {
+        let tabs = vec![1, 9, 17];
+        let text = "hello\tworld";
+        // Zone 1-4: tab is at col 6 which is outside zone, should pass through
+        let result = expand_line(text, 1, 4, &tabs);
+        assert_eq!(result, text);
+    }
+
+    #[test]
+    fn expand_at_tof_errors() {
+        let mut ed = editor_with_lines(&["hello"]);
+        ed.current_line = 0;
+        let result = ed.execute(&Command::Expand(None, None));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn expand_noop_no_undo() {
+        let mut ed = editor_with_lines(&["notabs"]);
+        ed.current_line = 1;
+        let before = ed.alt_count();
+        ed.execute(&Command::Expand(None, None)).unwrap();
+        assert_eq!(ed.alt_count(), before); // no change
+    }
+
+    #[test]
+    fn expand_undo() {
+        let mut ed = editor_with_lines(&["hello\tworld"]);
+        ed.current_line = 1;
+        ed.execute(&Command::Set(SetCommand::Tabs(vec![1, 9, 17])))
+            .unwrap();
+        ed.execute(&Command::Expand(None, None)).unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("hello   world"));
+        ed.execute(&Command::Undo).unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("hello\tworld"));
+    }
+
+    // -- Roundtrip tests --
+
+    #[test]
+    fn compress_then_expand_roundtrip() {
+        // "hello   world": 3 spaces at cols 6-8, tab stop at 9
+        let mut ed = editor_with_lines(&["hello   world"]);
+        ed.current_line = 1;
+        ed.execute(&Command::Set(SetCommand::Tabs(vec![1, 9, 17])))
+            .unwrap();
+        ed.execute(&Command::Compress(None, None)).unwrap();
+        let compressed = ed.buffer().line_text(1).unwrap().to_string();
+        assert!(compressed.contains('\t'));
+        ed.execute(&Command::Expand(None, None)).unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("hello   world"));
+    }
+
+    #[test]
+    fn expand_then_compress_roundtrip() {
+        let mut ed = editor_with_lines(&["hello\tworld"]);
+        ed.current_line = 1;
+        ed.execute(&Command::Set(SetCommand::Tabs(vec![1, 9, 17])))
+            .unwrap();
+        ed.execute(&Command::Expand(None, None)).unwrap();
+        let expanded = ed.buffer().line_text(1).unwrap().to_string();
+        assert!(!expanded.contains('\t'));
+        ed.execute(&Command::Compress(None, None)).unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("hello\tworld"));
+    }
+
+    // -- insert_lines_externally tests --
+
+    #[test]
+    fn insert_lines_externally_basic() {
+        let mut ed = editor_with_lines(&["a", "b", "c"]);
+        ed.current_line = 1;
+        ed.insert_lines_externally(1, vec!["x".to_string(), "y".to_string()]);
+        assert_eq!(ed.buffer().len(), 5);
+        assert_eq!(ed.buffer().line_text(2), Some("x"));
+        assert_eq!(ed.buffer().line_text(3), Some("y"));
+        assert_eq!(ed.current_line(), 3); // advanced to last inserted
     }
 }

@@ -27,6 +27,12 @@ pub enum Command {
     Delete(Option<Target>),
     Replace(String),
     Duplicat(usize), // number of times to duplicate current line
+    Coverwrite(String),
+    Cinsert(String),
+
+    // Column/tab operations
+    Compress(Option<usize>, Option<usize>), // optional col1, col2
+    Expand(Option<usize>, Option<usize>),   // optional col1, col2
 
     // File operations
     File,
@@ -34,7 +40,9 @@ pub enum Command {
     Quit,
     QQuit,
     Get(String),
-    Put(String, usize), // (filename, line_count)
+    Put(String, usize),           // (filename, line_count)
+    Merge(String, Option<usize>), // (filename, optional line count)
+    Transfer(String, usize),      // (target_file_id, count)
 
     // Settings
     Set(SetCommand),
@@ -103,6 +111,8 @@ pub enum SetCommand {
     Pf(usize, String),
     /// SET MACRO PATH dir1 dir2 ...
     MacroPath(Vec<String>),
+    /// SET TABS — explicit tab stop positions (1-based)
+    Tabs(Vec<usize>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -152,6 +162,7 @@ pub enum CommandAction {
     EnterInput,
     Refresh,
     OpenFile(String),
+    Transfer(String, usize), // (target_file_id, count)
 }
 
 impl CommandResult {
@@ -195,40 +206,46 @@ impl CommandResult {
 // Each entry: (full_name, minimum_abbreviation_length)
 // Follows IBM XEDIT abbreviation conventions.
 const COMMAND_TABLE: &[(&str, usize)] = &[
-    ("ALL", 3),      // ALL
-    ("BACKWARD", 1), // B
-    ("BOTTOM", 2),   // BO
-    ("CHANGE", 1),   // C
-    ("CURSOR", 3),   // CUR
-    ("DELETE", 3),   // DEL
-    ("DOWN", 2),     // DO
-    ("DUPLICAT", 3), // DUP
-    ("FILE", 4),     // FILE
-    ("FORWARD", 1),  // F
-    ("GET", 3),      // GET
-    ("HELP", 4),     // HELP
-    ("INPUT", 1),    // I
-    ("LEFT", 2),     // LE
-    ("LOCATE", 1),   // L (but see disambiguation below)
-    ("MACRO", 5),    // MACRO
-    ("NEXT", 1),     // N
-    ("PUT", 3),      // PUT
-    ("QQUIT", 2),    // QQ
-    ("QUERY", 2),    // QU
-    ("QUEUE", 3),    // QUE (avoids conflict with QUERY at QU)
-    ("QUIT", 4),     // QUIT
-    ("REFRESH", 3),  // REF
-    ("REPLACE", 3),  // REP
-    ("RESET", 3),    // RES
-    ("RIGHT", 2),    // RI
-    ("SAVE", 2),     // SA
-    ("SET", 3),      // SET
-    ("SORT", 4),     // SORT
-    ("STACK", 2),    // ST (no conflicts)
-    ("TOP", 1),      // T
-    ("UNDO", 4),     // UNDO
-    ("UP", 1),       // U
-    ("XEDIT", 1),    // X
+    ("ALL", 3),        // ALL
+    ("BACKWARD", 1),   // B
+    ("BOTTOM", 2),     // BO
+    ("CHANGE", 1),     // C
+    ("CINSERT", 4),    // CINS
+    ("COMPRESS", 4),   // COMP
+    ("COVERWRITE", 5), // COVER
+    ("CURSOR", 3),     // CUR
+    ("DELETE", 3),     // DEL
+    ("DOWN", 2),       // DO
+    ("DUPLICAT", 3),   // DUP
+    ("EXPAND", 3),     // EXP
+    ("FILE", 4),       // FILE
+    ("FORWARD", 1),    // F
+    ("GET", 3),        // GET
+    ("HELP", 4),       // HELP
+    ("INPUT", 1),      // I
+    ("LEFT", 2),       // LE
+    ("LOCATE", 1),     // L (but see disambiguation below)
+    ("MACRO", 5),      // MACRO
+    ("MERGE", 3),      // MER
+    ("NEXT", 1),       // N
+    ("PUT", 3),        // PUT
+    ("QQUIT", 2),      // QQ
+    ("QUERY", 2),      // QU
+    ("QUEUE", 3),      // QUE (avoids conflict with QUERY at QU)
+    ("QUIT", 4),       // QUIT
+    ("REFRESH", 3),    // REF
+    ("REPLACE", 3),    // REP
+    ("RESET", 3),      // RES
+    ("RIGHT", 2),      // RI
+    ("SAVE", 2),       // SA
+    ("SET", 3),        // SET
+    ("SORT", 4),       // SORT
+    ("STACK", 2),      // ST (no conflicts)
+    ("TOP", 1),        // T
+    ("TRANSFER", 4),   // TRAN
+    ("UNDO", 4),       // UNDO
+    ("UP", 1),         // U
+    ("XEDIT", 1),      // X
 ];
 
 fn lookup_command(input: &str) -> Option<&'static str> {
@@ -362,6 +379,132 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
                     n
                 };
                 Ok(Command::Put(filename.to_string(), count))
+            }
+        }
+        "COVERWRITE" => {
+            // Preserve leading whitespace: re-extract from original input
+            let raw_args = match input.find(char::is_whitespace) {
+                Some(pos) => {
+                    let ch = input[pos..].chars().next().unwrap();
+                    &input[pos + ch.len_utf8()..]
+                }
+                None => "",
+            };
+            if raw_args.is_empty() {
+                return Err("COVERWRITE requires text".to_string());
+            }
+            Ok(Command::Coverwrite(raw_args.to_string()))
+        }
+        "CINSERT" => {
+            // Preserve leading whitespace: re-extract from original input
+            let raw_args = match input.find(char::is_whitespace) {
+                Some(pos) => {
+                    let ch = input[pos..].chars().next().unwrap();
+                    &input[pos + ch.len_utf8()..]
+                }
+                None => "",
+            };
+            if raw_args.is_empty() {
+                return Err("CINSERT requires text".to_string());
+            }
+            Ok(Command::Cinsert(raw_args.to_string()))
+        }
+        "MERGE" => {
+            if args.is_empty() {
+                Err("MERGE requires a filename".to_string())
+            } else {
+                let (filename, rest) = split_first_word(args);
+                let count = if rest.is_empty() {
+                    None
+                } else {
+                    let (count_str, _) = split_first_word(rest);
+                    let n = count_str
+                        .parse::<usize>()
+                        .map_err(|_| format!("Invalid count: {}", count_str))?;
+                    if n == 0 {
+                        return Err("MERGE count must be at least 1".to_string());
+                    }
+                    Some(n)
+                };
+                Ok(Command::Merge(filename.to_string(), count))
+            }
+        }
+        "TRANSFER" => {
+            if args.is_empty() {
+                Err("TRANSFER requires a filename".to_string())
+            } else {
+                let (filename, rest) = split_first_word(args);
+                let count = if rest.is_empty() {
+                    1
+                } else {
+                    let (count_str, _) = split_first_word(rest);
+                    let n = count_str
+                        .parse::<usize>()
+                        .map_err(|_| format!("Invalid count: {}", count_str))?;
+                    if n == 0 {
+                        return Err("TRANSFER count must be at least 1".to_string());
+                    }
+                    n
+                };
+                Ok(Command::Transfer(filename.to_string(), count))
+            }
+        }
+        "COMPRESS" => {
+            if args.is_empty() {
+                Ok(Command::Compress(None, None))
+            } else {
+                let (col1_str, rest) = split_first_word(args);
+                let col1 = col1_str
+                    .parse::<usize>()
+                    .map_err(|_| format!("Invalid column: {}", col1_str))?;
+                if col1 == 0 {
+                    return Err("COMPRESS column must be at least 1".to_string());
+                }
+                let col2 = if rest.is_empty() {
+                    None
+                } else {
+                    let (col2_str, _) = split_first_word(rest);
+                    let c = col2_str
+                        .parse::<usize>()
+                        .map_err(|_| format!("Invalid column: {}", col2_str))?;
+                    if c == 0 {
+                        return Err("COMPRESS column must be at least 1".to_string());
+                    }
+                    if c < col1 {
+                        return Err(format!("COMPRESS: col2 ({}) must be >= col1 ({})", c, col1));
+                    }
+                    Some(c)
+                };
+                Ok(Command::Compress(Some(col1), col2))
+            }
+        }
+        "EXPAND" => {
+            if args.is_empty() {
+                Ok(Command::Expand(None, None))
+            } else {
+                let (col1_str, rest) = split_first_word(args);
+                let col1 = col1_str
+                    .parse::<usize>()
+                    .map_err(|_| format!("Invalid column: {}", col1_str))?;
+                if col1 == 0 {
+                    return Err("EXPAND column must be at least 1".to_string());
+                }
+                let col2 = if rest.is_empty() {
+                    None
+                } else {
+                    let (col2_str, _) = split_first_word(rest);
+                    let c = col2_str
+                        .parse::<usize>()
+                        .map_err(|_| format!("Invalid column: {}", col2_str))?;
+                    if c == 0 {
+                        return Err("EXPAND column must be at least 1".to_string());
+                    }
+                    if c < col1 {
+                        return Err(format!("EXPAND: col2 ({}) must be >= col1 ({})", c, col1));
+                    }
+                    Some(c)
+                };
+                Ok(Command::Expand(Some(col1), col2))
             }
         }
         "REPLACE" => {
@@ -645,6 +788,37 @@ fn parse_set_args(args: &str) -> Result<Command, String> {
             rest.split_whitespace().map(String::from).collect()
         };
         Ok(Command::Set(SetCommand::MacroPath(paths)))
+    } else if matches_abbrev(&subcmd_upper, "TABS", 2) {
+        if subargs.is_empty() {
+            return Err("SET TABS requires arguments (OFF or 2+ column positions)".to_string());
+        }
+        let first_word = subargs.split_whitespace().next().unwrap_or("");
+        if first_word.eq_ignore_ascii_case("OFF") {
+            // Reset to defaults
+            Ok(Command::Set(SetCommand::Tabs(Vec::new())))
+        } else {
+            // Explicit tab stop positions (1-based columns).
+            // IBM XEDIT treats a single number as interval mode (SET TABS 8 means
+            // every 8 cols). We require 2+ positions; use SET TABS OFF to reset.
+            let mut stops: Vec<usize> = subargs
+                .split_whitespace()
+                .map(|s| {
+                    s.parse::<usize>()
+                        .map_err(|_| format!("SET TABS: invalid column: {}", s))
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            if stops.len() == 1 {
+                return Err(
+                    "SET TABS requires 2+ column positions (single-number interval mode not yet supported)".to_string()
+                );
+            }
+            if stops.contains(&0) {
+                return Err("SET TABS: column must be at least 1".to_string());
+            }
+            stops.sort();
+            stops.dedup();
+            Ok(Command::Set(SetCommand::Tabs(stops)))
+        }
     } else if let Some(num_str) = subcmd_upper.strip_prefix("PF") {
         // SET PFn command_text
         let num = num_str
@@ -1351,6 +1525,295 @@ mod tests {
         match parse_command("queue 3").unwrap() {
             Command::Queue(3) => {}
             other => panic!("Expected Queue(3), got {:?}", other),
+        }
+    }
+
+    // -- COVERWRITE tests --
+
+    #[test]
+    fn parse_coverwrite_basic() {
+        match parse_command("coverwrite hello").unwrap() {
+            Command::Coverwrite(ref s) => assert_eq!(s, "hello"),
+            other => panic!("Expected Coverwrite, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_coverwrite_abbreviated() {
+        match parse_command("cover hello").unwrap() {
+            Command::Coverwrite(ref s) => assert_eq!(s, "hello"),
+            other => panic!("Expected Coverwrite, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_coverwrite_empty_errors() {
+        assert!(parse_command("coverwrite").is_err());
+    }
+
+    #[test]
+    fn parse_coverwrite_preserves_spaces() {
+        match parse_command("cover   leading").unwrap() {
+            Command::Coverwrite(ref s) => assert_eq!(s, "  leading"),
+            other => panic!("Expected Coverwrite with leading spaces, got {:?}", other),
+        }
+    }
+
+    // -- CINSERT tests --
+
+    #[test]
+    fn parse_cinsert_basic() {
+        match parse_command("cinsert hello").unwrap() {
+            Command::Cinsert(ref s) => assert_eq!(s, "hello"),
+            other => panic!("Expected Cinsert, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_cinsert_abbreviated() {
+        match parse_command("cins hello").unwrap() {
+            Command::Cinsert(ref s) => assert_eq!(s, "hello"),
+            other => panic!("Expected Cinsert, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_cinsert_empty_errors() {
+        assert!(parse_command("cinsert").is_err());
+    }
+
+    // -- MERGE tests --
+
+    #[test]
+    fn parse_merge_basic() {
+        match parse_command("merge myfile.txt").unwrap() {
+            Command::Merge(ref f, None) => assert_eq!(f, "myfile.txt"),
+            other => panic!("Expected Merge, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_merge_with_count() {
+        match parse_command("merge myfile.txt 5").unwrap() {
+            Command::Merge(ref f, Some(5)) => assert_eq!(f, "myfile.txt"),
+            other => panic!("Expected Merge with count 5, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_merge_no_filename_errors() {
+        assert!(parse_command("merge").is_err());
+    }
+
+    #[test]
+    fn parse_merge_zero_count_errors() {
+        assert!(parse_command("merge myfile.txt 0").is_err());
+    }
+
+    #[test]
+    fn parse_merge_abbreviated() {
+        match parse_command("mer myfile.txt").unwrap() {
+            Command::Merge(ref f, None) => assert_eq!(f, "myfile.txt"),
+            other => panic!("Expected Merge, got {:?}", other),
+        }
+    }
+
+    // -- TRANSFER tests --
+
+    #[test]
+    fn parse_transfer_basic() {
+        match parse_command("transfer myfile.txt").unwrap() {
+            Command::Transfer(ref f, 1) => assert_eq!(f, "myfile.txt"),
+            other => panic!("Expected Transfer, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_transfer_with_count() {
+        match parse_command("transfer myfile.txt 3").unwrap() {
+            Command::Transfer(ref f, 3) => assert_eq!(f, "myfile.txt"),
+            other => panic!("Expected Transfer with count 3, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_transfer_no_filename_errors() {
+        assert!(parse_command("transfer").is_err());
+    }
+
+    #[test]
+    fn parse_transfer_zero_count_errors() {
+        assert!(parse_command("transfer myfile.txt 0").is_err());
+    }
+
+    #[test]
+    fn parse_transfer_abbreviated() {
+        match parse_command("tran myfile.txt").unwrap() {
+            Command::Transfer(ref f, 1) => assert_eq!(f, "myfile.txt"),
+            other => panic!("Expected Transfer, got {:?}", other),
+        }
+    }
+
+    // -- COMPRESS tests --
+
+    #[test]
+    fn parse_compress_no_args() {
+        match parse_command("compress").unwrap() {
+            Command::Compress(None, None) => {}
+            other => panic!("Expected Compress(None, None), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_compress_with_columns() {
+        match parse_command("compress 5 20").unwrap() {
+            Command::Compress(Some(5), Some(20)) => {}
+            other => panic!("Expected Compress(Some(5), Some(20)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_compress_abbreviated() {
+        match parse_command("comp").unwrap() {
+            Command::Compress(None, None) => {}
+            other => panic!("Expected Compress, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_compress_zero_col1_errors() {
+        assert!(parse_command("compress 0").is_err());
+    }
+
+    #[test]
+    fn parse_compress_zero_col2_errors() {
+        assert!(parse_command("compress 1 0").is_err());
+    }
+
+    #[test]
+    fn parse_compress_inverted_cols_errors() {
+        assert!(parse_command("compress 20 5").is_err());
+    }
+
+    #[test]
+    fn parse_compress_one_col_arg() {
+        match parse_command("compress 5").unwrap() {
+            Command::Compress(Some(5), None) => {}
+            other => panic!("Expected Compress(Some(5), None), got {:?}", other),
+        }
+    }
+
+    // -- EXPAND tests --
+
+    #[test]
+    fn parse_expand_no_args() {
+        match parse_command("expand").unwrap() {
+            Command::Expand(None, None) => {}
+            other => panic!("Expected Expand(None, None), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_expand_with_columns() {
+        match parse_command("expand 5 20").unwrap() {
+            Command::Expand(Some(5), Some(20)) => {}
+            other => panic!("Expected Expand(Some(5), Some(20)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_expand_zero_col1_errors() {
+        assert!(parse_command("expand 0").is_err());
+    }
+
+    #[test]
+    fn parse_expand_zero_col2_errors() {
+        assert!(parse_command("expand 1 0").is_err());
+    }
+
+    #[test]
+    fn parse_expand_inverted_cols_errors() {
+        assert!(parse_command("expand 20 5").is_err());
+    }
+
+    #[test]
+    fn parse_expand_one_col_arg() {
+        match parse_command("expand 5").unwrap() {
+            Command::Expand(Some(5), None) => {}
+            other => panic!("Expected Expand(Some(5), None), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_expand_abbreviated() {
+        match parse_command("exp").unwrap() {
+            Command::Expand(None, None) => {}
+            other => panic!("Expected Expand, got {:?}", other),
+        }
+    }
+
+    // -- SET TABS tests --
+
+    #[test]
+    fn parse_set_tabs_explicit() {
+        match parse_command("set ta 1 9 17 25").unwrap() {
+            Command::Set(SetCommand::Tabs(ref stops)) => {
+                assert_eq!(stops, &[1, 9, 17, 25]);
+            }
+            other => panic!("Expected Set(Tabs), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_tabs_single_errors() {
+        // Single number rejected — interval mode not yet supported
+        assert!(parse_command("set ta 8").is_err());
+    }
+
+    #[test]
+    fn parse_set_tabs_off() {
+        match parse_command("set ta off").unwrap() {
+            Command::Set(SetCommand::Tabs(ref stops)) => {
+                assert!(stops.is_empty());
+            }
+            other => panic!("Expected Set(Tabs) off, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_tabs_off_trailing_ignored() {
+        match parse_command("set ta off extra").unwrap() {
+            Command::Set(SetCommand::Tabs(ref stops)) => {
+                assert!(stops.is_empty());
+            }
+            other => panic!("Expected Set(Tabs) off, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_tabs_zero_errors() {
+        assert!(parse_command("set ta 0 5 10").is_err());
+    }
+
+    #[test]
+    fn parse_set_tabs_no_args_errors() {
+        assert!(parse_command("set ta").is_err());
+    }
+
+    #[test]
+    fn parse_merge_trailing_args_ignored() {
+        // "merge file.txt 3 extra" should parse count as 3
+        match parse_command("merge file.txt 3 extra").unwrap() {
+            Command::Merge(ref f, Some(3)) => assert_eq!(f, "file.txt"),
+            other => panic!("Expected Merge with count 3, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_transfer_trailing_args_ignored() {
+        match parse_command("transfer file.txt 2 extra").unwrap() {
+            Command::Transfer(ref f, 2) => assert_eq!(f, "file.txt"),
+            other => panic!("Expected Transfer with count 2, got {:?}", other),
         }
     }
 }
