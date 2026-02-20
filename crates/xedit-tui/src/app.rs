@@ -783,6 +783,9 @@ impl App {
                         self.input_text.clear();
                     }
                     CommandAction::Transfer(target, count) => {
+                        // Safe to normalize: Transfer targets are always file IDs
+                        // (ring entries). Non-file special targets would need to be
+                        // distinguished at the parse_command level if added later.
                         let normalized_target = self.normalize_file_id(&target);
                         match self.ring.execute_transfer(&normalized_target, count) {
                             Ok(msg) => self.editor_mut().set_message(msg),

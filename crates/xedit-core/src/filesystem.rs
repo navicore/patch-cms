@@ -42,8 +42,8 @@ impl NativeFs {
     /// `"A"`, `"A1"`).  Mixed-case and lowercase inputs pass through to avoid
     /// false positives on native filenames with spaces.
     pub fn normalize_file_id(input: &str) -> Cow<'_, str> {
-        // Tokenize once, bounded to 4 elements regardless of input length.
-        let tokens: Vec<&str> = input.split_whitespace().take(4).collect();
+        // Tokenize on ASCII space only (CMS delimiter), bounded to 4 elements.
+        let tokens: Vec<&str> = input.split(' ').filter(|s| !s.is_empty()).take(4).collect();
         let count = tokens.len();
 
         if !(2..=3).contains(&count) {
@@ -292,10 +292,12 @@ mod tests {
     }
 
     #[test]
-    fn normalize_tab_separated_tokens() {
-        // split_whitespace splits on tabs too — two alphanumeric tokens
-        // are treated as CMS-style, matching the current behavior.
-        assert_eq!(NativeFs::normalize_file_id("PROFILE\tEXEC"), "profile.exec");
+    fn normalize_tab_separated_passthrough() {
+        // CMS uses only ASCII space as a delimiter; tabs pass through.
+        assert_eq!(
+            NativeFs::normalize_file_id("PROFILE\tEXEC"),
+            "PROFILE\tEXEC"
+        );
     }
 
     #[test]
@@ -315,6 +317,12 @@ mod tests {
     #[test]
     fn normalize_valid_filemode_letter_digit() {
         assert_eq!(NativeFs::normalize_file_id("NOTES TXT A1"), "notes.txt");
+    }
+
+    #[test]
+    fn normalize_single_char_uppercase_pair() {
+        // CMS allows single-character filenames/filetypes; this normalizes.
+        assert_eq!(NativeFs::normalize_file_id("A B"), "a.b");
     }
 
     #[test]
