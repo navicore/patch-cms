@@ -239,10 +239,27 @@ mod tests {
 
     #[test]
     fn normalize_four_tokens_passthrough() {
+        // Passes through because count == 4, not because of case
         assert_eq!(
             NativeFs::normalize_file_id("one two three four"),
             "one two three four"
         );
+    }
+
+    #[test]
+    fn normalize_four_uppercase_tokens_passthrough() {
+        // Four tokens always pass through, regardless of case
+        assert_eq!(
+            NativeFs::normalize_file_id("ONE TWO THREE FOUR"),
+            "ONE TWO THREE FOUR"
+        );
+    }
+
+    #[test]
+    fn normalize_consecutive_spaces_collapsed() {
+        // CMS command lines treat consecutive spaces as a single delimiter.
+        // The tokenizer collapses them, so double-spaced input normalizes.
+        assert_eq!(NativeFs::normalize_file_id("PROFILE  EXEC"), "profile.exec");
     }
 
     #[test]

@@ -885,3 +885,42 @@ fn prefix_priority(cmd: &PrefixCommand) -> u8 {
         PrefixCommand::Following | PrefixCommand::Preceding => 4,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_file_id_native_mode() {
+        let app = App::new();
+        assert_eq!(
+            app.normalize_file_id("PROFILE EXEC A").as_ref(),
+            "profile.exec"
+        );
+    }
+
+    #[test]
+    fn normalize_file_id_native_passthrough() {
+        let app = App::new();
+        assert_eq!(
+            app.normalize_file_id("profile.exec").as_ref(),
+            "profile.exec"
+        );
+    }
+
+    #[cfg(feature = "cms")]
+    #[test]
+    fn normalize_file_id_cms_bypass() {
+        let base_path = tempfile::tempdir().expect("failed to create temp dir for CMS test");
+        let base = base_path.path().to_str().unwrap();
+        // Create minimal A-disk directory so CmsFs can construct
+        std::fs::create_dir_all(base_path.path().join("a")).unwrap();
+        let (processor, cms_fs) = crate::cms_support::setup_cms(base).expect("CMS setup failed");
+        let app = App::with_cms(processor, cms_fs, base.to_string());
+        // In CMS mode, filespecs pass through unchanged
+        assert_eq!(
+            app.normalize_file_id("PROFILE EXEC A").as_ref(),
+            "PROFILE EXEC A"
+        );
+    }
+}
