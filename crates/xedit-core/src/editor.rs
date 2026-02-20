@@ -992,17 +992,40 @@ impl Editor {
                 if z_start >= z_end {
                     continue;
                 }
-                let zone_text: String = chars[z_start..z_end].iter().collect();
+                let zone_chars = &chars[z_start..z_end];
 
-                let (needle, haystack) = if self.case_respect {
-                    (from.to_string(), zone_text.clone())
+                // Work with char-level indices to avoid byte-offset mismatches
+                // when case-folding changes byte lengths (e.g. ﬁ → FI).
+                let needle_chars: Vec<char> = if self.case_respect {
+                    from.chars().collect()
                 } else {
-                    (from.to_uppercase(), zone_text.to_uppercase())
+                    from.chars().flat_map(|c| c.to_uppercase()).collect()
+                };
+                let haystack_chars: Vec<char> = if self.case_respect {
+                    zone_chars.to_vec()
+                } else {
+                    zone_chars.iter().flat_map(|c| c.to_uppercase()).collect()
                 };
 
-                if let Some(zone_pos) = haystack.find(&needle) {
-                    // Convert zone-relative char position to absolute char position
-                    let abs_char_pos = z_start + zone_text[..zone_pos].chars().count();
+                // Find needle in haystack at char level
+                let zone_char_pos = haystack_chars
+                    .windows(needle_chars.len())
+                    .position(|w| w == needle_chars.as_slice());
+
+                if let Some(zcp) = zone_char_pos {
+                    // Map back: haystack_chars index → zone_chars index.
+                    // Each zone_char maps to 1+ haystack_chars via to_uppercase.
+                    let mut h_idx = 0;
+                    let mut zone_idx = 0;
+                    for (zi, zc) in zone_chars.iter().enumerate() {
+                        if h_idx >= zcp {
+                            zone_idx = zi;
+                            break;
+                        }
+                        h_idx += zc.to_uppercase().count();
+                        zone_idx = zi + 1;
+                    }
+                    let abs_char_pos = z_start + zone_idx;
                     // Build new text: prefix + replacement + suffix
                     let prefix: String = chars[..abs_char_pos].iter().collect();
                     let suffix: String = chars[abs_char_pos + from.chars().count()..]
@@ -3497,5 +3520,23 @@ if ftype.1 = 'RS' then
         let mut ed = Editor::new();
         let result = ed.execute(&Command::Query("VERIFY".into())).unwrap();
         assert_eq!(result.message, Some("Verify=1 80".to_string()));
+    }
+
+    #[test]
+    fn change_zone_case_insensitive_with_non_ascii() {
+        // Non-ASCII chars in zone — verify char-level matching works
+        // "café world" zone 1-4 = "café", case-insensitive change "café" → "BEAN"
+        let mut ed = editor_with_lines(&["café world"]);
+        ed.execute(&Command::Set(SetCommand::Case(CaseSetting::Ignore)))
+            .unwrap();
+        ed.execute(&Command::Set(SetCommand::Zone(1, 4))).unwrap();
+        ed.execute(&Command::Change {
+            from: "CAFÉ".into(),
+            to: "BEAN".into(),
+            target: None,
+            count: None,
+        })
+        .unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("BEAN world"));
     }
 }

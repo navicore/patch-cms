@@ -198,12 +198,14 @@ fn apply_verify_filter(text: &str, start: usize, end: usize) -> String {
 
 /// Build an IBM XEDIT–style tab-stop ruler (tabline).
 /// Places `T` at each tab stop column, `.` elsewhere.
-fn make_tabline(width: usize, tab_stops: &[usize]) -> Line<'static> {
+/// `verify_start` maps display position 1 to file column `verify_start`.
+fn make_tabline(width: usize, tab_stops: &[usize], verify_start: usize) -> Line<'static> {
     let data_width = width.saturating_sub(PREFIX_WIDTH);
     let mut ruler = String::with_capacity(data_width);
 
     for col in 1..=data_width {
-        if tab_stops.contains(&col) {
+        let file_col = verify_start + col - 1;
+        if tab_stops.contains(&file_col) {
             ruler.push('T');
         } else {
             ruler.push('.');
@@ -395,6 +397,8 @@ fn build_screen_layout(editor: &Editor, height: usize, width: usize) -> ScreenLa
     let wrap_mode = editor.wrap() && !hex_mode;
     let scale_mode = editor.show_scale();
     let tabline_mode = editor.show_tabline();
+    let verify_start = editor.verify_start();
+    let verify_end = editor.verify_end();
 
     let display_list = build_display_list(editor);
 
@@ -435,7 +439,11 @@ fn build_screen_layout(editor: &Editor, height: usize, width: usize) -> ScreenLa
                     let text_len = editor
                         .buffer()
                         .line_text(*n)
-                        .map(|t| t.chars().count())
+                        .map(|t| {
+                            apply_verify_filter(t, verify_start, verify_end)
+                                .chars()
+                                .count()
+                        })
                         .unwrap_or(0);
                     if text_len <= data_width {
                         1
@@ -720,7 +728,7 @@ fn render_file_area(
                 lines.push(make_scale_line(width));
             }
             RenderRow::TabLine => {
-                lines.push(make_tabline(width, editor.tab_stops()));
+                lines.push(make_tabline(width, editor.tab_stops(), verify_start));
             }
             RenderRow::Reserved { text } => {
                 let padded = format!("{:<width$}", text, width = width);
@@ -1169,6 +1177,8 @@ mod tests {
             "end",
         ]);
         ed.execute(&Command::Set(SetCommand::Wrap(true))).unwrap();
+        ed.execute(&Command::Set(SetCommand::Verify(1, 200)))
+            .unwrap();
 
         let layout = build_screen_layout(&ed, 40, 80);
 
@@ -1389,6 +1399,8 @@ mod tests {
         let text = "A".repeat(74).to_string() + &"B".repeat(74) + "CC";
         let mut ed = make_test_editor(&[&text]);
         ed.execute(&Command::Set(SetCommand::Wrap(true))).unwrap();
+        ed.execute(&Command::Set(SetCommand::Verify(1, 200)))
+            .unwrap();
         let layout = build_screen_layout(&ed, 20, 80);
 
         let data_width = 74usize;
@@ -1528,7 +1540,7 @@ mod tests {
     #[test]
     fn tabline_marks_tab_stops() {
         let tab_stops = vec![1, 9, 17];
-        let line = make_tabline(80, &tab_stops);
+        let line = make_tabline(80, &tab_stops, 1);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         let ruler = &text[PREFIX_WIDTH..];
         // col 1 = T, col 2 = ., col 9 = T, col 17 = T
@@ -1540,7 +1552,7 @@ mod tests {
 
     #[test]
     fn tabline_no_stops() {
-        let line = make_tabline(20, &[]);
+        let line = make_tabline(20, &[], 1);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         let ruler = &text[PREFIX_WIDTH..];
         assert!(ruler.chars().all(|c| c == '.'));
@@ -1632,5 +1644,45 @@ mod tests {
             .unwrap();
         assert!(scale_pos < cur_pos, "Scale before current line");
         assert!(tab_pos > cur_pos, "TabLine after current line");
+    }
+
+    #[test]
+    fn tabline_with_verify_offset() {
+        // VERIFY 10 80: display position 1 = file column 10
+        // Tab stop at file column 17 should appear at display position 8
+        let tab_stops = vec![1, 9, 17, 25];
+        let line = make_tabline(80, &tab_stops, 10);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let ruler = &text[PREFIX_WIDTH..];
+        // display pos 1 = file col 10, no tab stop → '.'
+        assert_eq!(ruler.chars().nth(0), Some('.'), "display 1 (file 10) = .");
+        // display pos 8 = file col 17, tab stop → 'T'
+        assert_eq!(ruler.chars().nth(7), Some('T'), "display 8 (file 17) = T");
+        // display pos 16 = file col 25, tab stop → 'T'
+        assert_eq!(ruler.chars().nth(15), Some('T'), "display 16 (file 25) = T");
+    }
+
+    #[test]
+    fn layout_wrap_verify_shorter_than_data_width() {
+        // 120-char line, VERIFY 1–60, data_width=74 (width=80-PREFIX_WIDTH=6)
+        // After verify filter: 60 chars fits in 1 row (60 < 74)
+        // Without the fix, row_counts would say 2 rows (120/74 rounded up)
+        let long_line = "A".repeat(120);
+        let mut ed = make_test_editor(&[&long_line]);
+        ed.execute(&Command::Set(SetCommand::Wrap(true))).unwrap();
+        ed.execute(&Command::Set(SetCommand::Verify(1, 60)))
+            .unwrap();
+
+        let layout = build_screen_layout(&ed, 10, 80);
+        // Should NOT have any WrapCont rows since filtered text (60 chars) fits in data_width (74)
+        let wrap_count = layout
+            .rows
+            .iter()
+            .filter(|r| matches!(r, RenderRow::WrapCont { .. }))
+            .count();
+        assert_eq!(
+            wrap_count, 0,
+            "Filtered 60-char text should fit in 74-col data_width without wrapping"
+        );
     }
 }

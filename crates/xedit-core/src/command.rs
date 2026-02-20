@@ -881,6 +881,8 @@ fn parse_set_args(args: &str) -> Result<Command, String> {
             }
             Ok(Command::Set(SetCommand::Verify(first, second)))
         }
+    // Must come after TABS in this chain: "TABS".starts_with("TABL") is false,
+    // so 4-char inputs like "TABL" correctly fall through to TABLINE (min 4).
     } else if matches_abbrev(&subcmd_upper, "TABLINE", 4) {
         Ok(Command::Set(SetCommand::TabLine(parse_on_off(subargs)?)))
     } else if let Some(num_str) = subcmd_upper.strip_prefix("PF") {
