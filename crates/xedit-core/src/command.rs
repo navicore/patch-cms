@@ -838,7 +838,10 @@ fn parse_set_args(args: &str) -> Result<Command, String> {
             // treated as the right boundary (left defaults to 1).
             Ok(Command::Set(SetCommand::Zone(1, first)))
         } else {
-            let (second_str, _) = split_first_word(rest);
+            let (second_str, trailing) = split_first_word(rest);
+            if !trailing.is_empty() {
+                return Err(format!("SET ZONE: unexpected operand: {}", trailing));
+            }
             let second = second_str
                 .parse::<usize>()
                 .map_err(|_| format!("SET ZONE: invalid column: {}", second_str))?;
@@ -872,7 +875,10 @@ fn parse_set_args(args: &str) -> Result<Command, String> {
             // SET VERIFY 80 shows columns 1-80).
             Ok(Command::Set(SetCommand::Verify(1, first)))
         } else {
-            let (second_str, _) = split_first_word(rest);
+            let (second_str, trailing) = split_first_word(rest);
+            if !trailing.is_empty() {
+                return Err(format!("SET VERIFY: unexpected operand: {}", trailing));
+            }
             let second = second_str
                 .parse::<usize>()
                 .map_err(|_| format!("SET VERIFY: invalid column: {}", second_str))?;
@@ -1931,6 +1937,11 @@ mod tests {
         assert!(parse_command("set zo").is_err());
     }
 
+    #[test]
+    fn parse_set_zone_trailing_args_errors() {
+        assert!(parse_command("set zo 1 80 extra").is_err());
+    }
+
     // -- SET VERIFY tests --
 
     #[test]
@@ -1971,6 +1982,11 @@ mod tests {
     #[test]
     fn parse_set_verify_no_args_errors() {
         assert!(parse_command("set ve").is_err());
+    }
+
+    #[test]
+    fn parse_set_verify_trailing_args_errors() {
+        assert!(parse_command("set ve 1 80 extra").is_err());
     }
 
     // -- SET TABLINE tests --

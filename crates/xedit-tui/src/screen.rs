@@ -189,11 +189,9 @@ fn make_scale_line(width: usize) -> Line<'static> {
 /// Returns `Cow::Borrowed` when the full line is visible (zero allocation).
 fn apply_verify_filter<'a>(text: &'a str, start: usize, end: usize) -> Cow<'a, str> {
     // Fast path: if verify covers the whole line, borrow without allocation.
-    // Use text.len() (byte length, O(1)) as a conservative check:
-    // for UTF-8, byte_len >= char_count, so end >= byte_len implies
-    // end >= char_count. Multi-byte text where byte_len > end >= char_count
-    // safely falls through to the slow path.
-    if start <= 1 && end >= text.len() {
+    // Check byte length first (O(1)); for multi-byte text where
+    // byte_len > end >= char_count, fall through to chars().count().
+    if start <= 1 && (end >= text.len() || end >= text.chars().count()) {
         return Cow::Borrowed(text);
     }
     let chars: Vec<char> = text.chars().collect();
@@ -563,9 +561,6 @@ fn build_screen_layout(editor: &Editor, height: usize, width: usize) -> ScreenLa
                         line_num: *n,
                         is_current,
                     });
-                    if is_current && tabline_mode && current > 0 && content_rows.len() < available {
-                        content_rows.push(RenderRow::TabLine);
-                    }
                     for chunk in 1..rc {
                         if content_rows.len() >= available {
                             break;
@@ -575,6 +570,10 @@ fn build_screen_layout(editor: &Editor, height: usize, width: usize) -> ScreenLa
                             is_current,
                             chunk_idx: chunk,
                         });
+                    }
+                    // TabLine after all physical rows of the wrapped line
+                    if is_current && tabline_mode && current > 0 && content_rows.len() < available {
+                        content_rows.push(RenderRow::TabLine);
                     }
                 } else {
                     content_rows.push(RenderRow::DataLine {
@@ -1737,6 +1736,38 @@ mod tests {
             matches!(layout.rows[cur_data + 2], RenderRow::HexHigh { .. }),
             "HexHigh should follow TabLine, got {:?}",
             layout.rows[cur_data + 2]
+        );
+    }
+
+    #[test]
+    fn layout_tabline_after_all_wrap_rows() {
+        // Long line that wraps: TabLine should follow the last WrapCont, not chunk 0
+        let long_line = "A".repeat(200);
+        let mut ed = make_test_editor(&[&long_line]);
+        ed.execute(&Command::Set(SetCommand::Wrap(true))).unwrap();
+        ed.execute(&Command::Set(SetCommand::TabLine(true)))
+            .unwrap();
+        ed.execute(&Command::Set(SetCommand::Verify(1, 200)))
+            .unwrap();
+
+        let layout = build_screen_layout(&ed, 20, 80);
+        // Find the TabLine position
+        let tab_pos = layout
+            .rows
+            .iter()
+            .position(|r| matches!(r, RenderRow::TabLine))
+            .expect("should have TabLine");
+        // All WrapCont rows should precede the TabLine
+        let last_wrap = layout
+            .rows
+            .iter()
+            .rposition(|r| matches!(r, RenderRow::WrapCont { .. }))
+            .expect("should have WrapCont rows");
+        assert!(
+            tab_pos > last_wrap,
+            "TabLine (row {}) should be after last WrapCont (row {})",
+            tab_pos,
+            last_wrap
         );
     }
 }

@@ -1007,39 +1007,35 @@ impl Editor {
                 }
                 let zone_chars = &chars[z_start..z_end];
 
-                // Build haystack and (for case-insensitive) an index map
-                // from haystack position → zone char index.
-                let (haystack_chars, hc_to_zc) = if self.case_respect {
-                    // 1:1 mapping — no expansion
-                    (zone_chars.to_vec(), Vec::new())
+                // Find needle and compute zone_idx + match_zone_len.
+                let match_result = if self.case_respect {
+                    // Case-sensitive: search zone_chars directly (no copy).
+                    zone_chars
+                        .windows(needle_chars.len())
+                        .position(|w| w == needle_chars.as_slice())
+                        .map(|zcp| (zcp, needle_chars.len()))
                 } else {
-                    let mut hc = Vec::new();
-                    let mut map = Vec::new();
+                    // Case-insensitive: build uppercased haystack with an
+                    // index map from haystack position → zone char index.
+                    let mut haystack_chars = Vec::new();
+                    let mut hc_to_zc = Vec::new();
                     for (zi, zc) in zone_chars.iter().enumerate() {
                         for uc in zc.to_uppercase() {
-                            hc.push(uc);
-                            map.push(zi);
+                            haystack_chars.push(uc);
+                            hc_to_zc.push(zi);
                         }
                     }
-                    (hc, map)
+                    haystack_chars
+                        .windows(needle_chars.len())
+                        .position(|w| w == needle_chars.as_slice())
+                        .map(|zcp| {
+                            let zi_start = hc_to_zc[zcp];
+                            let zi_end = hc_to_zc[zcp + needle_chars.len() - 1] + 1;
+                            (zi_start, zi_end - zi_start)
+                        })
                 };
 
-                // Find needle in haystack at char level
-                let zone_char_pos = haystack_chars
-                    .windows(needle_chars.len())
-                    .position(|w| w == needle_chars.as_slice());
-
-                if let Some(zcp) = zone_char_pos {
-                    // Map haystack position back to zone char index + length.
-                    let (zone_idx, match_zone_len) = if self.case_respect {
-                        // Case-sensitive: positions map directly.
-                        (zcp, needle_chars.len())
-                    } else {
-                        // Use explicit index map for unambiguous back-mapping.
-                        let zi_start = hc_to_zc[zcp];
-                        let zi_end = hc_to_zc[zcp + needle_chars.len() - 1] + 1;
-                        (zi_start, zi_end - zi_start)
-                    };
+                if let Some((zone_idx, match_zone_len)) = match_result {
                     let abs_char_pos = z_start + zone_idx;
                     // Build new text: prefix + replacement + suffix
                     let prefix: String = chars[..abs_char_pos].iter().collect();
