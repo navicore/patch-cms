@@ -131,7 +131,8 @@ impl App {
     }
 
     pub fn load_file(&mut self, file_id: &str) -> xedit_core::error::Result<()> {
-        self.editor_mut().load_file(file_id)?;
+        let normalized = self.normalize_file_id(file_id);
+        self.editor_mut().load_file(&normalized)?;
         // Run PROFILE XEDIT macro if it exists (customizes settings on file open)
         #[cfg(feature = "rexx")]
         self.editor_mut().run_profile();
@@ -679,6 +680,20 @@ impl App {
         self.focus = CursorFocus::CommandLine;
     }
 
+    /// Normalize a file identifier without creating a full filesystem.
+    ///
+    /// In CMS mode, filespecs pass through unchanged (CmsFs handles them
+    /// natively).  In native mode, CMS-style uppercase filespecs (e.g.
+    /// `"PROFILE EXEC A"`) are converted to dotted form (`"profile.exec"`)
+    /// via `NativeFs` (zero-sized, no I/O).
+    fn normalize_file_id<'a>(&self, file_id: &'a str) -> std::borrow::Cow<'a, str> {
+        #[cfg(feature = "cms")]
+        if self.cms_base_path.is_some() {
+            return std::borrow::Cow::Borrowed(file_id);
+        }
+        xedit_core::filesystem::NativeFs::normalize_file_id(file_id)
+    }
+
     /// Open a file in the ring (or cycle/switch if already open)
     fn open_file_in_ring(&mut self, file_id: &str) {
         if file_id.is_empty() {
@@ -695,17 +710,21 @@ impl App {
             return;
         }
 
+        // Normalize CMS-style filespecs (e.g. "PROFILE EXEC A" → "profile.exec")
+        // without creating an expensive filesystem object.
+        let normalized = self.normalize_file_id(file_id);
+
         // Check if file already in ring
-        if self.ring.switch_to_file(file_id) {
+        if self.ring.switch_to_file(&normalized) {
             self.reset_for_current_editor();
             self.editor_mut()
-                .set_message(format!("Switched to {}", file_id));
+                .set_message(format!("Switched to {}", normalized));
             return;
         }
 
-        // Open new file
+        // Only create the filesystem when we actually need to open a new file
         let fs = self.create_fs();
-        if let Err(e) = self.ring.add_file_with_fs(file_id, fs) {
+        if let Err(e) = self.ring.add_file_with_fs(&normalized, fs) {
             self.editor_mut().set_message(e.to_string());
             return;
         }
@@ -764,7 +783,14 @@ impl App {
                         self.input_text.clear();
                     }
                     CommandAction::Transfer(target, count) => {
-                        match self.ring.execute_transfer(&target, count) {
+                        // Safe to normalize: Transfer targets are always file IDs
+                        // (ring entries). Non-file special targets would need to be
+                        // distinguished at the parse_command level if added later.
+                        // Note: ring lookup is by exact string match, so a file
+                        // opened via absolute path (e.g. "/home/user/profile.exec")
+                        // won't match a CMS-style target ("PROFILE EXEC").
+                        let normalized_target = self.normalize_file_id(&target);
+                        match self.ring.execute_transfer(&normalized_target, count) {
                             Ok(msg) => self.editor_mut().set_message(msg),
                             Err(e) => self.editor_mut().set_message(e.to_string()),
                         }
@@ -860,5 +886,44 @@ fn prefix_priority(cmd: &PrefixCommand) -> u8 {
         | PrefixCommand::ShiftLeft(_) => 2,
         PrefixCommand::Copy | PrefixCommand::Move => 3,
         PrefixCommand::Following | PrefixCommand::Preceding => 4,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_file_id_native_mode() {
+        let app = App::new();
+        assert_eq!(
+            app.normalize_file_id("PROFILE EXEC A").as_ref(),
+            "profile.exec"
+        );
+    }
+
+    #[test]
+    fn normalize_file_id_native_passthrough() {
+        let app = App::new();
+        assert_eq!(
+            app.normalize_file_id("profile.exec").as_ref(),
+            "profile.exec"
+        );
+    }
+
+    #[cfg(feature = "cms")]
+    #[test]
+    fn normalize_file_id_cms_bypass() {
+        let base_path = tempfile::tempdir().expect("failed to create temp dir for CMS test");
+        let base = base_path.path().to_str().unwrap();
+        // Create minimal A-disk directory so CmsFs can construct
+        std::fs::create_dir_all(base_path.path().join("a")).unwrap();
+        let (processor, cms_fs) = crate::cms_support::setup_cms(base).expect("CMS setup failed");
+        let app = App::with_cms(processor, cms_fs, base.to_string());
+        // In CMS mode, filespecs pass through unchanged
+        assert_eq!(
+            app.normalize_file_id("PROFILE EXEC A").as_ref(),
+            "PROFILE EXEC A"
+        );
     }
 }
