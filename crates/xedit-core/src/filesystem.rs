@@ -58,6 +58,8 @@ impl NativeFs {
         // exclude them here to reduce false positives on native filenames
         // containing those characters.
         let is_cms_token = |t: &str| {
+            // Defensive: the filter above guarantees non-empty tokens, but
+            // this guards the as_bytes()[0] indexing if the closure is reused.
             !t.is_empty()
                 && t.len() <= 8
                 && t.as_bytes()[0].is_ascii_uppercase()
@@ -270,6 +272,18 @@ mod tests {
         // CMS command lines treat consecutive spaces as a single delimiter.
         // The tokenizer collapses them, so double-spaced input normalizes.
         assert_eq!(NativeFs::normalize_file_id("PROFILE  EXEC"), "profile.exec");
+    }
+
+    #[test]
+    fn normalize_leading_space_collapses() {
+        // Leading space is stripped by filter; still recognized as CMS-style.
+        assert_eq!(NativeFs::normalize_file_id(" PROFILE EXEC"), "profile.exec");
+    }
+
+    #[test]
+    fn normalize_trailing_space_collapses() {
+        // Trailing space produces an empty token, filtered out.
+        assert_eq!(NativeFs::normalize_file_id("PROFILE EXEC "), "profile.exec");
     }
 
     #[test]
