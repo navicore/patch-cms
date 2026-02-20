@@ -50,9 +50,12 @@ impl NativeFs {
             return Cow::Borrowed(input);
         }
 
-        // Filename and filetype: 1-8 uppercase alphanumeric chars.
+        // Filename and filetype: 1-8 uppercase alphanumeric chars, starting
+        // with a letter (CMS identifiers cannot begin with a digit).
         let is_cms_token = |t: &str| {
-            t.len() <= 8
+            !t.is_empty()
+                && t.len() <= 8
+                && t.as_bytes()[0].is_ascii_uppercase()
                 && t.chars()
                     .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
         };
@@ -312,6 +315,12 @@ mod tests {
     #[test]
     fn normalize_valid_filemode_letter_digit() {
         assert_eq!(NativeFs::normalize_file_id("NOTES TXT A1"), "notes.txt");
+    }
+
+    #[test]
+    fn normalize_digit_leading_token_passthrough() {
+        // CMS identifiers must start with a letter, not a digit
+        assert_eq!(NativeFs::normalize_file_id("12345 EXEC"), "12345 EXEC");
     }
 
     #[test]
