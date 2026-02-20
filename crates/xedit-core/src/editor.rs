@@ -1462,7 +1462,6 @@ impl Editor {
         match subcmd {
             SetCommand::Trunc(n) => {
                 self.trunc = *n;
-                self.zone_right = *n;
             }
             SetCommand::Zone(left, right) => {
                 self.zone_left = *left;
@@ -1540,7 +1539,14 @@ impl Editor {
                 format!("Tabs={}", stops.join(" "))
             }
             "TABLINE" => format!("TabLine={}", if self.show_tabline { "ON" } else { "OFF" }),
-            "ZONE" => format!("Zone={} {}", self.zone_left, self.zone_right),
+            "ZONE" => {
+                let right = if self.zone_right == usize::MAX {
+                    "*".to_string()
+                } else {
+                    self.zone_right.to_string()
+                };
+                format!("Zone={} {}", self.zone_left, right)
+            }
             "VERIFY" => format!("Verify={} {}", self.verify_start, self.verify_end),
             _ => {
                 return Err(XeditError::InvalidCommand(format!(
@@ -3530,7 +3536,8 @@ if ftype.1 = 'RS' then
     fn query_zone() {
         let mut ed = Editor::new();
         let result = ed.execute(&Command::Query("ZONE".into())).unwrap();
-        assert_eq!(result.message, Some(format!("Zone=1 {}", usize::MAX)));
+        // Unlimited zone_right displays as *
+        assert_eq!(result.message, Some("Zone=1 *".to_string()));
     }
 
     #[test]
@@ -3612,5 +3619,22 @@ if ftype.1 = 'RS' then
         .unwrap();
         let text = ed.buffer().line_text(1).unwrap();
         assert!(text.ends_with("new"));
+    }
+
+    #[test]
+    fn trunc_does_not_clobber_zone() {
+        let mut ed = Editor::new();
+        ed.execute(&Command::Set(SetCommand::Zone(5, 40))).unwrap();
+        ed.execute(&Command::Set(SetCommand::Trunc(80))).unwrap();
+        let result = ed.execute(&Command::Query("ZONE".into())).unwrap();
+        assert_eq!(result.message, Some("Zone=5 40".to_string()));
+    }
+
+    #[test]
+    fn query_zone_after_explicit_set() {
+        let mut ed = Editor::new();
+        ed.execute(&Command::Set(SetCommand::Zone(1, 72))).unwrap();
+        let result = ed.execute(&Command::Query("ZONE".into())).unwrap();
+        assert_eq!(result.message, Some("Zone=1 72".to_string()));
     }
 }

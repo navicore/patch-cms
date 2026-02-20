@@ -186,6 +186,10 @@ fn make_scale_line(width: usize) -> Line<'static> {
 /// Extract the verify-visible columns from a line of text.
 /// `start` and `end` are 1-based column positions.
 fn apply_verify_filter(text: &str, start: usize, end: usize) -> String {
+    // Fast path: if verify covers the whole line, avoid allocation
+    if start <= 1 && end >= text.chars().count() {
+        return text.to_string();
+    }
     let chars: Vec<char> = text.chars().collect();
     let s = start.saturating_sub(1).min(chars.len());
     let e = end.min(chars.len());
@@ -205,7 +209,8 @@ fn make_tabline(width: usize, tab_stops: &[usize], verify_start: usize) -> Line<
 
     for col in 1..=data_width {
         let file_col = verify_start + col - 1;
-        if tab_stops.contains(&file_col) {
+        // tab_stops is sorted (by SET TABS parser), so binary_search is O(log n)
+        if tab_stops.binary_search(&file_col).is_ok() {
             ruler.push('T');
         } else {
             ruler.push('.');

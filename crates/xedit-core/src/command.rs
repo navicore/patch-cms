@@ -833,7 +833,9 @@ fn parse_set_args(args: &str) -> Result<Command, String> {
             return Err("SET ZONE: column must be at least 1".to_string());
         }
         if rest.is_empty() {
-            // Single arg: SET ZONE right (left defaults to 1)
+            // Single arg: SET ZONE n → Zone(1, n). This is a convenience
+            // extension; IBM XEDIT requires two operands. The single arg is
+            // treated as the right boundary (left defaults to 1).
             Ok(Command::Set(SetCommand::Zone(1, first)))
         } else {
             let (second_str, _) = split_first_word(rest);
