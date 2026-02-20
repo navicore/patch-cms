@@ -9,7 +9,6 @@ use ratatui::Terminal;
 
 use xedit_core::command::{parse_command, Command, CommandAction};
 use xedit_core::editor::{CursorRequest, Editor};
-use xedit_core::filesystem::FileSystem;
 use xedit_core::prefix::PrefixCommand;
 use xedit_core::ring::Ring;
 
@@ -132,7 +131,8 @@ impl App {
     }
 
     pub fn load_file(&mut self, file_id: &str) -> xedit_core::error::Result<()> {
-        self.editor_mut().load_file(file_id)?;
+        let normalized = self.normalize_file_id(file_id);
+        self.editor_mut().load_file(&normalized)?;
         // Run PROFILE XEDIT macro if it exists (customizes settings on file open)
         #[cfg(feature = "rexx")]
         self.editor_mut().run_profile();
@@ -683,14 +683,9 @@ impl App {
     /// Normalize a file identifier without creating a full filesystem.
     ///
     /// In CMS mode, filespecs pass through unchanged (CmsFs handles them
-    /// natively).  In native mode, CMS-style input is converted via
-    /// `NativeFs` (zero-sized, no I/O).
-    ///
-    /// Note: this intentionally bypasses `create_fs()` / trait dispatch to
-    /// avoid the heap allocation and potential I/O of constructing a full
-    /// `Box<dyn FileSystem>`.  This is correct because `create_fs()` returns
-    /// `NativeFs` in non-CMS mode.  If a future FS adapter overrides
-    /// `normalize_file_id`, this call site must be updated to match.
+    /// natively).  In native mode, CMS-style uppercase filespecs (e.g.
+    /// `"PROFILE EXEC A"`) are converted to dotted form (`"profile.exec"`)
+    /// via `NativeFs` (zero-sized, no I/O).
     fn normalize_file_id<'a>(&self, file_id: &'a str) -> std::borrow::Cow<'a, str> {
         #[cfg(feature = "cms")]
         if self.cms_base_path.is_some() {

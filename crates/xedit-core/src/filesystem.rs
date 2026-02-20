@@ -24,19 +24,46 @@ pub trait FileSystem {
     fn read_file(&self, file_id: &str) -> Result<String>;
     fn write_file(&self, file_id: &str, content: &str) -> Result<()>;
     fn parse_file_id(&self, file_id: &str) -> Option<FileIdentity>;
-
-    /// Normalize user input into the filesystem's canonical file identifier.
-    ///
-    /// The default implementation is a zero-cost pass-through.  `NativeFs`
-    /// overrides this to detect CMS-style space-separated filespecs (e.g.
-    /// `"PROFILE EXEC A"`) and convert them to `"profile.exec"`.
-    fn normalize_file_id<'a>(&self, input: &'a str) -> Cow<'a, str> {
-        Cow::Borrowed(input)
-    }
 }
 
 /// Default filesystem implementation that delegates to `std::fs`.
 pub struct NativeFs;
+
+impl NativeFs {
+    /// Normalize user input into a native OS file identifier.
+    ///
+    /// Detects CMS-style space-separated filespecs (e.g. `"PROFILE EXEC A"`)
+    /// and converts them to `"profile.exec"`.  All other input passes through
+    /// unchanged.
+    ///
+    /// The heuristic requires 2-3 tokens that are each 1-8 characters of
+    /// uppercase ASCII letters and digits — matching CMS identifier rules.
+    /// Mixed-case and lowercase inputs pass through to avoid false positives
+    /// on native filenames with spaces.
+    pub fn normalize_file_id<'a>(&self, input: &'a str) -> Cow<'a, str> {
+        // Tokenize once, bounded to 4 elements regardless of input length.
+        let tokens: Vec<&str> = input.split_whitespace().take(4).collect();
+        let count = tokens.len();
+
+        // CMS-style: 2-3 tokens, each 1-8 uppercase alphanumeric chars.
+        if (count == 2 || count == 3)
+            && tokens.iter().all(|t| {
+                t.len() <= 8
+                    && t.chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+            })
+        {
+            // tokens[0] = filename, tokens[1] = filetype, tokens[2..] = filemode (ignored)
+            Cow::Owned(format!(
+                "{}.{}",
+                tokens[0].to_lowercase(),
+                tokens[1].to_lowercase()
+            ))
+        } else {
+            Cow::Borrowed(input)
+        }
+    }
+}
 
 impl FileSystem for NativeFs {
     fn read_file(&self, file_id: &str) -> Result<String> {
@@ -76,33 +103,6 @@ impl FileSystem for NativeFs {
             filetype,
             filemode: "A1".to_string(),
         })
-    }
-
-    fn normalize_file_id<'a>(&self, input: &'a str) -> Cow<'a, str> {
-        // Tokenize once, bounded to 4 elements regardless of input length.
-        let tokens: Vec<&str> = input.split_whitespace().take(4).collect();
-        let count = tokens.len();
-
-        // CMS-style: 2-3 tokens, each 1-8 alphanumeric chars with at least one
-        // uppercase letter.  The uppercase requirement avoids false positives on
-        // native filenames with spaces (e.g. "my notes"); lowercase users can
-        // always use the dotted form ("profile.exec").
-        if (count == 2 || count == 3)
-            && tokens.iter().all(|t| {
-                t.len() <= 8
-                    && t.chars().all(|c| c.is_ascii_alphanumeric())
-                    && t.chars().any(|c| c.is_ascii_uppercase())
-            })
-        {
-            // tokens[0] = filename, tokens[1] = filetype, tokens[2..] = filemode (ignored)
-            Cow::Owned(format!(
-                "{}.{}",
-                tokens[0].to_lowercase(),
-                tokens[1].to_lowercase()
-            ))
-        } else {
-            Cow::Borrowed(input)
-        }
     }
 }
 
@@ -229,9 +229,17 @@ mod tests {
     }
 
     #[test]
-    fn normalize_mixed_case() {
+    fn normalize_mixed_case_passthrough() {
         let fs = NativeFs;
-        assert_eq!(fs.normalize_file_id("Profile Exec A1"), "profile.exec");
+        // Mixed-case tokens are not treated as CMS filespecs to avoid
+        // false positives on title-case native filenames like "My Notes".
+        assert_eq!(fs.normalize_file_id("Profile Exec A1"), "Profile Exec A1");
+    }
+
+    #[test]
+    fn normalize_title_case_native_passthrough() {
+        let fs = NativeFs;
+        assert_eq!(fs.normalize_file_id("My Notes"), "My Notes");
     }
 
     #[test]
