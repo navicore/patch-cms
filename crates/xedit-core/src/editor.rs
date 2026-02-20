@@ -54,6 +54,7 @@ pub struct Editor {
     show_number: bool,
     show_prefix: bool,
     show_scale: bool,
+    show_tabline: bool,
     case_respect: bool,
     hex: bool,
     stay: bool,
@@ -157,6 +158,7 @@ impl Editor {
             show_number: true,
             show_prefix: true,
             show_scale: false,
+            show_tabline: false,
             case_respect: false,
             hex: false,
             stay: true,
@@ -247,6 +249,10 @@ impl Editor {
 
     pub fn show_scale(&self) -> bool {
         self.show_scale
+    }
+
+    pub fn show_tabline(&self) -> bool {
+        self.show_tabline
     }
 
     pub fn case_respect(&self) -> bool {
@@ -902,9 +908,20 @@ impl Editor {
 
     fn cmd_locate(&mut self, target: &Target) -> Result<CommandResult> {
         let case_respect = self.case_respect;
+        let zone_left = self.zone_left;
+        let zone_right = self.zone_right;
         let buffer = &self.buffer;
         let resolved = target.resolve(self.current_line, buffer.len(), case_respect, &|n| {
-            buffer.line_text(n).map(String::from)
+            buffer.line_text(n).map(|text| {
+                let chars: Vec<char> = text.chars().collect();
+                let start = zone_left.saturating_sub(1).min(chars.len());
+                let end = zone_right.min(chars.len());
+                if start >= end {
+                    String::new()
+                } else {
+                    chars[start..end].iter().collect()
+                }
+            })
         });
         match resolved {
             Some(line) => {
@@ -934,11 +951,23 @@ impl Editor {
         let max_changes = count.unwrap_or(1);
         let mut changes_made = 0;
 
+        let zone_left = self.zone_left;
+        let zone_right = self.zone_right;
+
         let end_line = if let Some(t) = target {
             let case_respect = self.case_respect;
             let buffer = &self.buffer;
             t.resolve(self.current_line, buffer.len(), case_respect, &|n| {
-                buffer.line_text(n).map(String::from)
+                buffer.line_text(n).map(|text| {
+                    let chars: Vec<char> = text.chars().collect();
+                    let start = zone_left.saturating_sub(1).min(chars.len());
+                    let end = zone_right.min(chars.len());
+                    if start >= end {
+                        String::new()
+                    } else {
+                        chars[start..end].iter().collect()
+                    }
+                })
             })
             .unwrap_or(self.buffer.len())
         } else {
@@ -957,14 +986,29 @@ impl Editor {
             }
             if let Some(line) = self.buffer.get(line_num) {
                 let text = line.text().to_string();
+                let chars: Vec<char> = text.chars().collect();
+                let z_start = zone_left.saturating_sub(1).min(chars.len());
+                let z_end = zone_right.min(chars.len());
+                if z_start >= z_end {
+                    continue;
+                }
+                let zone_text: String = chars[z_start..z_end].iter().collect();
+
                 let (needle, haystack) = if self.case_respect {
-                    (from.to_string(), text.clone())
+                    (from.to_string(), zone_text.clone())
                 } else {
-                    (from.to_uppercase(), text.to_uppercase())
+                    (from.to_uppercase(), zone_text.to_uppercase())
                 };
 
-                if let Some(pos) = haystack.find(&needle) {
-                    let new_text = format!("{}{}{}", &text[..pos], to, &text[pos + from.len()..]);
+                if let Some(zone_pos) = haystack.find(&needle) {
+                    // Convert zone-relative char position to absolute char position
+                    let abs_char_pos = z_start + zone_text[..zone_pos].chars().count();
+                    // Build new text: prefix + replacement + suffix
+                    let prefix: String = chars[..abs_char_pos].iter().collect();
+                    let suffix: String = chars[abs_char_pos + from.chars().count()..]
+                        .iter()
+                        .collect();
+                    let new_text = format!("{}{}{}", prefix, to, suffix);
                     if let Some(line_mut) = self.buffer.get_mut(line_num) {
                         line_mut.set_text(new_text);
                     }
@@ -1421,6 +1465,7 @@ impl Editor {
             SetCommand::MacroPath(paths) => {
                 self.macro_path = paths.clone();
             }
+            SetCommand::TabLine(on) => self.show_tabline = *on,
             SetCommand::Tabs(stops) => {
                 if stops.is_empty() {
                     // Reset to defaults
@@ -1455,6 +1500,9 @@ impl Editor {
                 let stops: Vec<String> = self.tab_stops.iter().map(|s| s.to_string()).collect();
                 format!("Tabs={}", stops.join(" "))
             }
+            "TABLINE" => format!("TabLine={}", if self.show_tabline { "ON" } else { "OFF" }),
+            "ZONE" => format!("Zone={} {}", self.zone_left, self.zone_right),
+            "VERIFY" => format!("Verify={} {}", self.verify_start, self.verify_end),
             _ => {
                 return Err(XeditError::InvalidCommand(format!(
                     "Unknown QUERY: {}",
@@ -3314,5 +3362,140 @@ if ftype.1 = 'RS' then
         assert_eq!(ed.buffer().line_text(2), Some("x"));
         assert_eq!(ed.buffer().line_text(3), Some("y"));
         assert_eq!(ed.current_line(), 3); // advanced to last inserted
+    }
+
+    // -- ZONE enforcement in LOCATE tests --
+
+    #[test]
+    fn locate_in_zone_finds_match() {
+        // "hello world" — zone 1-5 = "hello"
+        let mut ed = editor_with_lines(&["hello world", "other"]);
+        ed.current_line = 0;
+        ed.execute(&Command::Set(SetCommand::Zone(1, 5))).unwrap();
+        // "hello" is in zone 1-5
+        let result = ed.execute(&Command::Locate(Target::StringForward("hello".into())));
+        assert!(result.is_ok());
+        assert_eq!(ed.current_line(), 1);
+    }
+
+    #[test]
+    fn locate_outside_zone_not_found() {
+        // "hello world" — zone 1-5 = "hello", "world" is outside
+        let mut ed = editor_with_lines(&["hello world", "other"]);
+        ed.current_line = 0;
+        ed.execute(&Command::Set(SetCommand::Zone(1, 5))).unwrap();
+        let result = ed.execute(&Command::Locate(Target::StringForward("world".into())));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn locate_zone_boundary() {
+        // Zone starts at col 7: "hello world" zone 7-11 = "world"
+        let mut ed = editor_with_lines(&["hello world"]);
+        ed.current_line = 0;
+        ed.execute(&Command::Set(SetCommand::Zone(7, 11))).unwrap();
+        let result = ed.execute(&Command::Locate(Target::StringForward("world".into())));
+        assert!(result.is_ok());
+        assert_eq!(ed.current_line(), 1);
+    }
+
+    // -- ZONE enforcement in CHANGE tests --
+
+    #[test]
+    fn change_in_zone() {
+        let mut ed = editor_with_lines(&["hello world"]);
+        ed.execute(&Command::Set(SetCommand::Zone(1, 5))).unwrap();
+        ed.execute(&Command::Change {
+            from: "hello".into(),
+            to: "HELLO".into(),
+            target: None,
+            count: None,
+        })
+        .unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("HELLO world"));
+    }
+
+    #[test]
+    fn change_outside_zone_not_found() {
+        let mut ed = editor_with_lines(&["hello world"]);
+        ed.execute(&Command::Set(SetCommand::Zone(1, 5))).unwrap();
+        let result = ed.execute(&Command::Change {
+            from: "world".into(),
+            to: "WORLD".into(),
+            target: None,
+            count: None,
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn change_preserves_outside_zone() {
+        // Zone 1-5, change "he" to "HE" — rest of line untouched
+        let mut ed = editor_with_lines(&["hello world"]);
+        ed.execute(&Command::Set(SetCommand::Zone(1, 5))).unwrap();
+        ed.execute(&Command::Change {
+            from: "he".into(),
+            to: "HE".into(),
+            target: None,
+            count: None,
+        })
+        .unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("HEllo world"));
+    }
+
+    #[test]
+    fn change_zone_boundary() {
+        // Zone 7-11 = "world", change "world" to "EARTH"
+        let mut ed = editor_with_lines(&["hello world"]);
+        ed.execute(&Command::Set(SetCommand::Zone(7, 11))).unwrap();
+        ed.execute(&Command::Change {
+            from: "world".into(),
+            to: "EARTH".into(),
+            target: None,
+            count: None,
+        })
+        .unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("hello EARTH"));
+    }
+
+    // -- TABLINE tests --
+
+    #[test]
+    fn tabline_default_off() {
+        let ed = Editor::new();
+        assert!(!ed.show_tabline());
+    }
+
+    #[test]
+    fn set_tabline_on() {
+        let mut ed = Editor::new();
+        ed.execute(&Command::Set(SetCommand::TabLine(true)))
+            .unwrap();
+        assert!(ed.show_tabline());
+    }
+
+    #[test]
+    fn query_tabline() {
+        let mut ed = Editor::new();
+        let result = ed.execute(&Command::Query("TABLINE".into())).unwrap();
+        assert_eq!(result.message, Some("TabLine=OFF".to_string()));
+        ed.execute(&Command::Set(SetCommand::TabLine(true)))
+            .unwrap();
+        let result = ed.execute(&Command::Query("TABLINE".into())).unwrap();
+        assert_eq!(result.message, Some("TabLine=ON".to_string()));
+    }
+
+    #[test]
+    fn query_zone() {
+        let mut ed = Editor::new();
+        let result = ed.execute(&Command::Query("ZONE".into())).unwrap();
+        assert_eq!(result.message, Some("Zone=1 72".to_string()));
+    }
+
+    #[test]
+    fn query_verify() {
+        let mut ed = Editor::new();
+        let result = ed.execute(&Command::Query("VERIFY".into())).unwrap();
+        assert_eq!(result.message, Some("Verify=1 80".to_string()));
     }
 }

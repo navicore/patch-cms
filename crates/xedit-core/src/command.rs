@@ -113,6 +113,8 @@ pub enum SetCommand {
     MacroPath(Vec<String>),
     /// SET TABS — explicit tab stop positions (1-based)
     Tabs(Vec<usize>),
+    /// SET TABLINE ON|OFF — show tab-stop ruler
+    TabLine(bool),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -819,6 +821,68 @@ fn parse_set_args(args: &str) -> Result<Command, String> {
             stops.dedup();
             Ok(Command::Set(SetCommand::Tabs(stops)))
         }
+    } else if matches_abbrev(&subcmd_upper, "ZONE", 2) {
+        if subargs.is_empty() {
+            return Err("SET ZONE requires at least one column number".to_string());
+        }
+        let (first_str, rest) = split_first_word(subargs);
+        let first = first_str
+            .parse::<usize>()
+            .map_err(|_| format!("SET ZONE: invalid column: {}", first_str))?;
+        if first == 0 {
+            return Err("SET ZONE: column must be at least 1".to_string());
+        }
+        if rest.is_empty() {
+            // Single arg: SET ZONE right (left defaults to 1)
+            Ok(Command::Set(SetCommand::Zone(1, first)))
+        } else {
+            let (second_str, _) = split_first_word(rest);
+            let second = second_str
+                .parse::<usize>()
+                .map_err(|_| format!("SET ZONE: invalid column: {}", second_str))?;
+            if second == 0 {
+                return Err("SET ZONE: column must be at least 1".to_string());
+            }
+            if second < first {
+                return Err(format!(
+                    "SET ZONE: right ({}) must be >= left ({})",
+                    second, first
+                ));
+            }
+            Ok(Command::Set(SetCommand::Zone(first, second)))
+        }
+    } else if matches_abbrev(&subcmd_upper, "VERIFY", 2) {
+        if subargs.is_empty() {
+            return Err("SET VERIFY requires at least one column number".to_string());
+        }
+        let (first_str, rest) = split_first_word(subargs);
+        let first = first_str
+            .parse::<usize>()
+            .map_err(|_| format!("SET VERIFY: invalid column: {}", first_str))?;
+        if first == 0 {
+            return Err("SET VERIFY: column must be at least 1".to_string());
+        }
+        if rest.is_empty() {
+            // Single arg: SET VERIFY col (start and end are same)
+            Ok(Command::Set(SetCommand::Verify(first, first)))
+        } else {
+            let (second_str, _) = split_first_word(rest);
+            let second = second_str
+                .parse::<usize>()
+                .map_err(|_| format!("SET VERIFY: invalid column: {}", second_str))?;
+            if second == 0 {
+                return Err("SET VERIFY: column must be at least 1".to_string());
+            }
+            if second < first {
+                return Err(format!(
+                    "SET VERIFY: end ({}) must be >= start ({})",
+                    second, first
+                ));
+            }
+            Ok(Command::Set(SetCommand::Verify(first, second)))
+        }
+    } else if matches_abbrev(&subcmd_upper, "TABLINE", 4) {
+        Ok(Command::Set(SetCommand::TabLine(parse_on_off(subargs)?)))
     } else if let Some(num_str) = subcmd_upper.strip_prefix("PF") {
         // SET PFn command_text
         let num = num_str
@@ -1814,6 +1878,126 @@ mod tests {
         match parse_command("transfer file.txt 2 extra").unwrap() {
             Command::Transfer(ref f, 2) => assert_eq!(f, "file.txt"),
             other => panic!("Expected Transfer with count 2, got {:?}", other),
+        }
+    }
+
+    // -- SET ZONE tests --
+
+    #[test]
+    fn parse_set_zone_two_args() {
+        match parse_command("set zo 5 72").unwrap() {
+            Command::Set(SetCommand::Zone(5, 72)) => {}
+            other => panic!("Expected Set(Zone(5, 72)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_zone_single_arg() {
+        // Single arg means right; left defaults to 1
+        match parse_command("set zo 40").unwrap() {
+            Command::Set(SetCommand::Zone(1, 40)) => {}
+            other => panic!("Expected Set(Zone(1, 40)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_zone_full_name() {
+        match parse_command("set zone 1 80").unwrap() {
+            Command::Set(SetCommand::Zone(1, 80)) => {}
+            other => panic!("Expected Set(Zone(1, 80)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_zone_inverted_errors() {
+        assert!(parse_command("set zo 40 5").is_err());
+    }
+
+    #[test]
+    fn parse_set_zone_zero_errors() {
+        assert!(parse_command("set zo 0").is_err());
+    }
+
+    #[test]
+    fn parse_set_zone_no_args_errors() {
+        assert!(parse_command("set zo").is_err());
+    }
+
+    // -- SET VERIFY tests --
+
+    #[test]
+    fn parse_set_verify_two_args() {
+        match parse_command("set ve 1 80").unwrap() {
+            Command::Set(SetCommand::Verify(1, 80)) => {}
+            other => panic!("Expected Set(Verify(1, 80)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_verify_single_arg() {
+        match parse_command("set ve 10").unwrap() {
+            Command::Set(SetCommand::Verify(10, 10)) => {}
+            other => panic!("Expected Set(Verify(10, 10)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_verify_full_name() {
+        match parse_command("set verify 5 40").unwrap() {
+            Command::Set(SetCommand::Verify(5, 40)) => {}
+            other => panic!("Expected Set(Verify(5, 40)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_verify_inverted_errors() {
+        assert!(parse_command("set ve 40 5").is_err());
+    }
+
+    #[test]
+    fn parse_set_verify_zero_errors() {
+        assert!(parse_command("set ve 0").is_err());
+    }
+
+    #[test]
+    fn parse_set_verify_no_args_errors() {
+        assert!(parse_command("set ve").is_err());
+    }
+
+    // -- SET TABLINE tests --
+
+    #[test]
+    fn parse_set_tabline_on() {
+        match parse_command("set tabline on").unwrap() {
+            Command::Set(SetCommand::TabLine(true)) => {}
+            other => panic!("Expected Set(TabLine(true)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_tabline_off() {
+        match parse_command("set tabline off").unwrap() {
+            Command::Set(SetCommand::TabLine(false)) => {}
+            other => panic!("Expected Set(TabLine(false)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_tabline_abbreviated() {
+        match parse_command("set tabl on").unwrap() {
+            Command::Set(SetCommand::TabLine(true)) => {}
+            other => panic!("Expected Set(TabLine(true)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_tabline_no_conflict_with_tabs() {
+        // "ta" (2 chars) should match TABS (min 2), not TABLINE (min 4)
+        assert!(parse_command("set ta 1 9").is_ok());
+        // "tab" (3 chars) should match TABS (min 2, starts with TAB)
+        match parse_command("set tab 1 9").unwrap() {
+            Command::Set(SetCommand::Tabs(_)) => {}
+            other => panic!("Expected Set(Tabs), got {:?}", other),
         }
     }
 }

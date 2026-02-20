@@ -89,6 +89,7 @@ enum RenderRow {
     },
     Eof,
     Scale,
+    TabLine,
     Reserved {
         text: String,
     },
@@ -173,6 +174,37 @@ fn make_scale_line(width: usize) -> Line<'static> {
             ruler.push(char::from_digit(digit, 10).unwrap_or('.'));
         } else if col % 5 == 0 {
             ruler.push('+');
+        } else {
+            ruler.push('.');
+        }
+    }
+
+    let text = format!("{}{}", BLANK_PREFIX, ruler);
+    Line::from(Span::styled(text, Style::default().fg(SCALE_FG)))
+}
+
+/// Extract the verify-visible columns from a line of text.
+/// `start` and `end` are 1-based column positions.
+fn apply_verify_filter(text: &str, start: usize, end: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let s = start.saturating_sub(1).min(chars.len());
+    let e = end.min(chars.len());
+    if s >= e {
+        String::new()
+    } else {
+        chars[s..e].iter().collect()
+    }
+}
+
+/// Build an IBM XEDIT–style tab-stop ruler (tabline).
+/// Places `T` at each tab stop column, `.` elsewhere.
+fn make_tabline(width: usize, tab_stops: &[usize]) -> Line<'static> {
+    let data_width = width.saturating_sub(PREFIX_WIDTH);
+    let mut ruler = String::with_capacity(data_width);
+
+    for col in 1..=data_width {
+        if tab_stops.contains(&col) {
+            ruler.push('T');
         } else {
             ruler.push('.');
         }
@@ -362,6 +394,7 @@ fn build_screen_layout(editor: &Editor, height: usize, width: usize) -> ScreenLa
     // HEX takes priority over WRAP (IBM XEDIT behavior)
     let wrap_mode = editor.wrap() && !hex_mode;
     let scale_mode = editor.show_scale();
+    let tabline_mode = editor.show_tabline();
 
     let display_list = build_display_list(editor);
 
@@ -532,6 +565,11 @@ fn build_screen_layout(editor: &Editor, height: usize, width: usize) -> ScreenLa
             }
         }
 
+        // Insert tabline immediately after the current-line item's rows.
+        if tabline_mode && idx == current_idx && current > 0 && content_rows.len() < available {
+            content_rows.push(RenderRow::TabLine);
+        }
+
         idx += 1;
     }
 
@@ -594,6 +632,8 @@ fn render_file_area(
 
     let shadow_fg = resolve_color(editor, "Shadow", SHADOW_FG);
     let data_width = width.saturating_sub(PREFIX_WIDTH);
+    let verify_start = editor.verify_start();
+    let verify_end = editor.verify_end();
 
     let mut lines: Vec<Line> = Vec::with_capacity(height);
 
@@ -608,11 +648,10 @@ fn render_file_area(
             } => {
                 let prefix_text = prefix_inputs.get(line_num);
                 if let Some(text) = editor.buffer().line_text(*line_num) {
-                    // make_data_line already truncates to data_width by chars,
-                    // so no pre-truncation needed here.
+                    let filtered = apply_verify_filter(text, verify_start, verify_end);
                     lines.push(make_data_line(
                         *line_num,
-                        text,
+                        &filtered,
                         *is_current,
                         editor.show_number(),
                         width,
@@ -624,11 +663,13 @@ fn render_file_area(
             }
             RenderRow::HexHigh { line_num } => {
                 let text = editor.buffer().line_text(*line_num).unwrap_or("");
-                lines.push(make_hex_nibble_line(text, data_width, true));
+                let filtered = apply_verify_filter(text, verify_start, verify_end);
+                lines.push(make_hex_nibble_line(&filtered, data_width, true));
             }
             RenderRow::HexLow { line_num } => {
                 let text = editor.buffer().line_text(*line_num).unwrap_or("");
-                lines.push(make_hex_nibble_line(text, data_width, false));
+                let filtered = apply_verify_filter(text, verify_start, verify_end);
+                lines.push(make_hex_nibble_line(&filtered, data_width, false));
             }
             RenderRow::WrapCont {
                 line_num,
@@ -640,7 +681,8 @@ fn render_file_area(
                     "WrapCont should not exist when data_width == 0"
                 );
                 let text = editor.buffer().line_text(*line_num).unwrap_or("");
-                let chunk_text: String = text
+                let filtered = apply_verify_filter(text, verify_start, verify_end);
+                let chunk_text: String = filtered
                     .chars()
                     .skip(*chunk_idx * data_width)
                     .take(data_width)
@@ -676,6 +718,9 @@ fn render_file_area(
             }
             RenderRow::Scale => {
                 lines.push(make_scale_line(width));
+            }
+            RenderRow::TabLine => {
+                lines.push(make_tabline(width, editor.tab_stops()));
             }
             RenderRow::Reserved { text } => {
                 let padded = format!("{:<width$}", text, width = width);
@@ -1440,5 +1485,152 @@ mod tests {
         // Should be just the blank prefix, no panic or garbled output
         assert_eq!(text.trim(), "");
         assert!(text.len() >= PREFIX_WIDTH);
+    }
+
+    // --- apply_verify_filter ---
+
+    #[test]
+    fn verify_filter_default_shows_all() {
+        // Default verify 1..80 shows the full line (for lines <= 80 chars)
+        let result = apply_verify_filter("hello world", 1, 80);
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn verify_filter_restricts_display() {
+        // verify 1..5 shows only first 5 chars
+        let result = apply_verify_filter("hello world", 1, 5);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn verify_filter_beyond_line_length() {
+        // verify range beyond line length: show what exists
+        let result = apply_verify_filter("hi", 1, 80);
+        assert_eq!(result, "hi");
+    }
+
+    #[test]
+    fn verify_filter_middle_columns() {
+        // verify 7..11 shows "world"
+        let result = apply_verify_filter("hello world", 7, 11);
+        assert_eq!(result, "world");
+    }
+
+    #[test]
+    fn verify_filter_empty_when_start_beyond_text() {
+        let result = apply_verify_filter("hi", 10, 20);
+        assert_eq!(result, "");
+    }
+
+    // --- make_tabline ---
+
+    #[test]
+    fn tabline_marks_tab_stops() {
+        let tab_stops = vec![1, 9, 17];
+        let line = make_tabline(80, &tab_stops);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let ruler = &text[PREFIX_WIDTH..];
+        // col 1 = T, col 2 = ., col 9 = T, col 17 = T
+        assert_eq!(ruler.chars().nth(0), Some('T'), "col 1 = T");
+        assert_eq!(ruler.chars().nth(1), Some('.'), "col 2 = .");
+        assert_eq!(ruler.chars().nth(8), Some('T'), "col 9 = T");
+        assert_eq!(ruler.chars().nth(16), Some('T'), "col 17 = T");
+    }
+
+    #[test]
+    fn tabline_no_stops() {
+        let line = make_tabline(20, &[]);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let ruler = &text[PREFIX_WIDTH..];
+        assert!(ruler.chars().all(|c| c == '.'));
+    }
+
+    // --- tabline layout ---
+
+    #[test]
+    fn layout_tabline_adds_row_after_current() {
+        let mut ed = make_test_editor(&["line1", "line2", "line3"]);
+        ed.execute(&Command::Down(1)).unwrap(); // current = 2
+        ed.execute(&Command::Set(SetCommand::TabLine(true)))
+            .unwrap();
+
+        let layout = build_screen_layout(&ed, 10, 80);
+        // Find the current DataLine row
+        let cur_row = layout
+            .rows
+            .iter()
+            .position(|r| {
+                matches!(
+                    r,
+                    RenderRow::DataLine {
+                        is_current: true,
+                        ..
+                    }
+                )
+            })
+            .expect("should have current line");
+        // Next row should be TabLine
+        assert!(
+            matches!(layout.rows[cur_row + 1], RenderRow::TabLine),
+            "TabLine should appear right after current line, got {:?}",
+            layout.rows[cur_row + 1]
+        );
+    }
+
+    #[test]
+    fn layout_tabline_not_at_tof() {
+        let mut ed = make_test_editor(&["line1"]);
+        ed.execute(&Command::Top).unwrap(); // current = 0 (TOF)
+        ed.execute(&Command::Set(SetCommand::TabLine(true)))
+            .unwrap();
+
+        let layout = build_screen_layout(&ed, 10, 80);
+        // TabLine should NOT appear at TOF
+        assert!(
+            !layout.rows.iter().any(|r| matches!(r, RenderRow::TabLine)),
+            "TabLine should not appear at TOF"
+        );
+    }
+
+    #[test]
+    fn layout_scale_and_tabline_coexist() {
+        let mut ed = make_test_editor(&["line1", "line2", "line3"]);
+        ed.execute(&Command::Set(SetCommand::Scale(true))).unwrap();
+        ed.execute(&Command::Set(SetCommand::TabLine(true)))
+            .unwrap();
+
+        let layout = build_screen_layout(&ed, 20, 80);
+        let has_scale = layout.rows.iter().any(|r| matches!(r, RenderRow::Scale));
+        let has_tabline = layout.rows.iter().any(|r| matches!(r, RenderRow::TabLine));
+        assert!(has_scale, "Should have scale");
+        assert!(has_tabline, "Should have tabline");
+
+        // Scale should appear before current line, tabline after
+        let scale_pos = layout
+            .rows
+            .iter()
+            .position(|r| matches!(r, RenderRow::Scale))
+            .unwrap();
+        let cur_pos = layout
+            .rows
+            .iter()
+            .position(|r| {
+                matches!(
+                    r,
+                    RenderRow::DataLine {
+                        is_current: true,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let tab_pos = layout
+            .rows
+            .iter()
+            .position(|r| matches!(r, RenderRow::TabLine))
+            .unwrap();
+        assert!(scale_pos < cur_pos, "Scale before current line");
+        assert!(tab_pos > cur_pos, "TabLine after current line");
     }
 }
