@@ -980,6 +980,15 @@ impl Editor {
             self.current_line
         };
 
+        // Work with char-level indices to avoid byte-offset mismatches
+        // when case-folding changes byte lengths (e.g. ﬁ → FI, ß → SS).
+        // needle_chars is loop-invariant — compute once.
+        let needle_chars: Vec<char> = if self.case_respect {
+            from.chars().collect()
+        } else {
+            from.chars().flat_map(|c| c.to_uppercase()).collect()
+        };
+
         for line_num in start..=end_line {
             if changes_made >= max_changes {
                 break;
@@ -994,13 +1003,6 @@ impl Editor {
                 }
                 let zone_chars = &chars[z_start..z_end];
 
-                // Work with char-level indices to avoid byte-offset mismatches
-                // when case-folding changes byte lengths (e.g. ﬁ → FI).
-                let needle_chars: Vec<char> = if self.case_respect {
-                    from.chars().collect()
-                } else {
-                    from.chars().flat_map(|c| c.to_uppercase()).collect()
-                };
                 let haystack_chars: Vec<char> = if self.case_respect {
                     zone_chars.to_vec()
                 } else {
@@ -1015,22 +1017,32 @@ impl Editor {
                 if let Some(zcp) = zone_char_pos {
                     // Map back: haystack_chars index → zone_chars index.
                     // Each zone_char maps to 1+ haystack_chars via to_uppercase.
+                    // Find the start zone_idx and count how many zone chars the
+                    // match spans (match_zone_len), since a single zone char like
+                    // 'ß' can expand to multiple haystack chars ('S','S').
                     let mut h_idx = 0;
                     let mut zone_idx = 0;
+                    let match_end = zcp + needle_chars.len();
+                    let mut match_zone_len = 0;
+                    let mut found_start = false;
                     for (zi, zc) in zone_chars.iter().enumerate() {
-                        if h_idx >= zcp {
+                        let expand = zc.to_uppercase().count();
+                        if !found_start && h_idx >= zcp {
                             zone_idx = zi;
-                            break;
+                            found_start = true;
                         }
-                        h_idx += zc.to_uppercase().count();
-                        zone_idx = zi + 1;
+                        if found_start {
+                            match_zone_len += 1;
+                            if h_idx + expand >= match_end {
+                                break;
+                            }
+                        }
+                        h_idx += expand;
                     }
                     let abs_char_pos = z_start + zone_idx;
                     // Build new text: prefix + replacement + suffix
                     let prefix: String = chars[..abs_char_pos].iter().collect();
-                    let suffix: String = chars[abs_char_pos + from.chars().count()..]
-                        .iter()
-                        .collect();
+                    let suffix: String = chars[abs_char_pos + match_zone_len..].iter().collect();
                     let new_text = format!("{}{}{}", prefix, to, suffix);
                     if let Some(line_mut) = self.buffer.get_mut(line_num) {
                         line_mut.set_text(new_text);
@@ -3538,5 +3550,22 @@ if ftype.1 = 'RS' then
         })
         .unwrap();
         assert_eq!(ed.buffer().line_text(1), Some("BEAN world"));
+    }
+
+    #[test]
+    fn change_case_insensitive_expanding_casefold() {
+        // 'ß' uppercases to "SS" (1 zone char → 2 haystack chars).
+        // Replacing "SS" should consume only 'ß', not 'ß' + next char.
+        let mut ed = editor_with_lines(&["ßello world"]);
+        ed.execute(&Command::Set(SetCommand::Case(CaseSetting::Ignore)))
+            .unwrap();
+        ed.execute(&Command::Change {
+            from: "SS".into(),
+            to: "X".into(),
+            target: None,
+            count: None,
+        })
+        .unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("Xello world"));
     }
 }
