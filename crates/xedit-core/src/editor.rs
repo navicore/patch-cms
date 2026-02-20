@@ -154,7 +154,7 @@ impl Editor {
             fs,
             trunc: 72,
             zone_left: 1,
-            zone_right: 72,
+            zone_right: usize::MAX,
             show_number: true,
             show_prefix: true,
             show_scale: false,
@@ -674,7 +674,6 @@ impl Editor {
             .unwrap_or(80);
         if max_width > self.trunc {
             self.trunc = max_width;
-            self.zone_right = max_width;
             self.verify_end = max_width;
         }
 
@@ -947,6 +946,11 @@ impl Editor {
         target: Option<&Target>,
         count: Option<usize>,
     ) -> Result<CommandResult> {
+        if from.is_empty() {
+            return Err(XeditError::InvalidCommand(
+                "CHANGE: search string cannot be empty".to_string(),
+            ));
+        }
         self.snapshot_for_undo();
         let max_changes = count.unwrap_or(1);
         let mut changes_made = 0;
@@ -1027,7 +1031,7 @@ impl Editor {
                     let mut found_start = false;
                     for (zi, zc) in zone_chars.iter().enumerate() {
                         let expand = zc.to_uppercase().count();
-                        if !found_start && h_idx >= zcp {
+                        if !found_start && h_idx + expand > zcp {
                             zone_idx = zi;
                             found_start = true;
                         }
@@ -3230,7 +3234,8 @@ if ftype.1 = 'RS' then
     fn compress_col1_exceeds_zone_errors() {
         let mut ed = editor_with_lines(&["hello   world"]);
         ed.current_line = 1;
-        // zone_right defaults to 72, so col1=80 > zone_end=72
+        // Set explicit zone, then col1=80 > zone_end=72
+        ed.execute(&Command::Set(SetCommand::Zone(1, 72))).unwrap();
         let result = ed.execute(&Command::Compress(Some(80), None));
         assert!(result.is_err());
     }
@@ -3239,6 +3244,7 @@ if ftype.1 = 'RS' then
     fn expand_col1_exceeds_zone_errors() {
         let mut ed = editor_with_lines(&["hello\tworld"]);
         ed.current_line = 1;
+        ed.execute(&Command::Set(SetCommand::Zone(1, 72))).unwrap();
         let result = ed.execute(&Command::Expand(Some(80), None));
         assert!(result.is_err());
     }
@@ -3253,7 +3259,7 @@ if ftype.1 = 'RS' then
 
     #[test]
     fn compress_single_col_arg() {
-        // COMPRESS 5 — col1=5, col2 defaults to zone_right (72)
+        // COMPRESS 5 — col1=5, col2 defaults to zone_right
         let mut ed = editor_with_lines(&["1234    rest"]);
         ed.current_line = 1;
         ed.execute(&Command::Set(SetCommand::Tabs(vec![1, 9, 17])))
@@ -3524,7 +3530,7 @@ if ftype.1 = 'RS' then
     fn query_zone() {
         let mut ed = Editor::new();
         let result = ed.execute(&Command::Query("ZONE".into())).unwrap();
-        assert_eq!(result.message, Some("Zone=1 72".to_string()));
+        assert_eq!(result.message, Some(format!("Zone=1 {}", usize::MAX)));
     }
 
     #[test]
@@ -3567,5 +3573,44 @@ if ftype.1 = 'RS' then
         })
         .unwrap();
         assert_eq!(ed.buffer().line_text(1), Some("Xello world"));
+    }
+
+    #[test]
+    fn change_empty_from_errors() {
+        let mut ed = editor_with_lines(&["hello"]);
+        let result = ed.execute(&Command::Change {
+            from: "".into(),
+            to: "x".into(),
+            target: None,
+            count: None,
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn locate_beyond_col72_default_zone() {
+        // Default zone_right is unlimited — LOCATE should find text past col 72
+        let long_line = format!("{}{}", " ".repeat(80), "FINDME");
+        let mut ed = editor_with_lines(&[&long_line]);
+        ed.current_line = 0;
+        let result = ed.execute(&Command::Locate(Target::StringForward("FINDME".into())));
+        assert!(result.is_ok());
+        assert_eq!(ed.current_line(), 1);
+    }
+
+    #[test]
+    fn change_beyond_col72_default_zone() {
+        // Default zone_right is unlimited — CHANGE should work past col 72
+        let long_line = format!("{}old", " ".repeat(80));
+        let mut ed = editor_with_lines(&[&long_line]);
+        ed.execute(&Command::Change {
+            from: "old".into(),
+            to: "new".into(),
+            target: None,
+            count: None,
+        })
+        .unwrap();
+        let text = ed.buffer().line_text(1).unwrap();
+        assert!(text.ends_with("new"));
     }
 }

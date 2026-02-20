@@ -863,8 +863,8 @@ fn parse_set_args(args: &str) -> Result<Command, String> {
             return Err("SET VERIFY: column must be at least 1".to_string());
         }
         if rest.is_empty() {
-            // Single arg: SET VERIFY col (start and end are same)
-            Ok(Command::Set(SetCommand::Verify(first, first)))
+            // Single arg: SET VERIFY n sets display range 1..n
+            Ok(Command::Set(SetCommand::Verify(1, first)))
         } else {
             let (second_str, _) = split_first_word(rest);
             let second = second_str
@@ -1937,9 +1937,10 @@ mod tests {
 
     #[test]
     fn parse_set_verify_single_arg() {
+        // Single arg: left defaults to 1, right = arg
         match parse_command("set ve 10").unwrap() {
-            Command::Set(SetCommand::Verify(10, 10)) => {}
-            other => panic!("Expected Set(Verify(10, 10)), got {:?}", other),
+            Command::Set(SetCommand::Verify(1, 10)) => {}
+            other => panic!("Expected Set(Verify(1, 10)), got {:?}", other),
         }
     }
 

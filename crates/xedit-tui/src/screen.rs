@@ -537,6 +537,10 @@ fn build_screen_layout(editor: &Editor, height: usize, width: usize) -> ScreenLa
                         line_num: *n,
                         is_current,
                     });
+                    // TabLine goes after DataLine, before hex nibble rows
+                    if is_current && tabline_mode && current > 0 && content_rows.len() < available {
+                        content_rows.push(RenderRow::TabLine);
+                    }
                     if content_rows.len() < available {
                         content_rows.push(RenderRow::HexHigh { line_num: *n });
                     }
@@ -548,6 +552,9 @@ fn build_screen_layout(editor: &Editor, height: usize, width: usize) -> ScreenLa
                         line_num: *n,
                         is_current,
                     });
+                    if is_current && tabline_mode && current > 0 && content_rows.len() < available {
+                        content_rows.push(RenderRow::TabLine);
+                    }
                     for chunk in 1..rc {
                         if content_rows.len() >= available {
                             break;
@@ -563,6 +570,9 @@ fn build_screen_layout(editor: &Editor, height: usize, width: usize) -> ScreenLa
                         line_num: *n,
                         is_current,
                     });
+                    if is_current && tabline_mode && current > 0 && content_rows.len() < available {
+                        content_rows.push(RenderRow::TabLine);
+                    }
                 }
             }
             DisplayItem::Shadow(count) => {
@@ -571,11 +581,6 @@ fn build_screen_layout(editor: &Editor, height: usize, width: usize) -> ScreenLa
             DisplayItem::Eof => {
                 content_rows.push(RenderRow::Eof);
             }
-        }
-
-        // Insert tabline immediately after the current-line item's rows.
-        if tabline_mode && idx == current_idx && current > 0 && content_rows.len() < available {
-            content_rows.push(RenderRow::TabLine);
         }
 
         idx += 1;
@@ -1683,6 +1688,40 @@ mod tests {
         assert_eq!(
             wrap_count, 0,
             "Filtered 60-char text should fit in 74-col data_width without wrapping"
+        );
+    }
+
+    #[test]
+    fn layout_tabline_before_hex_rows() {
+        let mut ed = make_test_editor(&["Hello"]);
+        ed.execute(&Command::Set(SetCommand::Hex(true))).unwrap();
+        ed.execute(&Command::Set(SetCommand::TabLine(true)))
+            .unwrap();
+
+        let layout = build_screen_layout(&ed, 20, 80);
+        let cur_data = layout
+            .rows
+            .iter()
+            .position(|r| {
+                matches!(
+                    r,
+                    RenderRow::DataLine {
+                        is_current: true,
+                        ..
+                    }
+                )
+            })
+            .expect("should have current DataLine");
+        // TabLine should be immediately after DataLine, before HexHigh
+        assert!(
+            matches!(layout.rows[cur_data + 1], RenderRow::TabLine),
+            "TabLine should follow DataLine, got {:?}",
+            layout.rows[cur_data + 1]
+        );
+        assert!(
+            matches!(layout.rows[cur_data + 2], RenderRow::HexHigh { .. }),
+            "HexHigh should follow TabLine, got {:?}",
+            layout.rows[cur_data + 2]
         );
     }
 }
