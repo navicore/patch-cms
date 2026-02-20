@@ -186,8 +186,12 @@ fn make_scale_line(width: usize) -> Line<'static> {
 /// Extract the verify-visible columns from a line of text.
 /// `start` and `end` are 1-based column positions.
 fn apply_verify_filter(text: &str, start: usize, end: usize) -> String {
-    // Fast path: if verify covers the whole line, avoid allocation
-    if start <= 1 && end >= text.chars().count() {
+    // Fast path: if verify covers the whole line, avoid allocation.
+    // Use text.len() (byte length, O(1)) as a conservative check:
+    // for UTF-8, byte_len >= char_count, so end >= byte_len implies
+    // end >= char_count. Multi-byte text where byte_len > end >= char_count
+    // safely falls through to the slow path.
+    if start <= 1 && end >= text.len() {
         return text.to_string();
     }
     let chars: Vec<char> = text.chars().collect();

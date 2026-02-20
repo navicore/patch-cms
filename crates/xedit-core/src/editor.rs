@@ -1019,30 +1019,35 @@ impl Editor {
                     .position(|w| w == needle_chars.as_slice());
 
                 if let Some(zcp) = zone_char_pos {
-                    // Map back: haystack_chars index → zone_chars index.
-                    // Each zone_char maps to 1+ haystack_chars via to_uppercase.
-                    // Find the start zone_idx and count how many zone chars the
-                    // match spans (match_zone_len), since a single zone char like
-                    // 'ß' can expand to multiple haystack chars ('S','S').
-                    let mut h_idx = 0;
-                    let mut zone_idx = 0;
-                    let match_end = zcp + needle_chars.len();
-                    let mut match_zone_len = 0;
-                    let mut found_start = false;
-                    for (zi, zc) in zone_chars.iter().enumerate() {
-                        let expand = zc.to_uppercase().count();
-                        if !found_start && h_idx + expand > zcp {
-                            zone_idx = zi;
-                            found_start = true;
-                        }
-                        if found_start {
-                            match_zone_len += 1;
-                            if h_idx + expand >= match_end {
-                                break;
+                    // Map haystack_chars index back to zone_chars index.
+                    let (zone_idx, match_zone_len) = if self.case_respect {
+                        // Case-sensitive: haystack is a 1:1 copy of zone_chars,
+                        // so positions map directly — no expansion to account for.
+                        (zcp, needle_chars.len())
+                    } else {
+                        // Case-insensitive: each zone_char maps to 1+ haystack
+                        // chars via to_uppercase (e.g. 'ß' → ['S','S']).
+                        let mut h_idx = 0;
+                        let mut zi_start = 0;
+                        let match_end = zcp + needle_chars.len();
+                        let mut mzl = 0;
+                        let mut found_start = false;
+                        for (zi, zc) in zone_chars.iter().enumerate() {
+                            let expand = zc.to_uppercase().count();
+                            if !found_start && h_idx + expand > zcp {
+                                zi_start = zi;
+                                found_start = true;
                             }
+                            if found_start {
+                                mzl += 1;
+                                if h_idx + expand >= match_end {
+                                    break;
+                                }
+                            }
+                            h_idx += expand;
                         }
-                        h_idx += expand;
-                    }
+                        (zi_start, mzl)
+                    };
                     let abs_char_pos = z_start + zone_idx;
                     // Build new text: prefix + replacement + suffix
                     let prefix: String = chars[..abs_char_pos].iter().collect();
@@ -3636,5 +3641,23 @@ if ftype.1 = 'RS' then
         ed.execute(&Command::Set(SetCommand::Zone(1, 72))).unwrap();
         let result = ed.execute(&Command::Query("ZONE".into())).unwrap();
         assert_eq!(result.message, Some("Zone=1 72".to_string()));
+    }
+
+    #[test]
+    fn change_case_sensitive_after_expanding_char() {
+        // Case-sensitive: 'ß' occupies 1 position in haystack (no expansion).
+        // A match on "a" after 'ß' should replace 'a', not 'ß'.
+        let mut ed = editor_with_lines(&["ßa"]);
+        // case_respect defaults to false; set it true
+        ed.execute(&Command::Set(SetCommand::Case(CaseSetting::Respect)))
+            .unwrap();
+        ed.execute(&Command::Change {
+            from: "a".into(),
+            to: "X".into(),
+            target: None,
+            count: None,
+        })
+        .unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("ßX"));
     }
 }

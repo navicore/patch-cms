@@ -865,7 +865,11 @@ fn parse_set_args(args: &str) -> Result<Command, String> {
             return Err("SET VERIFY: column must be at least 1".to_string());
         }
         if rest.is_empty() {
-            // Single arg: SET VERIFY n sets display range 1..n
+            // Single arg: SET VERIFY n sets display range 1..n.
+            // Note: IBM XEDIT's single-arg semantics are ambiguous
+            // (some references treat it as left boundary). We treat it
+            // as the right boundary for practical usability (e.g.
+            // SET VERIFY 80 shows columns 1-80).
             Ok(Command::Set(SetCommand::Verify(1, first)))
         } else {
             let (second_str, _) = split_first_word(rest);
