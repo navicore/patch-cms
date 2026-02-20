@@ -188,13 +188,16 @@ fn make_scale_line(width: usize) -> Line<'static> {
 /// `start` and `end` are 1-based column positions.
 /// Returns `Cow::Borrowed` when the full line is visible (zero allocation).
 fn apply_verify_filter<'a>(text: &'a str, start: usize, end: usize) -> Cow<'a, str> {
-    // Fast path: if verify covers the whole line, borrow without allocation.
-    // Check byte length first (O(1)); for multi-byte text where
-    // byte_len > end >= char_count, fall through to chars().count().
-    if start <= 1 && (end >= text.len() || end >= text.chars().count()) {
+    // O(1) byte-length fast path: for ASCII, byte_len == char_count
+    if start <= 1 && end >= text.len() {
         return Cow::Borrowed(text);
     }
+    // Collect chars once — used for both the length check and slicing
     let chars: Vec<char> = text.chars().collect();
+    // Char-count fast path for multi-byte text (no redundant traversal)
+    if start <= 1 && end >= chars.len() {
+        return Cow::Borrowed(text);
+    }
     let s = start.saturating_sub(1).min(chars.len());
     let e = end.min(chars.len());
     if s >= e {

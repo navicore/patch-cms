@@ -951,9 +951,9 @@ impl Editor {
                 "CHANGE: search string cannot be empty".to_string(),
             ));
         }
-        self.snapshot_for_undo();
         let max_changes = count.unwrap_or(1);
         let mut changes_made = 0;
+        let mut snapshot_taken = false;
 
         let zone_left = self.zone_left;
         let zone_right = self.zone_right;
@@ -1041,6 +1041,10 @@ impl Editor {
                     let prefix: String = chars[..abs_char_pos].iter().collect();
                     let suffix: String = chars[abs_char_pos + match_zone_len..].iter().collect();
                     let new_text = format!("{}{}{}", prefix, to, suffix);
+                    if !snapshot_taken {
+                        self.snapshot_for_undo();
+                        snapshot_taken = true;
+                    }
                     if let Some(line_mut) = self.buffer.get_mut(line_num) {
                         line_mut.set_text(new_text);
                     }
@@ -3665,5 +3669,47 @@ if ftype.1 = 'RS' then
         })
         .unwrap();
         assert_eq!(ed.buffer().line_text(1), Some("ßX"));
+    }
+
+    #[test]
+    fn change_count_with_zone_skips_out_of_zone() {
+        // 4 lines: lines 1,3 have "old" in zone (cols 1-5), lines 2,4 have it outside
+        let mut ed = editor_with_lines(&[
+            "old  rest",     // "old" at cols 1-3 — in zone
+            "     old rest", // "old" at cols 6-8 — outside zone
+            "old  more",     // "old" at cols 1-3 — in zone
+            "     old more", // "old" at cols 6-8 — outside zone
+        ]);
+        ed.execute(&Command::Set(SetCommand::Zone(1, 5))).unwrap();
+        ed.current_line = 0; // start from TOF to scan all lines
+        let result = ed
+            .execute(&Command::Change {
+                from: "old".into(),
+                to: "NEW".into(),
+                target: None,
+                count: Some(2),
+            })
+            .unwrap();
+        // Should change lines 1 and 3 (in-zone), skip lines 2 and 4 (out-of-zone)
+        assert_eq!(result.message, Some("2 change(s) made".to_string()));
+        assert_eq!(ed.buffer().line_text(1), Some("NEW  rest"));
+        assert_eq!(ed.buffer().line_text(2), Some("     old rest")); // unchanged
+        assert_eq!(ed.buffer().line_text(3), Some("NEW  more"));
+        assert_eq!(ed.buffer().line_text(4), Some("     old more")); // unchanged
+    }
+
+    #[test]
+    fn change_no_match_does_not_push_undo() {
+        let mut ed = editor_with_lines(&["hello world"]);
+        let result = ed.execute(&Command::Change {
+            from: "xyz".into(),
+            to: "abc".into(),
+            target: None,
+            count: None,
+        });
+        assert!(result.is_err());
+        // No undo snapshot should have been pushed
+        let undo_result = ed.execute(&Command::Undo);
+        assert!(undo_result.is_err()); // nothing to undo
     }
 }

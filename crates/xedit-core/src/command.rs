@@ -833,10 +833,10 @@ fn parse_set_args(args: &str) -> Result<Command, String> {
             return Err("SET ZONE: column must be at least 1".to_string());
         }
         if rest.is_empty() {
-            // Single arg: SET ZONE n → Zone(1, n). This is a convenience
-            // extension; IBM XEDIT requires two operands. The single arg is
-            // treated as the right boundary (left defaults to 1).
-            Ok(Command::Set(SetCommand::Zone(1, first)))
+            Err(
+                "SET ZONE requires two operands (left right); use SET ZONE n n for a single column"
+                    .to_string(),
+            )
         } else {
             let (second_str, trailing) = split_first_word(rest);
             if !trailing.is_empty() {
@@ -1906,12 +1906,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_set_zone_single_arg() {
-        // Single arg means right; left defaults to 1
-        match parse_command("set zo 40").unwrap() {
-            Command::Set(SetCommand::Zone(1, 40)) => {}
-            other => panic!("Expected Set(Zone(1, 40)), got {:?}", other),
-        }
+    fn parse_set_zone_single_arg_errors() {
+        // Single arg is rejected — IBM XEDIT requires two operands
+        assert!(parse_command("set zo 40").is_err());
     }
 
     #[test]
