@@ -36,32 +36,49 @@ impl NativeFs {
     /// and converts them to `"profile.exec"`.  All other input passes through
     /// unchanged.
     ///
-    /// The heuristic requires 2-3 tokens that are each 1-8 characters of
-    /// uppercase ASCII letters and digits — matching CMS identifier rules.
-    /// Mixed-case and lowercase inputs pass through to avoid false positives
-    /// on native filenames with spaces.
-    pub fn normalize_file_id<'a>(&self, input: &'a str) -> Cow<'a, str> {
+    /// The heuristic requires 2-3 all-uppercase tokens matching CMS identifier
+    /// rules: filename and filetype are 1-8 uppercase alphanumeric chars, and
+    /// the optional filemode is a letter optionally followed by a digit (e.g.
+    /// `"A"`, `"A1"`).  Mixed-case and lowercase inputs pass through to avoid
+    /// false positives on native filenames with spaces.
+    pub fn normalize_file_id(input: &str) -> Cow<'_, str> {
         // Tokenize once, bounded to 4 elements regardless of input length.
         let tokens: Vec<&str> = input.split_whitespace().take(4).collect();
         let count = tokens.len();
 
-        // CMS-style: 2-3 tokens, each 1-8 uppercase alphanumeric chars.
-        if (count == 2 || count == 3)
-            && tokens.iter().all(|t| {
-                t.len() <= 8
-                    && t.chars()
-                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
-            })
-        {
-            // tokens[0] = filename, tokens[1] = filetype, tokens[2..] = filemode (ignored)
-            Cow::Owned(format!(
-                "{}.{}",
-                tokens[0].to_lowercase(),
-                tokens[1].to_lowercase()
-            ))
-        } else {
-            Cow::Borrowed(input)
+        if !(2..=3).contains(&count) {
+            return Cow::Borrowed(input);
         }
+
+        // Filename and filetype: 1-8 uppercase alphanumeric chars.
+        let is_cms_token = |t: &str| {
+            t.len() <= 8
+                && t.chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        };
+
+        if !is_cms_token(tokens[0]) || !is_cms_token(tokens[1]) {
+            return Cow::Borrowed(input);
+        }
+
+        // Filemode (if present): letter optionally followed by a digit (e.g. "A", "A1").
+        if count == 3 {
+            let fm = tokens[2];
+            let valid_filemode = match fm.len() {
+                1 => fm.as_bytes()[0].is_ascii_uppercase(),
+                2 => fm.as_bytes()[0].is_ascii_uppercase() && fm.as_bytes()[1].is_ascii_digit(),
+                _ => false,
+            };
+            if !valid_filemode {
+                return Cow::Borrowed(input);
+            }
+        }
+
+        Cow::Owned(format!(
+            "{}.{}",
+            tokens[0].to_lowercase(),
+            tokens[1].to_lowercase()
+        ))
     }
 }
 
@@ -188,110 +205,120 @@ mod tests {
 
     #[test]
     fn normalize_three_token_cms_style() {
-        let fs = NativeFs;
-        assert_eq!(fs.normalize_file_id("PROFILE EXEC A"), "profile.exec");
+        assert_eq!(
+            NativeFs::normalize_file_id("PROFILE EXEC A"),
+            "profile.exec"
+        );
     }
 
     #[test]
     fn normalize_two_token_cms_style() {
-        let fs = NativeFs;
-        assert_eq!(fs.normalize_file_id("PROFILE EXEC"), "profile.exec");
+        assert_eq!(NativeFs::normalize_file_id("PROFILE EXEC"), "profile.exec");
     }
 
     #[test]
     fn normalize_dotted_path_passthrough() {
-        let fs = NativeFs;
-        assert_eq!(fs.normalize_file_id("profile.exec"), "profile.exec");
+        assert_eq!(NativeFs::normalize_file_id("profile.exec"), "profile.exec");
     }
 
     #[test]
     fn normalize_absolute_path_passthrough() {
-        let fs = NativeFs;
         assert_eq!(
-            fs.normalize_file_id("/home/user/profile.exec"),
+            NativeFs::normalize_file_id("/home/user/profile.exec"),
             "/home/user/profile.exec"
         );
     }
 
     #[test]
     fn normalize_single_word_passthrough() {
-        let fs = NativeFs;
-        assert_eq!(fs.normalize_file_id("Makefile"), "Makefile");
+        assert_eq!(NativeFs::normalize_file_id("Makefile"), "Makefile");
     }
 
     #[test]
     fn normalize_four_tokens_passthrough() {
-        let fs = NativeFs;
         assert_eq!(
-            fs.normalize_file_id("one two three four"),
+            NativeFs::normalize_file_id("one two three four"),
             "one two three four"
         );
     }
 
     #[test]
     fn normalize_mixed_case_passthrough() {
-        let fs = NativeFs;
         // Mixed-case tokens are not treated as CMS filespecs to avoid
         // false positives on title-case native filenames like "My Notes".
-        assert_eq!(fs.normalize_file_id("Profile Exec A1"), "Profile Exec A1");
+        assert_eq!(
+            NativeFs::normalize_file_id("Profile Exec A1"),
+            "Profile Exec A1"
+        );
     }
 
     #[test]
     fn normalize_title_case_native_passthrough() {
-        let fs = NativeFs;
-        assert_eq!(fs.normalize_file_id("My Notes"), "My Notes");
+        assert_eq!(NativeFs::normalize_file_id("My Notes"), "My Notes");
     }
 
     #[test]
     fn normalize_backslash_path_passthrough() {
-        let fs = NativeFs;
         assert_eq!(
-            fs.normalize_file_id("C:\\Users\\file txt"),
+            NativeFs::normalize_file_id("C:\\Users\\file txt"),
             "C:\\Users\\file txt"
         );
     }
 
     #[test]
     fn normalize_short_backslash_path_passthrough() {
-        let fs = NativeFs;
         // 2 tokens, both short — but "C:\a" contains non-alphanumeric chars
-        assert_eq!(fs.normalize_file_id("C:\\a b"), "C:\\a b");
+        assert_eq!(NativeFs::normalize_file_id("C:\\a b"), "C:\\a b");
     }
 
     #[test]
     fn normalize_lowercase_two_tokens_passthrough() {
-        let fs = NativeFs;
         // All-lowercase tokens are not treated as CMS filespecs to avoid
         // false positives on native filenames with spaces.
-        assert_eq!(fs.normalize_file_id("my notes"), "my notes");
+        assert_eq!(NativeFs::normalize_file_id("my notes"), "my notes");
     }
 
     #[test]
     fn normalize_empty_string_passthrough() {
-        let fs = NativeFs;
-        assert_eq!(fs.normalize_file_id(""), "");
+        assert_eq!(NativeFs::normalize_file_id(""), "");
     }
 
     #[test]
     fn normalize_whitespace_only_passthrough() {
-        let fs = NativeFs;
-        assert_eq!(fs.normalize_file_id("   "), "   ");
+        assert_eq!(NativeFs::normalize_file_id("   "), "   ");
     }
 
     #[test]
     fn normalize_tab_separated_tokens() {
-        let fs = NativeFs;
         // split_whitespace splits on tabs too — two alphanumeric tokens
         // are treated as CMS-style, matching the current behavior.
-        assert_eq!(fs.normalize_file_id("PROFILE\tEXEC"), "profile.exec");
+        assert_eq!(NativeFs::normalize_file_id("PROFILE\tEXEC"), "profile.exec");
+    }
+
+    #[test]
+    fn normalize_invalid_filemode_passthrough() {
+        // Third token too long for a CMS filemode (max 2 chars: letter + digit)
+        assert_eq!(
+            NativeFs::normalize_file_id("NOTES TXT ABCDE"),
+            "NOTES TXT ABCDE"
+        );
+    }
+
+    #[test]
+    fn normalize_valid_filemode_letter_only() {
+        assert_eq!(NativeFs::normalize_file_id("NOTES TXT B"), "notes.txt");
+    }
+
+    #[test]
+    fn normalize_valid_filemode_letter_digit() {
+        assert_eq!(NativeFs::normalize_file_id("NOTES TXT A1"), "notes.txt");
     }
 
     #[test]
     fn normalize_token_exceeding_eight_chars_passthrough() {
-        let fs = NativeFs;
         // CMS filenames are limited to 8 chars; longer tokens pass through
         assert_eq!(
-            fs.normalize_file_id("LONGFILENAME EXEC"),
+            NativeFs::normalize_file_id("LONGFILENAME EXEC"),
             "LONGFILENAME EXEC"
         );
     }

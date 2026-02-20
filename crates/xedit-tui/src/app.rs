@@ -691,7 +691,7 @@ impl App {
         if self.cms_base_path.is_some() {
             return std::borrow::Cow::Borrowed(file_id);
         }
-        xedit_core::filesystem::NativeFs.normalize_file_id(file_id)
+        xedit_core::filesystem::NativeFs::normalize_file_id(file_id)
     }
 
     /// Open a file in the ring (or cycle/switch if already open)
@@ -783,7 +783,8 @@ impl App {
                         self.input_text.clear();
                     }
                     CommandAction::Transfer(target, count) => {
-                        match self.ring.execute_transfer(&target, count) {
+                        let normalized_target = self.normalize_file_id(&target);
+                        match self.ring.execute_transfer(&normalized_target, count) {
                             Ok(msg) => self.editor_mut().set_message(msg),
                             Err(e) => self.editor_mut().set_message(e.to_string()),
                         }
