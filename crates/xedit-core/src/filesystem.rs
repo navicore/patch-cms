@@ -83,10 +83,15 @@ impl FileSystem for NativeFs {
         let tokens: Vec<&str> = input.split_whitespace().take(4).collect();
         let count = tokens.len();
 
-        // CMS-style: 2-3 tokens, each 1-8 alphanumeric chars (no path separators).
+        // CMS-style: 2-3 tokens, each 1-8 alphanumeric chars with at least one
+        // uppercase letter.  The uppercase requirement avoids false positives on
+        // native filenames with spaces (e.g. "my notes"); lowercase users can
+        // always use the dotted form ("profile.exec").
         if (count == 2 || count == 3)
             && tokens.iter().all(|t| {
-                !t.is_empty() && t.len() <= 8 && t.chars().all(|c| c.is_ascii_alphanumeric())
+                t.len() <= 8
+                    && t.chars().all(|c| c.is_ascii_alphanumeric())
+                    && t.chars().any(|c| c.is_ascii_uppercase())
             })
         {
             // tokens[0] = filename, tokens[1] = filetype, tokens[2..] = filemode (ignored)
@@ -236,6 +241,21 @@ mod tests {
             fs.normalize_file_id("C:\\Users\\file txt"),
             "C:\\Users\\file txt"
         );
+    }
+
+    #[test]
+    fn normalize_short_backslash_path_passthrough() {
+        let fs = NativeFs;
+        // 2 tokens, both short — but "C:\a" contains non-alphanumeric chars
+        assert_eq!(fs.normalize_file_id("C:\\a b"), "C:\\a b");
+    }
+
+    #[test]
+    fn normalize_lowercase_two_tokens_passthrough() {
+        let fs = NativeFs;
+        // All-lowercase tokens are not treated as CMS filespecs to avoid
+        // false positives on native filenames with spaces.
+        assert_eq!(fs.normalize_file_id("my notes"), "my notes");
     }
 
     #[test]

@@ -685,6 +685,12 @@ impl App {
     /// In CMS mode, filespecs pass through unchanged (CmsFs handles them
     /// natively).  In native mode, CMS-style input is converted via
     /// `NativeFs` (zero-sized, no I/O).
+    ///
+    /// Note: this intentionally bypasses `create_fs()` / trait dispatch to
+    /// avoid the heap allocation and potential I/O of constructing a full
+    /// `Box<dyn FileSystem>`.  This is correct because `create_fs()` returns
+    /// `NativeFs` in non-CMS mode.  If a future FS adapter overrides
+    /// `normalize_file_id`, this call site must be updated to match.
     fn normalize_file_id<'a>(&self, file_id: &'a str) -> std::borrow::Cow<'a, str> {
         #[cfg(feature = "cms")]
         if self.cms_base_path.is_some() {
