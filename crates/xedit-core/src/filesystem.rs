@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::path::Path;
 
 use crate::error::{Result, XeditError};
@@ -26,29 +27,16 @@ pub trait FileSystem {
 
     /// Normalize user input into the filesystem's canonical file identifier.
     ///
-    /// The default implementation is a pass-through.  `NativeFs` overrides
-    /// this to detect CMS-style space-separated filespecs (e.g.
+    /// The default implementation is a zero-cost pass-through.  `NativeFs`
+    /// overrides this to detect CMS-style space-separated filespecs (e.g.
     /// `"PROFILE EXEC A"`) and convert them to `"profile.exec"`.
-    fn normalize_file_id(&self, input: &str) -> String {
-        input.to_string()
+    fn normalize_file_id<'a>(&self, input: &'a str) -> Cow<'a, str> {
+        Cow::Borrowed(input)
     }
 }
 
 /// Default filesystem implementation that delegates to `std::fs`.
 pub struct NativeFs;
-
-impl NativeFs {
-    /// Returns `true` when the input looks like a CMS-style filespec:
-    /// 2 or 3 space-separated tokens, none containing `/`, `\`, or `.`.
-    fn is_cms_style(input: &str) -> bool {
-        let tokens: Vec<&str> = input.split_whitespace().collect();
-        let count = tokens.len();
-        (count == 2 || count == 3)
-            && tokens
-                .iter()
-                .all(|t| !t.contains('/') && !t.contains('\\') && !t.contains('.'))
-    }
-}
 
 impl FileSystem for NativeFs {
     fn read_file(&self, file_id: &str) -> Result<String> {
@@ -90,13 +78,25 @@ impl FileSystem for NativeFs {
         })
     }
 
-    fn normalize_file_id(&self, input: &str) -> String {
-        if Self::is_cms_style(input) {
-            let tokens: Vec<&str> = input.split_whitespace().collect();
-            // tokens[0] = filename, tokens[1] = filetype, tokens[2..] ignored
-            format!("{}.{}", tokens[0].to_lowercase(), tokens[1].to_lowercase())
+    fn normalize_file_id<'a>(&self, input: &'a str) -> Cow<'a, str> {
+        // Tokenize once, bounded to 4 elements regardless of input length.
+        let tokens: Vec<&str> = input.split_whitespace().take(4).collect();
+        let count = tokens.len();
+
+        // CMS-style: 2-3 tokens, each 1-8 alphanumeric chars (no path separators).
+        if (count == 2 || count == 3)
+            && tokens.iter().all(|t| {
+                !t.is_empty() && t.len() <= 8 && t.chars().all(|c| c.is_ascii_alphanumeric())
+            })
+        {
+            // tokens[0] = filename, tokens[1] = filetype, tokens[2..] = filemode (ignored)
+            Cow::Owned(format!(
+                "{}.{}",
+                tokens[0].to_lowercase(),
+                tokens[1].to_lowercase()
+            ))
         } else {
-            input.to_string()
+            Cow::Borrowed(input)
         }
     }
 }
@@ -235,6 +235,36 @@ mod tests {
         assert_eq!(
             fs.normalize_file_id("C:\\Users\\file txt"),
             "C:\\Users\\file txt"
+        );
+    }
+
+    #[test]
+    fn normalize_empty_string_passthrough() {
+        let fs = NativeFs;
+        assert_eq!(fs.normalize_file_id(""), "");
+    }
+
+    #[test]
+    fn normalize_whitespace_only_passthrough() {
+        let fs = NativeFs;
+        assert_eq!(fs.normalize_file_id("   "), "   ");
+    }
+
+    #[test]
+    fn normalize_tab_separated_tokens() {
+        let fs = NativeFs;
+        // split_whitespace splits on tabs too — two alphanumeric tokens
+        // are treated as CMS-style, matching the current behavior.
+        assert_eq!(fs.normalize_file_id("PROFILE\tEXEC"), "profile.exec");
+    }
+
+    #[test]
+    fn normalize_token_exceeding_eight_chars_passthrough() {
+        let fs = NativeFs;
+        // CMS filenames are limited to 8 chars; longer tokens pass through
+        assert_eq!(
+            fs.normalize_file_id("LONGFILENAME EXEC"),
+            "LONGFILENAME EXEC"
         );
     }
 }

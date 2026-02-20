@@ -9,6 +9,7 @@ use ratatui::Terminal;
 
 use xedit_core::command::{parse_command, Command, CommandAction};
 use xedit_core::editor::{CursorRequest, Editor};
+use xedit_core::filesystem::FileSystem;
 use xedit_core::prefix::PrefixCommand;
 use xedit_core::ring::Ring;
 
@@ -679,6 +680,19 @@ impl App {
         self.focus = CursorFocus::CommandLine;
     }
 
+    /// Normalize a file identifier without creating a full filesystem.
+    ///
+    /// In CMS mode, filespecs pass through unchanged (CmsFs handles them
+    /// natively).  In native mode, CMS-style input is converted via
+    /// `NativeFs` (zero-sized, no I/O).
+    fn normalize_file_id<'a>(&self, file_id: &'a str) -> std::borrow::Cow<'a, str> {
+        #[cfg(feature = "cms")]
+        if self.cms_base_path.is_some() {
+            return std::borrow::Cow::Borrowed(file_id);
+        }
+        xedit_core::filesystem::NativeFs.normalize_file_id(file_id)
+    }
+
     /// Open a file in the ring (or cycle/switch if already open)
     fn open_file_in_ring(&mut self, file_id: &str) {
         if file_id.is_empty() {
@@ -696,8 +710,8 @@ impl App {
         }
 
         // Normalize CMS-style filespecs (e.g. "PROFILE EXEC A" → "profile.exec")
-        let fs = self.create_fs();
-        let normalized = fs.normalize_file_id(file_id);
+        // without creating an expensive filesystem object.
+        let normalized = self.normalize_file_id(file_id);
 
         // Check if file already in ring
         if self.ring.switch_to_file(&normalized) {
@@ -707,7 +721,8 @@ impl App {
             return;
         }
 
-        // Open new file
+        // Only create the filesystem when we actually need to open a new file
+        let fs = self.create_fs();
         if let Err(e) = self.ring.add_file_with_fs(&normalized, fs) {
             self.editor_mut().set_message(e.to_string());
             return;
