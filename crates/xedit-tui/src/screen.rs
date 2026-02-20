@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -185,22 +186,23 @@ fn make_scale_line(width: usize) -> Line<'static> {
 
 /// Extract the verify-visible columns from a line of text.
 /// `start` and `end` are 1-based column positions.
-fn apply_verify_filter(text: &str, start: usize, end: usize) -> String {
-    // Fast path: if verify covers the whole line, avoid allocation.
+/// Returns `Cow::Borrowed` when the full line is visible (zero allocation).
+fn apply_verify_filter<'a>(text: &'a str, start: usize, end: usize) -> Cow<'a, str> {
+    // Fast path: if verify covers the whole line, borrow without allocation.
     // Use text.len() (byte length, O(1)) as a conservative check:
     // for UTF-8, byte_len >= char_count, so end >= byte_len implies
     // end >= char_count. Multi-byte text where byte_len > end >= char_count
     // safely falls through to the slow path.
     if start <= 1 && end >= text.len() {
-        return text.to_string();
+        return Cow::Borrowed(text);
     }
     let chars: Vec<char> = text.chars().collect();
     let s = start.saturating_sub(1).min(chars.len());
     let e = end.min(chars.len());
     if s >= e {
-        String::new()
+        Cow::Owned(String::new())
     } else {
-        chars[s..e].iter().collect()
+        Cow::Owned(chars[s..e].iter().collect())
     }
 }
 
@@ -683,6 +685,10 @@ fn render_file_area(
                     lines.push(make_empty_row(width));
                 }
             }
+            // Note: VERIFY in hex mode filters by code-point count, not byte
+            // count. For multi-byte chars the hex ruler and text ruler may
+            // disagree about column alignment. This matches XEDIT's original
+            // code-point-oriented design (EBCDIC was single-byte).
             RenderRow::HexHigh { line_num } => {
                 let text = editor.buffer().line_text(*line_num).unwrap_or("");
                 let filtered = apply_verify_filter(text, verify_start, verify_end);

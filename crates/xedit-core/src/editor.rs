@@ -1007,10 +1007,21 @@ impl Editor {
                 }
                 let zone_chars = &chars[z_start..z_end];
 
-                let haystack_chars: Vec<char> = if self.case_respect {
-                    zone_chars.to_vec()
+                // Build haystack and (for case-insensitive) an index map
+                // from haystack position → zone char index.
+                let (haystack_chars, hc_to_zc) = if self.case_respect {
+                    // 1:1 mapping — no expansion
+                    (zone_chars.to_vec(), Vec::new())
                 } else {
-                    zone_chars.iter().flat_map(|c| c.to_uppercase()).collect()
+                    let mut hc = Vec::new();
+                    let mut map = Vec::new();
+                    for (zi, zc) in zone_chars.iter().enumerate() {
+                        for uc in zc.to_uppercase() {
+                            hc.push(uc);
+                            map.push(zi);
+                        }
+                    }
+                    (hc, map)
                 };
 
                 // Find needle in haystack at char level
@@ -1019,34 +1030,15 @@ impl Editor {
                     .position(|w| w == needle_chars.as_slice());
 
                 if let Some(zcp) = zone_char_pos {
-                    // Map haystack_chars index back to zone_chars index.
+                    // Map haystack position back to zone char index + length.
                     let (zone_idx, match_zone_len) = if self.case_respect {
-                        // Case-sensitive: haystack is a 1:1 copy of zone_chars,
-                        // so positions map directly — no expansion to account for.
+                        // Case-sensitive: positions map directly.
                         (zcp, needle_chars.len())
                     } else {
-                        // Case-insensitive: each zone_char maps to 1+ haystack
-                        // chars via to_uppercase (e.g. 'ß' → ['S','S']).
-                        let mut h_idx = 0;
-                        let mut zi_start = 0;
-                        let match_end = zcp + needle_chars.len();
-                        let mut mzl = 0;
-                        let mut found_start = false;
-                        for (zi, zc) in zone_chars.iter().enumerate() {
-                            let expand = zc.to_uppercase().count();
-                            if !found_start && h_idx + expand > zcp {
-                                zi_start = zi;
-                                found_start = true;
-                            }
-                            if found_start {
-                                mzl += 1;
-                                if h_idx + expand >= match_end {
-                                    break;
-                                }
-                            }
-                            h_idx += expand;
-                        }
-                        (zi_start, mzl)
+                        // Use explicit index map for unambiguous back-mapping.
+                        let zi_start = hc_to_zc[zcp];
+                        let zi_end = hc_to_zc[zcp + needle_chars.len() - 1] + 1;
+                        (zi_start, zi_end - zi_start)
                     };
                     let abs_char_pos = z_start + zone_idx;
                     // Build new text: prefix + replacement + suffix
@@ -1316,11 +1308,11 @@ impl Editor {
             ));
         }
         let zone_start = col1.unwrap_or(self.zone_left);
-        let zone_end = col2.unwrap_or(self.zone_right);
-        if zone_start > zone_end {
+        let raw_zone_end = col2.unwrap_or(self.zone_right);
+        if zone_start > raw_zone_end {
             return Err(XeditError::InvalidCommand(format!(
                 "COMPRESS: col1 ({}) exceeds zone end ({})",
-                zone_start, zone_end
+                zone_start, raw_zone_end
             )));
         }
         let original = self
@@ -1328,6 +1320,8 @@ impl Editor {
             .line_text(self.current_line)
             .unwrap_or("")
             .to_string();
+        // Clamp zone_end to actual line length for safety
+        let zone_end = raw_zone_end.min(original.chars().count());
         let result = compress_line(&original, zone_start, zone_end, &self.tab_stops);
         if result != original {
             self.snapshot_for_undo();
@@ -1349,11 +1343,11 @@ impl Editor {
             return Err(XeditError::InvalidCommand("No line to expand".to_string()));
         }
         let zone_start = col1.unwrap_or(self.zone_left);
-        let zone_end = col2.unwrap_or(self.zone_right);
-        if zone_start > zone_end {
+        let raw_zone_end = col2.unwrap_or(self.zone_right);
+        if zone_start > raw_zone_end {
             return Err(XeditError::InvalidCommand(format!(
                 "EXPAND: col1 ({}) exceeds zone end ({})",
-                zone_start, zone_end
+                zone_start, raw_zone_end
             )));
         }
         let original = self
@@ -1361,6 +1355,8 @@ impl Editor {
             .line_text(self.current_line)
             .unwrap_or("")
             .to_string();
+        // Clamp zone_end to actual line length for safety
+        let zone_end = raw_zone_end.min(original.chars().count());
         let result = expand_line(&original, zone_start, zone_end, &self.tab_stops);
         if result != original {
             self.snapshot_for_undo();
@@ -3508,6 +3504,20 @@ if ftype.1 = 'RS' then
         })
         .unwrap();
         assert_eq!(ed.buffer().line_text(1), Some("hello EARTH"));
+    }
+
+    #[test]
+    fn locate_zone_boundary_non_ascii() {
+        // "café world" — zone 1-3 = "caf", 'é' at code-point 4 is outside
+        let mut ed = editor_with_lines(&["café world"]);
+        ed.current_line = 0;
+        ed.execute(&Command::Set(SetCommand::Zone(1, 3))).unwrap();
+        // "caf" is in zone
+        let result = ed.execute(&Command::Locate(Target::StringForward("caf".into())));
+        assert!(result.is_ok());
+        // "é" at code-point 4 is outside zone
+        let result = ed.execute(&Command::Locate(Target::StringForward("é".into())));
+        assert!(result.is_err());
     }
 
     // -- TABLINE tests --
