@@ -786,6 +786,9 @@ impl App {
                         // Safe to normalize: Transfer targets are always file IDs
                         // (ring entries). Non-file special targets would need to be
                         // distinguished at the parse_command level if added later.
+                        // Note: ring lookup is by exact string match, so a file
+                        // opened via absolute path (e.g. "/home/user/profile.exec")
+                        // won't match a CMS-style target ("PROFILE EXEC").
                         let normalized_target = self.normalize_file_id(&target);
                         match self.ring.execute_transfer(&normalized_target, count) {
                             Ok(msg) => self.editor_mut().set_message(msg),

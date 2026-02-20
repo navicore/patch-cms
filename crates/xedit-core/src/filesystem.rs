@@ -42,7 +42,9 @@ impl NativeFs {
     /// `"A"`, `"A1"`).  Mixed-case and lowercase inputs pass through to avoid
     /// false positives on native filenames with spaces.
     pub fn normalize_file_id(input: &str) -> Cow<'_, str> {
-        // Tokenize on ASCII space only (CMS delimiter), bounded to 4 elements.
+        // Tokenize on ASCII space only (CMS delimiter).
+        // Collect at most 4 non-empty tokens; avoids allocating beyond what
+        // we need to classify (the 4th token triggers the >3 early return).
         let tokens: Vec<&str> = input.split(' ').filter(|s| !s.is_empty()).take(4).collect();
         let count = tokens.len();
 
@@ -52,6 +54,9 @@ impl NativeFs {
 
         // Filename and filetype: 1-8 uppercase alphanumeric chars, starting
         // with a letter (CMS identifiers cannot begin with a digit).
+        // Note: CMS also permits $, #, @ in identifiers, but we intentionally
+        // exclude them here to reduce false positives on native filenames
+        // containing those characters.
         let is_cms_token = |t: &str| {
             !t.is_empty()
                 && t.len() <= 8
@@ -64,12 +69,17 @@ impl NativeFs {
             return Cow::Borrowed(input);
         }
 
-        // Filemode (if present): letter optionally followed by a digit (e.g. "A", "A1").
+        // Filemode (if present): letter optionally followed by digit 0-6
+        // (CMS filemodes only permit 0-6; 7-9 are invalid per filespec.rs).
         if count == 3 {
             let fm = tokens[2];
             let valid_filemode = match fm.len() {
                 1 => fm.as_bytes()[0].is_ascii_uppercase(),
-                2 => fm.as_bytes()[0].is_ascii_uppercase() && fm.as_bytes()[1].is_ascii_digit(),
+                2 => {
+                    fm.as_bytes()[0].is_ascii_uppercase()
+                        && fm.as_bytes()[1].is_ascii_digit()
+                        && fm.as_bytes()[1] <= b'6'
+                }
                 _ => false,
             };
             if !valid_filemode {
@@ -334,6 +344,25 @@ mod tests {
     #[test]
     fn normalize_valid_filemode_letter_digit() {
         assert_eq!(NativeFs::normalize_file_id("NOTES TXT A1"), "notes.txt");
+    }
+
+    #[test]
+    fn normalize_filemode_digit_7_passthrough() {
+        // CMS filemodes only permit digits 0-6; 7-9 are invalid
+        assert_eq!(
+            NativeFs::normalize_file_id("PROFILE EXEC A7"),
+            "PROFILE EXEC A7"
+        );
+    }
+
+    #[test]
+    fn normalize_special_chars_passthrough() {
+        // CMS allows $, #, @ in identifiers but we intentionally exclude them
+        // to reduce false positives on native filenames
+        assert_eq!(
+            NativeFs::normalize_file_id("MY#INIT EXEC A"),
+            "MY#INIT EXEC A"
+        );
     }
 
     #[test]
