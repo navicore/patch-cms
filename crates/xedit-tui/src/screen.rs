@@ -188,7 +188,8 @@ fn make_scale_line(width: usize) -> Line<'static> {
 /// `start` and `end` are 1-based column positions.
 /// Returns `Cow::Borrowed` when the full line is visible (zero allocation).
 fn apply_verify_filter<'a>(text: &'a str, start: usize, end: usize) -> Cow<'a, str> {
-    // O(1) byte-length fast path: for ASCII, byte_len == char_count
+    // O(1) conservative fast path: since byte_len >= char_count for all
+    // UTF-8, end >= byte_len implies end >= char_count — safe for any text.
     if start <= 1 && end >= text.len() {
         return Cow::Borrowed(text);
     }

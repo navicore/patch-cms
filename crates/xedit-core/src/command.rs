@@ -823,38 +823,44 @@ fn parse_set_args(args: &str) -> Result<Command, String> {
         }
     } else if matches_abbrev(&subcmd_upper, "ZONE", 2) {
         if subargs.is_empty() {
-            return Err("SET ZONE requires at least one column number".to_string());
-        }
-        let (first_str, rest) = split_first_word(subargs);
-        let first = first_str
-            .parse::<usize>()
-            .map_err(|_| format!("SET ZONE: invalid column: {}", first_str))?;
-        if first == 0 {
-            return Err("SET ZONE: column must be at least 1".to_string());
-        }
-        if rest.is_empty() {
-            Err(
-                "SET ZONE requires two operands (left right); use SET ZONE n n for a single column"
-                    .to_string(),
-            )
+            // No args: reset zone to default (1 to *)
+            Ok(Command::Set(SetCommand::Zone(1, usize::MAX)))
         } else {
-            let (second_str, trailing) = split_first_word(rest);
-            if !trailing.is_empty() {
-                return Err(format!("SET ZONE: unexpected operand: {}", trailing));
-            }
-            let second = second_str
+            let (first_str, rest) = split_first_word(subargs);
+            let first = first_str
                 .parse::<usize>()
-                .map_err(|_| format!("SET ZONE: invalid column: {}", second_str))?;
-            if second == 0 {
+                .map_err(|_| format!("SET ZONE: invalid column: {}", first_str))?;
+            if first == 0 {
                 return Err("SET ZONE: column must be at least 1".to_string());
             }
-            if second < first {
-                return Err(format!(
-                    "SET ZONE: right ({}) must be >= left ({})",
-                    second, first
-                ));
+            if rest.is_empty() {
+                // Single arg: SET ZONE n → zone from column n to end of record
+                Ok(Command::Set(SetCommand::Zone(first, usize::MAX)))
+            } else {
+                let (second_str, trailing) = split_first_word(rest);
+                if !trailing.is_empty() {
+                    return Err(format!("SET ZONE: unexpected operand: {}", trailing));
+                }
+                // Accept * as unlimited (end of record)
+                let second = if second_str == "*" {
+                    usize::MAX
+                } else {
+                    let v = second_str
+                        .parse::<usize>()
+                        .map_err(|_| format!("SET ZONE: invalid column: {}", second_str))?;
+                    if v == 0 {
+                        return Err("SET ZONE: column must be at least 1".to_string());
+                    }
+                    v
+                };
+                if second < first {
+                    return Err(format!(
+                        "SET ZONE: right ({}) must be >= left ({})",
+                        second, first
+                    ));
+                }
+                Ok(Command::Set(SetCommand::Zone(first, second)))
             }
-            Ok(Command::Set(SetCommand::Zone(first, second)))
         }
     } else if matches_abbrev(&subcmd_upper, "VERIFY", 2) {
         if subargs.is_empty() {
@@ -1906,9 +1912,30 @@ mod tests {
     }
 
     #[test]
-    fn parse_set_zone_single_arg_errors() {
-        // Single arg is rejected — IBM XEDIT requires two operands
-        assert!(parse_command("set zo 40").is_err());
+    fn parse_set_zone_single_arg() {
+        // Single arg: SET ZONE n → zone from column n to end of record
+        match parse_command("set zo 5").unwrap() {
+            Command::Set(SetCommand::Zone(5, right)) => assert_eq!(right, usize::MAX),
+            other => panic!("Expected Set(Zone(5, MAX)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_zone_no_args_resets() {
+        // No args: reset to default (1 to *)
+        match parse_command("set zo").unwrap() {
+            Command::Set(SetCommand::Zone(1, right)) => assert_eq!(right, usize::MAX),
+            other => panic!("Expected Set(Zone(1, MAX)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_zone_star_right() {
+        // Accept * as unlimited right boundary
+        match parse_command("set zo 1 *").unwrap() {
+            Command::Set(SetCommand::Zone(1, right)) => assert_eq!(right, usize::MAX),
+            other => panic!("Expected Set(Zone(1, MAX)), got {:?}", other),
+        }
     }
 
     #[test]
@@ -1927,11 +1954,6 @@ mod tests {
     #[test]
     fn parse_set_zone_zero_errors() {
         assert!(parse_command("set zo 0").is_err());
-    }
-
-    #[test]
-    fn parse_set_zone_no_args_errors() {
-        assert!(parse_command("set zo").is_err());
     }
 
     #[test]

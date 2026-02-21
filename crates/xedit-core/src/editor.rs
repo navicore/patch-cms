@@ -912,6 +912,10 @@ impl Editor {
         let buffer = &self.buffer;
         let resolved = target.resolve(self.current_line, buffer.len(), case_respect, &|n| {
             buffer.line_text(n).map(|text| {
+                // Fast path: default zone covers the whole line
+                if zone_left <= 1 && zone_right == usize::MAX {
+                    return String::from(text);
+                }
                 let chars: Vec<char> = text.chars().collect();
                 let start = zone_left.saturating_sub(1).min(chars.len());
                 let end = zone_right.min(chars.len());
@@ -963,6 +967,9 @@ impl Editor {
             let buffer = &self.buffer;
             t.resolve(self.current_line, buffer.len(), case_respect, &|n| {
                 buffer.line_text(n).map(|text| {
+                    if zone_left <= 1 && zone_right == usize::MAX {
+                        return String::from(text);
+                    }
                     let chars: Vec<char> = text.chars().collect();
                     let start = zone_left.saturating_sub(1).min(chars.len());
                     let end = zone_right.min(chars.len());
@@ -3711,5 +3718,31 @@ if ftype.1 = 'RS' then
         // No undo snapshot should have been pushed
         let undo_result = ed.execute(&Command::Undo);
         assert!(undo_result.is_err()); // nothing to undo
+    }
+
+    #[test]
+    fn compress_with_default_unlimited_zone() {
+        // Default zone_right is usize::MAX — COMPRESS should work without panic
+        let mut ed = editor_with_lines(&["hello   world"]);
+        ed.current_line = 1;
+        ed.execute(&Command::Set(SetCommand::Tabs(vec![1, 9])))
+            .unwrap();
+        // No explicit SET ZONE — uses default unlimited zone
+        ed.execute(&Command::Compress(None, None)).unwrap();
+        let text = ed.buffer().line_text(1).unwrap();
+        assert!(text.contains('\t'));
+    }
+
+    #[test]
+    fn expand_with_default_unlimited_zone() {
+        // Default zone_right is usize::MAX — EXPAND should work without panic
+        let mut ed = editor_with_lines(&["hello\tworld"]);
+        ed.current_line = 1;
+        ed.execute(&Command::Set(SetCommand::Tabs(vec![1, 9])))
+            .unwrap();
+        // No explicit SET ZONE — uses default unlimited zone
+        ed.execute(&Command::Expand(None, None)).unwrap();
+        let text = ed.buffer().line_text(1).unwrap();
+        assert!(!text.contains('\t'));
     }
 }
