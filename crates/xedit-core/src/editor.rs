@@ -255,6 +255,14 @@ impl Editor {
         self.show_tabline
     }
 
+    pub fn zone_left(&self) -> usize {
+        self.zone_left
+    }
+
+    pub fn zone_right(&self) -> usize {
+        self.zone_right
+    }
+
     pub fn case_respect(&self) -> bool {
         self.case_respect
     }
@@ -1339,6 +1347,12 @@ impl Editor {
             .to_string();
         // Clamp zone_end to actual line length for safety
         let zone_end = raw_zone_end.min(original.chars().count());
+        if zone_start > zone_end {
+            return Err(XeditError::InvalidCommand(format!(
+                "COMPRESS: col1 ({}) exceeds line length ({})",
+                zone_start, zone_end
+            )));
+        }
         let result = compress_line(&original, zone_start, zone_end, &self.tab_stops);
         if result != original {
             self.snapshot_for_undo();
@@ -1374,6 +1388,12 @@ impl Editor {
             .to_string();
         // Clamp zone_end to actual line length for safety
         let zone_end = raw_zone_end.min(original.chars().count());
+        if zone_start > zone_end {
+            return Err(XeditError::InvalidCommand(format!(
+                "EXPAND: col1 ({}) exceeds line length ({})",
+                zone_start, zone_end
+            )));
+        }
         let result = expand_line(&original, zone_start, zone_end, &self.tab_stops);
         if result != original {
             self.snapshot_for_undo();
@@ -3771,5 +3791,23 @@ if ftype.1 = 'RS' then
         ed.execute(&Command::Expand(None, None)).unwrap();
         let text = ed.buffer().line_text(1).unwrap();
         assert!(!text.contains('\t'));
+    }
+
+    #[test]
+    fn compress_col1_exceeds_line_length_unlimited_zone() {
+        // Default unlimited zone — col1=80 on a short line should error
+        let mut ed = editor_with_lines(&["hi"]);
+        ed.current_line = 1;
+        let result = ed.execute(&Command::Compress(Some(80), None));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn expand_col1_exceeds_line_length_unlimited_zone() {
+        // Default unlimited zone — col1=80 on a short line should error
+        let mut ed = editor_with_lines(&["hi"]);
+        ed.current_line = 1;
+        let result = ed.execute(&Command::Expand(Some(80), None));
+        assert!(result.is_err());
     }
 }
