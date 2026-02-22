@@ -322,9 +322,12 @@ fn populate_extract_vars(env: &mut Environment, editor: &Editor) {
     );
 
     // ZONE: zone boundaries (left and right)
+    // EXTRACT variables must be numeric for REXX arithmetic.
+    // When zone_right is unlimited, use trunc() (matches IBM XEDIT
+    // EXTRACT /ZONE/ behavior). QUERY ZONE uses "*" for display only.
     let zone_left = editor.zone_left().to_string();
     let zone_right = if editor.zone_right() == usize::MAX {
-        "*".to_string()
+        editor.trunc().to_string()
     } else {
         editor.zone_right().to_string()
     };
