@@ -1018,6 +1018,11 @@ impl Editor {
             }
             if let Some(line) = self.buffer.get(line_num) {
                 let text = line.text().to_string();
+                // Cheap byte-length pre-check: UTF-8 byte_len >= char_count,
+                // so if byte_len < zone_left the line can't reach the zone.
+                if zone_left.saturating_sub(1) >= text.len() {
+                    continue;
+                }
                 let chars: Vec<char> = text.chars().collect();
                 let z_start = zone_left.saturating_sub(1).min(chars.len());
                 let z_end = zone_right.min(chars.len());
@@ -1348,10 +1353,8 @@ impl Editor {
         // Clamp zone_end to actual line length for safety
         let zone_end = raw_zone_end.min(original.chars().count());
         if zone_start > zone_end {
-            return Err(XeditError::InvalidCommand(format!(
-                "COMPRESS: col1 ({}) exceeds line length ({})",
-                zone_start, zone_end
-            )));
+            // Line does not reach zone_start — nothing to do
+            return Ok(CommandResult::ok());
         }
         let result = compress_line(&original, zone_start, zone_end, &self.tab_stops);
         if result != original {
@@ -1389,10 +1392,8 @@ impl Editor {
         // Clamp zone_end to actual line length for safety
         let zone_end = raw_zone_end.min(original.chars().count());
         if zone_start > zone_end {
-            return Err(XeditError::InvalidCommand(format!(
-                "EXPAND: col1 ({}) exceeds line length ({})",
-                zone_start, zone_end
-            )));
+            // Line does not reach zone_start — nothing to do
+            return Ok(CommandResult::ok());
         }
         let result = expand_line(&original, zone_start, zone_end, &self.tab_stops);
         if result != original {
@@ -3795,19 +3796,39 @@ if ftype.1 = 'RS' then
 
     #[test]
     fn compress_col1_exceeds_line_length_unlimited_zone() {
-        // Default unlimited zone — col1=80 on a short line should error
+        // Default unlimited zone — col1=80 on a short line is a no-op
         let mut ed = editor_with_lines(&["hi"]);
         ed.current_line = 1;
         let result = ed.execute(&Command::Compress(Some(80), None));
-        assert!(result.is_err());
+        assert!(result.is_ok());
+        assert_eq!(ed.buffer().line_text(1), Some("hi")); // unchanged
     }
 
     #[test]
     fn expand_col1_exceeds_line_length_unlimited_zone() {
-        // Default unlimited zone — col1=80 on a short line should error
+        // Default unlimited zone — col1=80 on a short line is a no-op
         let mut ed = editor_with_lines(&["hi"]);
         ed.current_line = 1;
         let result = ed.execute(&Command::Expand(Some(80), None));
-        assert!(result.is_err());
+        assert!(result.is_ok());
+        assert_eq!(ed.buffer().line_text(1), Some("hi")); // unchanged
+    }
+
+    #[test]
+    fn compress_empty_line_noop() {
+        // Empty line with default zone — should be a no-op, not an error
+        let mut ed = editor_with_lines(&[""]);
+        ed.current_line = 1;
+        let result = ed.execute(&Command::Compress(None, None));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn expand_empty_line_noop() {
+        // Empty line with default zone — should be a no-op, not an error
+        let mut ed = editor_with_lines(&[""]);
+        ed.current_line = 1;
+        let result = ed.execute(&Command::Expand(None, None));
+        assert!(result.is_ok());
     }
 }

@@ -823,7 +823,9 @@ fn parse_set_args(args: &str) -> Result<Command, String> {
         }
     } else if matches_abbrev(&subcmd_upper, "ZONE", 2) {
         if subargs.is_empty() {
-            // No args: reset zone to default (1 to *)
+            // Extension: bare SET ZONE resets to default (1 to *).
+            // IBM XEDIT requires at least one operand; we accept no-arg
+            // as a convenience reset, similar to SET TABS OFF.
             Ok(Command::Set(SetCommand::Zone(1, usize::MAX)))
         } else {
             let (first_str, rest) = split_first_word(subargs);
