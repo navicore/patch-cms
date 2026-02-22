@@ -950,6 +950,10 @@ impl Editor {
         target: Option<&Target>,
         count: Option<usize>,
     ) -> Result<CommandResult> {
+        // Note: `count` limits total changes across all lines (at most one
+        // replacement per line). IBM XEDIT treats count as a per-line limit,
+        // allowing multiple replacements within a single line. This is a
+        // deliberate simplification.
         if from.is_empty() {
             return Err(XeditError::InvalidCommand(
                 "CHANGE: search string cannot be empty".to_string(),
@@ -1034,8 +1038,14 @@ impl Editor {
                     }
                     haystack_chars
                         .windows(needle_chars.len())
-                        .position(|w| w == needle_chars.as_slice())
-                        .map(|zcp| {
+                        .enumerate()
+                        .find(|(p, w)| {
+                            // Match must start at a zone-char boundary, not
+                            // mid-expansion (e.g. reject matching inside ß→SS).
+                            let at_boundary = *p == 0 || hc_to_zc[*p] != hc_to_zc[p - 1];
+                            at_boundary && *w == needle_chars.as_slice()
+                        })
+                        .map(|(zcp, _)| {
                             let zi_start = hc_to_zc[zcp];
                             let zi_end = hc_to_zc[zcp + needle_chars.len() - 1] + 1;
                             (zi_start, zi_end - zi_start)
@@ -3585,6 +3595,23 @@ if ftype.1 = 'RS' then
         })
         .unwrap();
         assert_eq!(ed.buffer().line_text(1), Some("BEAN world"));
+    }
+
+    #[test]
+    fn change_case_insensitive_rejects_mid_expansion_match() {
+        // "ßa" uppercases to "SSA". Needle "SA" matches at haystack[1..3]
+        // but position 1 is mid-expansion of 'ß'. Should NOT match.
+        let mut ed = editor_with_lines(&["ßa"]);
+        ed.execute(&Command::Set(SetCommand::Case(CaseSetting::Ignore)))
+            .unwrap();
+        let result = ed.execute(&Command::Change {
+            from: "SA".into(),
+            to: "X".into(),
+            target: None,
+            count: None,
+        });
+        assert!(result.is_err(), "Should not match mid-expansion");
+        assert_eq!(ed.buffer().line_text(1), Some("ßa")); // unchanged
     }
 
     #[test]

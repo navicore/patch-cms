@@ -1957,6 +1957,16 @@ mod tests {
     }
 
     #[test]
+    fn parse_set_zone_zero_right_errors() {
+        assert!(parse_command("set zo 1 0").is_err());
+    }
+
+    #[test]
+    fn parse_set_zone_zero_left_two_arg_errors() {
+        assert!(parse_command("set zo 0 5").is_err());
+    }
+
+    #[test]
     fn parse_set_zone_trailing_args_errors() {
         assert!(parse_command("set zo 1 80 extra").is_err());
     }
@@ -1996,6 +2006,11 @@ mod tests {
     #[test]
     fn parse_set_verify_zero_errors() {
         assert!(parse_command("set ve 0").is_err());
+    }
+
+    #[test]
+    fn parse_set_verify_zero_right_errors() {
+        assert!(parse_command("set ve 1 0").is_err());
     }
 
     #[test]

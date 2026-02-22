@@ -193,12 +193,14 @@ fn apply_verify_filter<'a>(text: &'a str, start: usize, end: usize) -> Cow<'a, s
     if start <= 1 && end >= text.len() {
         return Cow::Borrowed(text);
     }
-    // Collect chars once — used for both the length check and slicing
-    let chars: Vec<char> = text.chars().collect();
-    // Char-count fast path for multi-byte text (no redundant traversal)
-    if start <= 1 && end >= chars.len() {
+    // Char-count check (one traversal, no allocation) before committing
+    // to a Vec<char>. Avoids allocating just to discard it.
+    let char_count = text.chars().count();
+    if start <= 1 && end >= char_count {
         return Cow::Borrowed(text);
     }
+    // Only allocate when we actually need to slice
+    let chars: Vec<char> = text.chars().collect();
     let s = start.saturating_sub(1).min(chars.len());
     let e = end.min(chars.len());
     if s >= e {
@@ -216,7 +218,7 @@ fn make_tabline(width: usize, tab_stops: &[usize], verify_start: usize) -> Line<
     let mut ruler = String::with_capacity(data_width);
 
     for col in 1..=data_width {
-        let file_col = verify_start + col - 1;
+        let file_col = verify_start.saturating_add(col - 1);
         // tab_stops is sorted (by SET TABS parser), so binary_search is O(log n)
         if tab_stops.binary_search(&file_col).is_ok() {
             ruler.push('T');
