@@ -10,12 +10,14 @@ use crate::spool_file::SpoolFile;
 pub trait SpoolBackend {
     /// Enqueue a file into the given device queue.
     /// Returns the assigned spool ID.
+    #[allow(clippy::too_many_arguments)]
     fn enqueue(
         &mut self,
         device: SpoolDevice,
         filename: &str,
         filetype: &str,
         origin_user: &str,
+        dest_user: &str,
         class: SpoolClass,
         data: &str,
     ) -> Result<u64>;
@@ -73,6 +75,7 @@ impl SpoolBackend for InMemoryBackend {
         filename: &str,
         filetype: &str,
         origin_user: &str,
+        dest_user: &str,
         class: SpoolClass,
         data: &str,
     ) -> Result<u64> {
@@ -80,6 +83,7 @@ impl SpoolBackend for InMemoryBackend {
         self.next_id += 1;
 
         let mut sf = SpoolFile::new(id, filename, filetype, origin_user, device);
+        sf.dest_user = dest_user.to_ascii_uppercase();
         sf.class = class;
         sf.records = data.lines().count();
 
@@ -174,6 +178,7 @@ mod tests {
                 "TEST",
                 "DATA",
                 "USER1",
+                "",
                 SpoolClass::default(),
                 "line1\nline2\n",
             )
@@ -202,6 +207,7 @@ mod tests {
                 "FILE1",
                 "DATA",
                 "USER1",
+                "",
                 SpoolClass('A'),
                 "data1",
             )
@@ -212,6 +218,7 @@ mod tests {
                 "FILE2",
                 "DATA",
                 "USER1",
+                "",
                 SpoolClass('B'),
                 "data2",
             )
@@ -236,6 +243,7 @@ mod tests {
                 "FILE1",
                 "DATA",
                 "USER1",
+                "",
                 SpoolClass::default(),
                 "data",
             )
@@ -262,6 +270,7 @@ mod tests {
                 "A",
                 "B",
                 "U",
+                "",
                 SpoolClass::default(),
                 "d",
             )
@@ -272,6 +281,7 @@ mod tests {
                 "C",
                 "D",
                 "U",
+                "",
                 SpoolClass::default(),
                 "d",
             )
@@ -289,6 +299,7 @@ mod tests {
                 "FILE1",
                 "DATA",
                 "USER1",
+                "",
                 SpoolClass::default(),
                 "content",
             )
@@ -314,6 +325,7 @@ mod tests {
                 "A",
                 "B",
                 "U",
+                "",
                 SpoolClass::default(),
                 "",
             )
@@ -324,6 +336,7 @@ mod tests {
                 "C",
                 "D",
                 "U",
+                "",
                 SpoolClass::default(),
                 "",
             )

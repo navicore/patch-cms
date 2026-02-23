@@ -8,6 +8,6 @@ pub mod spool_file;
 
 pub use backend::{InMemoryBackend, SpoolBackend};
 pub use device::{DeviceConfig, SpoolClass, SpoolDevice};
-pub use error::{SpoolError, Result};
+pub use error::{Result, SpoolError};
 pub use spool::{SpoolCommandResult, SpoolManager};
 pub use spool_file::SpoolFile;

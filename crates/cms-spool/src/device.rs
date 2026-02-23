@@ -38,9 +38,20 @@ impl SpoolClass {
     pub const ALL: SpoolClass = SpoolClass('*');
 
     /// Create a spool class from a character. Returns `None` if invalid.
+    /// Accepts A-Z and `*` (wildcard for queries).
     pub fn new(c: char) -> Option<Self> {
         let upper = c.to_ascii_uppercase();
         if upper == '*' || upper.is_ascii_uppercase() {
+            Some(SpoolClass(upper))
+        } else {
+            None
+        }
+    }
+
+    /// Create a spool class for storing on a file. Rejects `*` (wildcard).
+    pub fn for_file(c: char) -> Option<Self> {
+        let upper = c.to_ascii_uppercase();
+        if upper.is_ascii_uppercase() && upper != '*' {
             Some(SpoolClass(upper))
         } else {
             None
@@ -119,6 +130,14 @@ mod tests {
     fn spool_class_new_invalid() {
         assert_eq!(SpoolClass::new('1'), None);
         assert_eq!(SpoolClass::new(' '), None);
+    }
+
+    #[test]
+    fn spool_class_for_file_rejects_wildcard() {
+        assert!(SpoolClass::for_file('A').is_some());
+        assert!(SpoolClass::for_file('Z').is_some());
+        assert!(SpoolClass::for_file('*').is_none());
+        assert!(SpoolClass::for_file('1').is_none());
     }
 
     #[test]

@@ -166,7 +166,7 @@ fn parse_spool_device(parts: &[&str]) -> Option<SpoolCommand> {
             "CLASS" => {
                 i += 1;
                 if i < parts.len() {
-                    class = SpoolClass::new(parts[i].chars().next().unwrap_or('A'));
+                    class = SpoolClass::for_file(parts[i].chars().next().unwrap_or('A'));
                 }
             }
             "DEST" => {
@@ -366,17 +366,11 @@ pub fn execute_spool_command<B: SpoolBackend>(
         SpoolCommand::SendFile { .. } => {
             // SENDFILE requires external file I/O — the TUI layer handles this.
             // Return a sentinel that the TUI can detect.
-            SpoolCommandResult::error(
-                -1,
-                "SENDFILE must be handled by the TUI layer".to_string(),
-            )
+            SpoolCommandResult::error(-1, "SENDFILE must be handled by the TUI layer".to_string())
         }
         SpoolCommand::Receive { .. } => {
             // RECEIVE requires external file I/O — the TUI layer handles this.
-            SpoolCommandResult::error(
-                -1,
-                "RECEIVE must be handled by the TUI layer".to_string(),
-            )
+            SpoolCommandResult::error(-1, "RECEIVE must be handled by the TUI layer".to_string())
         }
         SpoolCommand::Purge { device, target } => match target {
             PurgeTarget::All => match manager.purge_all(*device, None) {
@@ -387,9 +381,7 @@ pub fn execute_spool_command<B: SpoolBackend>(
                 Err(e) => SpoolCommandResult::error(e.rc(), e.to_string()),
             },
             PurgeTarget::SpoolId(id) => match manager.purge_file(*device, *id) {
-                Ok(()) => {
-                    SpoolCommandResult::ok_with(vec![format!("File {} purged", id)])
-                }
+                Ok(()) => SpoolCommandResult::ok_with(vec![format!("File {} purged", id)]),
                 Err(e) => SpoolCommandResult::error(e.rc(), e.to_string()),
             },
         },
@@ -398,9 +390,8 @@ pub fn execute_spool_command<B: SpoolBackend>(
                 if files.is_empty() {
                     SpoolCommandResult::ok_with(vec![format!("No files in {}", device)])
                 } else {
-                    let mut msgs = vec![format!(
-                        "ORIGINID FILE     TYPE     CL RECS  HOLD DEST"
-                    )];
+                    let mut msgs =
+                        vec!["SPOOLID  FILE     TYPE     CL RECS  HOLD DEST".to_string()];
                     for f in &files {
                         msgs.push(f.summary());
                     }
@@ -695,7 +686,8 @@ mod tests {
     fn execute_query_empty() {
         let mgr = make_manager();
         let cmd = parse_spool_command("Q R").unwrap();
-        let result = execute_spool_command(&cmd, &mut SpoolManager::new(InMemoryBackend::new(), "U"));
+        let result =
+            execute_spool_command(&cmd, &mut SpoolManager::new(InMemoryBackend::new(), "U"));
         assert_eq!(result.rc, 0);
         assert!(result.messages[0].contains("No files"));
         let _ = mgr;
@@ -894,7 +886,7 @@ mod tests {
         let result = execute_spool_command(&cmd, &mut mgr);
         assert_eq!(result.rc, 0);
         assert!(result.messages.len() >= 2); // header + at least one entry
-        assert!(result.messages[0].contains("ORIGINID"));
+        assert!(result.messages[0].contains("SPOOLID"));
         assert!(result.messages[1].contains("TEST"));
     }
 

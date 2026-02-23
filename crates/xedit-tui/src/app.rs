@@ -881,11 +881,7 @@ impl App {
                 filetype,
                 filemode,
             } => {
-                return self.handle_receive(
-                    filename.as_deref(),
-                    filetype.as_deref(),
-                    *filemode,
-                );
+                return self.handle_receive(filename.as_deref(), filetype.as_deref(), *filemode);
             }
             _ => {}
         }
@@ -899,10 +895,11 @@ impl App {
                 result.messages.join(" | ")
             };
             self.editor_mut().set_message(msg);
-            true
         } else {
-            false
+            self.editor_mut()
+                .set_message("DMSSPL100I Spool not available");
         }
+        true
     }
 
     #[cfg(not(feature = "spool"))]
@@ -924,12 +921,12 @@ impl App {
 
         // Read file content from CMS filesystem
         let content = if let Some(ref mut proc) = self.cms_processor {
-            match proc.filesystem().read_file(
-                &cms_core::FileSpec::parse(&filespec).unwrap_or_else(|_| {
+            match proc
+                .filesystem()
+                .read_file(&cms_core::FileSpec::parse(&filespec).unwrap_or_else(|_| {
                     // Fallback — shouldn't happen with valid SENDFILE args
                     cms_core::FileSpec::parse(&format!("{} {} A", filename, filetype)).unwrap()
-                }),
-            ) {
+                })) {
                 Ok(data) => data,
                 Err(e) => {
                     self.editor_mut()
@@ -970,6 +967,8 @@ impl App {
     }
 
     /// Handle RECEIVE: dequeue from reader, write to CMS filesystem.
+    ///
+    /// If the write fails, re-enqueue the file so data is not lost.
     #[cfg(feature = "spool")]
     fn handle_receive(
         &mut self,
@@ -993,37 +992,46 @@ impl App {
 
         let fname = rename_fn
             .map(|s| s.to_ascii_uppercase())
-            .unwrap_or(orig_fn);
+            .unwrap_or_else(|| orig_fn.clone());
         let ftype = rename_ft
             .map(|s| s.to_ascii_uppercase())
-            .unwrap_or(orig_ft);
+            .unwrap_or_else(|| orig_ft.clone());
         let mode = filemode.unwrap_or('A');
 
         let filespec = format!("{} {} {}", fname, ftype, mode);
 
-        // Write to CMS filesystem
-        if let Some(ref mut proc) = self.cms_processor {
+        // Write to CMS filesystem — re-enqueue on failure to prevent data loss
+        let write_ok = if let Some(ref mut proc) = self.cms_processor {
             match cms_core::FileSpec::parse(&filespec) {
                 Ok(spec) => match proc.filesystem_mut().write_file(&spec, &content) {
                     Ok(()) => {
-                        self.editor_mut().set_message(format!(
-                            "File {} {} {} received",
-                            fname, ftype, mode
-                        ));
+                        self.editor_mut()
+                            .set_message(format!("File {} {} {} received", fname, ftype, mode));
+                        true
                     }
                     Err(e) => {
                         self.editor_mut()
                             .set_message(format!("DMSSPL100I Write error - {}", e));
+                        false
                     }
                 },
                 Err(e) => {
                     self.editor_mut()
                         .set_message(format!("DMSSPL024E Invalid filespec - {}", e));
+                    false
                 }
             }
         } else {
             self.editor_mut()
                 .set_message("DMSSPL100I CMS not available");
+            false
+        };
+
+        // Re-enqueue the file if the write failed so data is not lost
+        if !write_ok {
+            if let Some(ref mut mgr) = self.spool_manager {
+                let _ = mgr.send_file(&orig_fn, &orig_ft, &content, None);
+            }
         }
         true
     }

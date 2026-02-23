@@ -24,7 +24,10 @@ fn main() {
 
                     #[cfg(feature = "spool")]
                     {
-                        match cms_support::setup_spool(base_path, "USER") {
+                        let user_id = std::env::var("USER")
+                            .or_else(|_| std::env::var("LOGNAME"))
+                            .unwrap_or_else(|_| "USER".to_string());
+                        match cms_support::setup_spool(base_path, &user_id) {
                             Ok(spool_mgr) => app.set_spool_manager(spool_mgr),
                             Err(e) => eprintln!("Spool setup warning: {}", e),
                         }

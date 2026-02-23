@@ -28,7 +28,11 @@ pub struct DirectoryBackend {
 impl DirectoryBackend {
     /// Create a new directory backend, creating subdirectories if needed.
     pub fn new(base: &Path) -> Result<Self> {
-        for device in &[SpoolDevice::Reader, SpoolDevice::Printer, SpoolDevice::Punch] {
+        for device in &[
+            SpoolDevice::Reader,
+            SpoolDevice::Printer,
+            SpoolDevice::Punch,
+        ] {
             let dir = base.join(device.dir_name());
             if !dir.is_dir() {
                 fs::create_dir_all(&dir)?;
@@ -52,25 +56,32 @@ impl DirectoryBackend {
         self.base.join(".next_id")
     }
 
-    fn read_next_id(&self) -> u64 {
+    fn read_next_id(&self) -> Result<u64> {
         let path = self.next_id_path();
         if path.exists() {
-            fs::read_to_string(&path)
-                .ok()
-                .and_then(|s| s.trim().parse().ok())
-                .unwrap_or(1)
+            let content = fs::read_to_string(&path)?;
+            content.trim().parse().map_err(|_| {
+                SpoolError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Corrupt .next_id file: {:?}", path),
+                ))
+            })
         } else {
-            1
+            Ok(1)
         }
     }
 
     fn write_next_id(&self, id: u64) -> Result<()> {
-        fs::write(self.next_id_path(), id.to_string())?;
+        // Atomic write: write to temp file, then rename
+        let path = self.next_id_path();
+        let tmp_path = path.with_extension("tmp");
+        fs::write(&tmp_path, id.to_string())?;
+        fs::rename(&tmp_path, &path)?;
         Ok(())
     }
 
     fn allocate_id(&mut self) -> Result<u64> {
-        let id = self.read_next_id();
+        let id = self.read_next_id()?;
         self.write_next_id(id + 1)?;
         Ok(id)
     }
@@ -123,12 +134,14 @@ impl SpoolBackend for DirectoryBackend {
         filename: &str,
         filetype: &str,
         origin_user: &str,
+        dest_user: &str,
         class: SpoolClass,
         data: &str,
     ) -> Result<u64> {
         let id = self.allocate_id()?;
 
         let mut sf = SpoolFile::new(id, filename, filetype, origin_user, device);
+        sf.dest_user = dest_user.to_ascii_uppercase();
         sf.class = class;
         sf.records = data.lines().count();
 
@@ -149,9 +162,9 @@ impl SpoolBackend for DirectoryBackend {
         let data = fs::read_to_string(self.data_path(device, id))?;
         let sf = sf.clone();
 
-        // Remove files
-        let _ = fs::remove_file(self.data_path(device, id));
-        let _ = fs::remove_file(self.meta_path(device, id));
+        // Remove files — propagate errors so callers know the dequeue state
+        fs::remove_file(self.data_path(device, id))?;
+        fs::remove_file(self.meta_path(device, id))?;
 
         Ok((sf, data))
     }
@@ -177,8 +190,8 @@ impl SpoolBackend for DirectoryBackend {
             return Err(SpoolError::FileNotFound(spool_id));
         }
 
-        let _ = fs::remove_file(data_path);
-        let _ = fs::remove_file(meta_path);
+        fs::remove_file(data_path)?;
+        fs::remove_file(meta_path)?;
         Ok(())
     }
 
@@ -192,8 +205,8 @@ impl SpoolBackend for DirectoryBackend {
                 None => true,
             };
             if matches {
-                let _ = fs::remove_file(self.data_path(device, sf.spool_id));
-                let _ = fs::remove_file(self.meta_path(device, sf.spool_id));
+                fs::remove_file(self.data_path(device, sf.spool_id))?;
+                fs::remove_file(self.meta_path(device, sf.spool_id))?;
                 count += 1;
             }
         }
@@ -218,17 +231,21 @@ impl SpoolBackend for DirectoryBackend {
         let mut sf =
             SpoolFile::from_meta_string(&meta_str).ok_or(SpoolError::FileNotFound(spool_id))?;
 
-        // Remove from source
-        let _ = fs::remove_file(self.data_path(from_device, spool_id));
-        let _ = fs::remove_file(self.meta_path(from_device, spool_id));
+        // Remove from source — propagate errors
+        fs::remove_file(self.data_path(from_device, spool_id))?;
+        fs::remove_file(self.meta_path(from_device, spool_id))?;
 
-        // Update metadata and write to reader
+        // Allocate a fresh ID to avoid collision with existing reader files
+        let new_id = self.allocate_id()?;
+
+        // Update metadata and write to reader with new ID
+        sf.spool_id = new_id;
         sf.device = SpoolDevice::Reader;
         sf.dest_user = dest_user.to_ascii_uppercase();
 
-        fs::write(self.data_path(SpoolDevice::Reader, spool_id), &data)?;
+        fs::write(self.data_path(SpoolDevice::Reader, new_id), &data)?;
         fs::write(
-            self.meta_path(SpoolDevice::Reader, spool_id),
+            self.meta_path(SpoolDevice::Reader, new_id),
             sf.to_meta_string(),
         )?;
 
@@ -266,6 +283,7 @@ mod tests {
                 "TEST",
                 "DATA",
                 "USER1",
+                "",
                 SpoolClass::default(),
                 "hello\n",
             )
@@ -284,6 +302,7 @@ mod tests {
                 "MYFILE",
                 "EXEC",
                 "USER1",
+                "",
                 SpoolClass('B'),
                 "line1\nline2\n",
             )
@@ -312,6 +331,7 @@ mod tests {
                 "A",
                 "B",
                 "U",
+                "",
                 SpoolClass::default(),
                 "d",
             )
@@ -331,6 +351,7 @@ mod tests {
                 "FIRST",
                 "DATA",
                 "U",
+                "",
                 SpoolClass::default(),
                 "d1",
             )
@@ -341,6 +362,7 @@ mod tests {
                 "SECOND",
                 "DATA",
                 "U",
+                "",
                 SpoolClass::default(),
                 "d2",
             )
@@ -361,6 +383,7 @@ mod tests {
                 "A",
                 "B",
                 "U",
+                "",
                 SpoolClass('A'),
                 "d",
             )
@@ -371,6 +394,7 @@ mod tests {
                 "C",
                 "D",
                 "U",
+                "",
                 SpoolClass('B'),
                 "d",
             )
@@ -392,6 +416,7 @@ mod tests {
                 "A",
                 "B",
                 "U",
+                "",
                 SpoolClass::default(),
                 "d",
             )
@@ -418,6 +443,7 @@ mod tests {
                 "A",
                 "B",
                 "U",
+                "",
                 SpoolClass::default(),
                 "d",
             )
@@ -428,6 +454,7 @@ mod tests {
                 "C",
                 "D",
                 "U",
+                "",
                 SpoolClass::default(),
                 "d",
             )
@@ -446,6 +473,7 @@ mod tests {
                 "A",
                 "B",
                 "U",
+                "",
                 SpoolClass('A'),
                 "d",
             )
@@ -456,6 +484,7 @@ mod tests {
                 "C",
                 "D",
                 "U",
+                "",
                 SpoolClass('B'),
                 "d",
             )
@@ -480,6 +509,7 @@ mod tests {
                 "FILE1",
                 "DATA",
                 "USER1",
+                "",
                 SpoolClass::default(),
                 "content here\n",
             )
@@ -514,6 +544,7 @@ mod tests {
                     "A",
                     "B",
                     "U",
+                    "",
                     SpoolClass::default(),
                     "d",
                 )
@@ -528,6 +559,7 @@ mod tests {
                 "C",
                 "D",
                 "U",
+                "",
                 SpoolClass::default(),
                 "d",
             )

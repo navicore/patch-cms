@@ -116,26 +116,15 @@ impl<B: SpoolBackend> SpoolManager<B> {
             .unwrap_or_else(|| self.user_id.clone());
         let class = self.reader_config.class;
 
-        let id = self.backend.enqueue(
+        self.backend.enqueue(
             SpoolDevice::Reader,
             filename,
             filetype,
             &self.user_id,
+            &dest,
             class,
             data,
-        )?;
-
-        // Set the destination user on the queued file
-        if let Ok(files) = self.backend.list_queue(SpoolDevice::Reader, None) {
-            if let Some(sf) = files.iter().find(|f| f.spool_id == id) {
-                // Since we can't mutate through list, the dest is set at enqueue time
-                // by the backend. For InMemoryBackend, we handle this differently.
-                let _ = sf; // appease unused warning
-            }
-        }
-        let _ = dest; // dest is used in the enqueue origin; for single-user it's the same
-
-        Ok(id)
+        )
     }
 
     /// Receive the next file from the reader (RECEIVE).
@@ -147,36 +136,30 @@ impl<B: SpoolBackend> SpoolManager<B> {
     }
 
     /// Print a file (enqueue on printer).
-    pub fn print_file(
-        &mut self,
-        filename: &str,
-        filetype: &str,
-        data: &str,
-    ) -> Result<u64> {
+    pub fn print_file(&mut self, filename: &str, filetype: &str, data: &str) -> Result<u64> {
         let class = self.printer_config.class;
+        let dest = self.printer_config.dest.clone();
         self.backend.enqueue(
             SpoolDevice::Printer,
             filename,
             filetype,
             &self.user_id,
+            &dest,
             class,
             data,
         )
     }
 
     /// Punch a file (enqueue on punch).
-    pub fn punch_file(
-        &mut self,
-        filename: &str,
-        filetype: &str,
-        data: &str,
-    ) -> Result<u64> {
+    pub fn punch_file(&mut self, filename: &str, filetype: &str, data: &str) -> Result<u64> {
         let class = self.punch_config.class;
+        let dest = self.punch_config.dest.clone();
         self.backend.enqueue(
             SpoolDevice::Punch,
             filename,
             filetype,
             &self.user_id,
+            &dest,
             class,
             data,
         )
@@ -256,7 +239,9 @@ mod tests {
     #[test]
     fn send_and_receive() {
         let mut mgr = make_manager();
-        let id = mgr.send_file("MYFILE", "DATA", "hello world\n", None).unwrap();
+        let id = mgr
+            .send_file("MYFILE", "DATA", "hello world\n", None)
+            .unwrap();
         assert!(id > 0);
 
         let (fname, ftype, content) = mgr.receive().unwrap();
@@ -275,7 +260,9 @@ mod tests {
     #[test]
     fn print_file() {
         let mut mgr = make_manager();
-        let id = mgr.print_file("REPORT", "LISTING", "line1\nline2\n").unwrap();
+        let id = mgr
+            .print_file("REPORT", "LISTING", "line1\nline2\n")
+            .unwrap();
         assert!(id > 0);
 
         let files = mgr.query_device(SpoolDevice::Printer, None).unwrap();
@@ -296,10 +283,24 @@ mod tests {
     #[test]
     fn query_by_class() {
         let mut mgr = make_manager();
-        mgr.configure_device(SpoolDevice::Printer, Some(SpoolClass('A')), None, None, None, None);
+        mgr.configure_device(
+            SpoolDevice::Printer,
+            Some(SpoolClass('A')),
+            None,
+            None,
+            None,
+            None,
+        );
         mgr.print_file("FILE1", "DATA", "d1").unwrap();
 
-        mgr.configure_device(SpoolDevice::Printer, Some(SpoolClass('B')), None, None, None, None);
+        mgr.configure_device(
+            SpoolDevice::Printer,
+            Some(SpoolClass('B')),
+            None,
+            None,
+            None,
+            None,
+        );
         mgr.print_file("FILE2", "DATA", "d2").unwrap();
 
         let class_a = mgr
@@ -364,6 +365,11 @@ mod tests {
             .send_file("MYFILE", "DATA", "content\n", Some("JONES"))
             .unwrap();
         assert!(id > 0);
+
+        // Verify dest_user is actually set on the queued file
+        let files = mgr.query_device(SpoolDevice::Reader, None).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].dest_user, "JONES");
     }
 
     #[test]
@@ -404,10 +410,24 @@ mod tests {
     #[test]
     fn purge_by_class_filter() {
         let mut mgr = make_manager();
-        mgr.configure_device(SpoolDevice::Printer, Some(SpoolClass('A')), None, None, None, None);
+        mgr.configure_device(
+            SpoolDevice::Printer,
+            Some(SpoolClass('A')),
+            None,
+            None,
+            None,
+            None,
+        );
         mgr.print_file("FILE1", "DATA", "d1").unwrap();
 
-        mgr.configure_device(SpoolDevice::Printer, Some(SpoolClass('B')), None, None, None, None);
+        mgr.configure_device(
+            SpoolDevice::Printer,
+            Some(SpoolClass('B')),
+            None,
+            None,
+            None,
+            None,
+        );
         mgr.print_file("FILE2", "DATA", "d2").unwrap();
 
         let count = mgr
@@ -423,7 +443,14 @@ mod tests {
     #[test]
     fn configure_device_preserves_unset_fields() {
         let mut mgr = make_manager();
-        mgr.configure_device(SpoolDevice::Printer, Some(SpoolClass('B')), None, None, None, None);
+        mgr.configure_device(
+            SpoolDevice::Printer,
+            Some(SpoolClass('B')),
+            None,
+            None,
+            None,
+            None,
+        );
         mgr.configure_device(SpoolDevice::Printer, None, Some("OPER"), None, None, None);
 
         let cfg = mgr.device_config(SpoolDevice::Printer);
@@ -450,9 +477,23 @@ mod tests {
     #[test]
     fn query_wildcard_class() {
         let mut mgr = make_manager();
-        mgr.configure_device(SpoolDevice::Printer, Some(SpoolClass('A')), None, None, None, None);
+        mgr.configure_device(
+            SpoolDevice::Printer,
+            Some(SpoolClass('A')),
+            None,
+            None,
+            None,
+            None,
+        );
         mgr.print_file("F1", "D", "d").unwrap();
-        mgr.configure_device(SpoolDevice::Printer, Some(SpoolClass('Z')), None, None, None, None);
+        mgr.configure_device(
+            SpoolDevice::Printer,
+            Some(SpoolClass('Z')),
+            None,
+            None,
+            None,
+            None,
+        );
         mgr.print_file("F2", "D", "d").unwrap();
 
         // Wildcard class matches all
