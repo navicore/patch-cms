@@ -166,7 +166,10 @@ fn parse_spool_device(parts: &[&str]) -> Option<SpoolCommand> {
             "CLASS" => {
                 i += 1;
                 if i < parts.len() {
-                    class = SpoolClass::for_file(parts[i].chars().next().unwrap_or('A'));
+                    match SpoolClass::for_file(parts[i].chars().next().unwrap_or('A')) {
+                        Some(c) => class = Some(c),
+                        None => return None, // invalid class char — RC=24
+                    }
                 }
             }
             "DEST" => {
@@ -216,12 +219,25 @@ fn parse_sendfile(parts: &[&str]) -> Option<SpoolCommand> {
     let mut dest_user = None;
     let mut i = 2;
 
-    // Optional filemode
+    // Optional filemode: single letter (A) or letter+digit (A1)
     if i < parts.len() {
         let word = parts[i].to_ascii_uppercase();
-        if word.len() == 1 && word.chars().next().unwrap().is_ascii_uppercase() && word != "TO" {
-            filemode = Some(word.chars().next().unwrap());
-            i += 1;
+        if word != "TO" {
+            let mut chars = word.chars();
+            if let Some(first) = chars.next() {
+                if first.is_ascii_uppercase() {
+                    let rest = chars.next();
+                    let valid = match rest {
+                        None => true,                                            // single letter
+                        Some(d) if d.is_ascii_digit() => chars.next().is_none(), // letter+digit
+                        _ => false,
+                    };
+                    if valid {
+                        filemode = Some(first);
+                        i += 1;
+                    }
+                }
+            }
         }
     }
 
@@ -789,9 +805,14 @@ mod tests {
 
     #[test]
     fn spool_unknown_option_rejected() {
-        // Unknown options should return None (RC=24)
         assert!(parse_spool_command("SP PRT BOGUSOPT VALUE").is_none());
-        assert!(parse_spool_command("SP PRT COPIES 3").is_none()); // COPIES vs COPY
+        assert!(parse_spool_command("SP PRT COPIES 3").is_none());
+    }
+
+    #[test]
+    fn spool_invalid_class_rejected() {
+        assert!(parse_spool_command("SP PRT CLASS *").is_none());
+        assert!(parse_spool_command("SP PRT CLASS 1").is_none());
     }
 
     // -- Phase 8e: edge case and polish tests --

@@ -130,19 +130,45 @@ impl<B: SpoolBackend> SpoolManager<B> {
 
     /// Receive the next file from the reader (RECEIVE).
     ///
-    /// Returns the full spool file metadata and content.
-    /// Files with `hold = true` are skipped (RC=4).
+    /// Skips held files and dequeues the first non-held entry.
+    /// Returns `AllHeld` (RC=4) if only held files remain.
+    /// Returns `ReaderEmpty` (RC=2) if the queue is empty.
     pub fn receive(&mut self) -> Result<(SpoolFile, String)> {
-        // Peek at the front of the queue to check hold status
+        // Scan the queue for the first non-held file
         let files = self.backend.list_queue(SpoolDevice::Reader, None)?;
-        if let Some(first) = files.first() {
-            if first.hold {
-                return Err(crate::error::SpoolError::InvalidParameter(
-                    "File in HOLD status".to_string(),
-                ));
+        if files.is_empty() {
+            return Err(crate::error::SpoolError::ReaderEmpty);
+        }
+        let target = files.iter().find(|sf| !sf.hold);
+        match target {
+            None => Err(crate::error::SpoolError::AllHeld),
+            Some(sf) => {
+                let target_id = sf.spool_id;
+                // Dequeue entries from front, re-enqueuing held ones,
+                // until we reach the target
+                let mut held_files: Vec<(SpoolFile, String)> = Vec::new();
+                loop {
+                    let (sf, data) = self.backend.dequeue(SpoolDevice::Reader)?;
+                    if sf.spool_id == target_id {
+                        // Re-enqueue the held files we passed over
+                        for (hsf, hdata) in held_files {
+                            let hsf: SpoolFile = hsf;
+                            self.backend.enqueue(
+                                SpoolDevice::Reader,
+                                &hsf.filename,
+                                &hsf.filetype,
+                                &hsf.origin_user,
+                                &hsf.dest_user,
+                                hsf.class,
+                                &hdata,
+                            )?;
+                        }
+                        return Ok((sf, data));
+                    }
+                    held_files.push((sf, data));
+                }
             }
         }
-        self.backend.dequeue(SpoolDevice::Reader)
     }
 
     /// Print a file (enqueue on printer).
@@ -415,10 +441,9 @@ mod tests {
     }
 
     #[test]
-    fn receive_rejects_held_file() {
+    fn receive_all_held_returns_rc4() {
         use crate::backend::SpoolBackend;
         let mut backend = InMemoryBackend::new();
-        // Enqueue a file
         backend
             .enqueue(
                 SpoolDevice::Reader,
@@ -430,7 +455,6 @@ mod tests {
                 "data\n",
             )
             .unwrap();
-        // Directly set hold on the queued entry
         if let Some(queue) = backend.queues_mut().get_mut(&SpoolDevice::Reader) {
             if let Some((sf, _)) = queue.front_mut() {
                 sf.hold = true;
@@ -439,7 +463,52 @@ mod tests {
         let mut mgr = SpoolManager::new(backend, "TESTUSER");
         let result = mgr.receive();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("HOLD"));
+        let err = result.unwrap_err();
+        assert_eq!(err.rc(), 4);
+        assert!(err.to_string().contains("HOLD"));
+    }
+
+    #[test]
+    fn receive_skips_held_to_find_unheld() {
+        use crate::backend::SpoolBackend;
+        let mut backend = InMemoryBackend::new();
+        // Enqueue two files: first held, second not
+        backend
+            .enqueue(
+                SpoolDevice::Reader,
+                "HELD",
+                "FILE",
+                "USER1",
+                "",
+                SpoolClass::default(),
+                "held data\n",
+            )
+            .unwrap();
+        backend
+            .enqueue(
+                SpoolDevice::Reader,
+                "FREE",
+                "FILE",
+                "USER1",
+                "",
+                SpoolClass::default(),
+                "free data\n",
+            )
+            .unwrap();
+        // Hold the first file
+        if let Some(queue) = backend.queues_mut().get_mut(&SpoolDevice::Reader) {
+            if let Some((sf, _)) = queue.front_mut() {
+                sf.hold = true;
+            }
+        }
+        let mut mgr = SpoolManager::new(backend, "TESTUSER");
+        let (sf, data) = mgr.receive().unwrap();
+        assert_eq!(sf.filename, "FREE");
+        assert_eq!(data, "free data\n");
+        // Held file should still be in queue
+        let remaining = mgr.query_device(SpoolDevice::Reader, None).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].filename, "HELD");
     }
 
     #[test]

@@ -10,6 +10,8 @@ pub enum SpoolError {
     InvalidParameter(String),
     /// File not found in spool queue (RC=28)
     FileNotFound(u64),
+    /// All files in reader are held (RC=4)
+    AllHeld,
     /// Unknown spool command (RC=24)
     UnknownCommand(String),
     /// I/O error from the backend
@@ -25,6 +27,9 @@ impl fmt::Display for SpoolError {
             }
             SpoolError::FileNotFound(id) => {
                 write!(f, "DMSSPR028E File {} not found", id)
+            }
+            SpoolError::AllHeld => {
+                write!(f, "DMSSPR004E No receivable files - all in HOLD status")
             }
             SpoolError::UnknownCommand(s) => {
                 write!(f, "DMSSPR024E Unknown spool command - {}", s)
@@ -47,6 +52,7 @@ impl SpoolError {
     pub fn rc(&self) -> i32 {
         match self {
             SpoolError::ReaderEmpty => 2,
+            SpoolError::AllHeld => 4,
             SpoolError::InvalidParameter(_) => 24,
             SpoolError::FileNotFound(_) => 28,
             SpoolError::UnknownCommand(_) => 24,
@@ -112,6 +118,7 @@ mod tests {
         // All error messages should start with DMSSPRnnnE or DMSSPRnnnI
         let errors = vec![
             SpoolError::ReaderEmpty,
+            SpoolError::AllHeld,
             SpoolError::InvalidParameter("X".to_string()),
             SpoolError::FileNotFound(1),
             SpoolError::UnknownCommand("X".to_string()),

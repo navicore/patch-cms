@@ -6,6 +6,15 @@ use crate::device::{SpoolClass, SpoolDevice};
 use crate::error::{Result, SpoolError};
 use crate::spool_file::SpoolFile;
 
+/// Remove a file, ignoring `NotFound` errors (the file may already be gone).
+fn remove_file_ignore_not_found(path: &std::path::Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(SpoolError::Io(e)),
+    }
+}
+
 /// Filesystem-backed spool backend.
 ///
 /// Stores spool files under a base directory with subdirectories for each device:
@@ -112,8 +121,14 @@ impl DirectoryBackend {
                         if let Some(id_str) = stem.to_str() {
                             if let Ok(_id) = id_str.parse::<u64>() {
                                 let meta_str = fs::read_to_string(&path)?;
-                                if let Some(sf) = SpoolFile::from_meta_string(&meta_str) {
-                                    entries.push((sf, path.clone()));
+                                match SpoolFile::from_meta_string(&meta_str) {
+                                    Some(sf) => entries.push((sf, path.clone())),
+                                    None => {
+                                        return Err(SpoolError::Io(std::io::Error::new(
+                                            std::io::ErrorKind::InvalidData,
+                                            format!("Corrupt spool metadata: {}", path.display()),
+                                        )));
+                                    }
                                 }
                             }
                         }
@@ -164,7 +179,7 @@ impl SpoolBackend for DirectoryBackend {
 
         // Remove .meta first so orphaned .data is harmless if interrupted
         fs::remove_file(self.meta_path(device, id))?;
-        fs::remove_file(self.data_path(device, id))?;
+        remove_file_ignore_not_found(&self.data_path(device, id))?;
 
         Ok((sf, data))
     }
@@ -192,8 +207,42 @@ impl SpoolBackend for DirectoryBackend {
 
         // Remove .meta first so orphaned .data is harmless if interrupted
         fs::remove_file(meta_path)?;
-        fs::remove_file(data_path)?;
+        // Ignore NotFound on .data (may be absent from interrupted enqueue)
+        remove_file_ignore_not_found(&data_path)?;
         Ok(())
+    }
+
+    fn requeue_front(
+        &mut self,
+        device: SpoolDevice,
+        filename: &str,
+        filetype: &str,
+        origin_user: &str,
+        dest_user: &str,
+        class: SpoolClass,
+        data: &str,
+    ) -> Result<u64> {
+        // Find the minimum existing ID in the queue; place this file before it
+        let entries = self.read_entries(device)?;
+        let min_id = entries.first().map(|(sf, _)| sf.spool_id).unwrap_or(1);
+        let id = if min_id > 0 { min_id - 1 } else { 0 };
+
+        // If ID 0 is already taken, fall back to allocate_id (goes to back)
+        let id = if id == 0 && self.meta_path(device, 0).exists() {
+            self.allocate_id()?
+        } else {
+            id
+        };
+
+        let mut sf = SpoolFile::new(id, filename, filetype, origin_user, device);
+        sf.dest_user = dest_user.to_ascii_uppercase();
+        sf.class = class;
+        sf.records = data.lines().count();
+
+        fs::write(self.data_path(device, id), data)?;
+        fs::write(self.meta_path(device, id), sf.to_meta_string())?;
+
+        Ok(id)
     }
 
     fn purge_all(&mut self, device: SpoolDevice, class: Option<SpoolClass>) -> Result<usize> {
@@ -208,7 +257,7 @@ impl SpoolBackend for DirectoryBackend {
             if matches {
                 // Remove .meta first so orphaned .data is harmless if interrupted
                 fs::remove_file(self.meta_path(device, sf.spool_id))?;
-                fs::remove_file(self.data_path(device, sf.spool_id))?;
+                remove_file_ignore_not_found(&self.data_path(device, sf.spool_id))?;
                 count += 1;
             }
         }
@@ -235,7 +284,7 @@ impl SpoolBackend for DirectoryBackend {
 
         // Remove from source — .meta first so orphaned .data is harmless
         fs::remove_file(self.meta_path(from_device, spool_id))?;
-        fs::remove_file(self.data_path(from_device, spool_id))?;
+        remove_file_ignore_not_found(&self.data_path(from_device, spool_id))?;
 
         // Allocate a fresh ID to avoid collision with existing reader files
         let new_id = self.allocate_id()?;
