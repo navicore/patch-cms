@@ -23,21 +23,21 @@ impl fmt::Display for SpoolError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SpoolError::QueueEmpty(device) => {
-                write!(f, "DMSSPR002E No files in your {}", device)
+                write!(f, "DMSSPL002E No files in your {}", device)
             }
             SpoolError::InvalidParameter(s) => {
-                write!(f, "DMSSPR024E Invalid parameter - {}", s)
+                write!(f, "DMSSPL024E Invalid parameter - {}", s)
             }
             SpoolError::FileNotFound(id) => {
-                write!(f, "DMSSPR028E File {} not found", id)
+                write!(f, "DMSSPL028E File {} not found", id)
             }
             SpoolError::AllHeld => {
-                write!(f, "DMSSPR004E No receivable files - all in HOLD status")
+                write!(f, "DMSSPL004E No receivable files - all in HOLD status")
             }
             SpoolError::UnknownCommand(s) => {
-                write!(f, "DMSSPR024E Unknown spool command - {}", s)
+                write!(f, "DMSSPL024E Unknown spool command - {}", s)
             }
-            SpoolError::Io(e) => write!(f, "DMSSPR100E I/O error - {}", e),
+            SpoolError::Io(e) => write!(f, "DMSSPL100E I/O error - {}", e),
         }
     }
 }
@@ -109,7 +109,7 @@ mod tests {
     fn error_display_unknown_command() {
         let e = SpoolError::UnknownCommand("XYZZY".to_string());
         let msg = e.to_string();
-        assert!(msg.contains("DMSSPR024E"));
+        assert!(msg.contains("DMSSPL024E"));
         assert!(msg.contains("XYZZY"));
         assert_eq!(e.rc(), 24);
     }
@@ -119,13 +119,13 @@ mod tests {
         let io_err = io::Error::new(io::ErrorKind::PermissionDenied, "denied");
         let e = SpoolError::Io(io_err);
         let msg = e.to_string();
-        assert!(msg.contains("DMSSPR100E"));
+        assert!(msg.contains("DMSSPL100E"));
         assert!(msg.contains("denied"));
     }
 
     #[test]
     fn error_messages_have_ibm_prefix() {
-        // All error messages should start with DMSSPRnnnE or DMSSPRnnnI
+        // All error messages should start with DMSSPLnnnE or DMSSPLnnnI
         let errors = vec![
             SpoolError::QueueEmpty(crate::device::SpoolDevice::Reader),
             SpoolError::AllHeld,
@@ -137,8 +137,8 @@ mod tests {
         for e in &errors {
             let msg = e.to_string();
             assert!(
-                msg.starts_with("DMSSPR"),
-                "Error '{}' missing DMSSPR prefix",
+                msg.starts_with("DMSSPL"),
+                "Error '{}' missing DMSSPL prefix",
                 msg
             );
         }

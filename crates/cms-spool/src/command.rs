@@ -401,7 +401,7 @@ fn parse_query(parts: &[&str]) -> Option<SpoolCommand> {
                 if parts[2].len() != 1 {
                     return None; // class must be exactly one character — RC=24
                 }
-                parts[2].chars().next().and_then(SpoolClass::new)
+                parts[2].chars().next().and_then(SpoolClass::for_file)
             } else {
                 return None; // dangling CLASS without value — RC=24
             }
@@ -468,10 +468,10 @@ pub fn execute_spool_command<B: SpoolBackend>(
             )])
         }
         SpoolCommand::SendFile { .. } => {
-            SpoolCommandResult::error(24, "DMSSPR024E SENDFILE requires CMS filesystem bridging")
+            SpoolCommandResult::error(24, "DMSSPL024E SENDFILE requires CMS filesystem bridging")
         }
         SpoolCommand::Receive { .. } => {
-            SpoolCommandResult::error(24, "DMSSPR024E RECEIVE requires CMS filesystem bridging")
+            SpoolCommandResult::error(24, "DMSSPL024E RECEIVE requires CMS filesystem bridging")
         }
         SpoolCommand::Purge { device, target } => match target {
             PurgeTarget::All => match manager.purge_all(*device, None) {
@@ -778,13 +778,11 @@ mod tests {
 
     #[test]
     fn execute_query_empty() {
-        let mgr = make_manager();
+        let mut mgr = SpoolManager::new(InMemoryBackend::new(), "U");
         let cmd = parse_spool_command("Q R").unwrap();
-        let result =
-            execute_spool_command(&cmd, &mut SpoolManager::new(InMemoryBackend::new(), "U"));
+        let result = execute_spool_command(&cmd, &mut mgr);
         assert_eq!(result.rc, 0);
         assert!(result.messages[0].contains("No files"));
-        let _ = mgr;
     }
 
     #[test]
@@ -896,6 +894,7 @@ mod tests {
         assert!(parse_spool_command("SP PRT CLASS 1").is_none());
         assert!(parse_spool_command("SP PRT CLASS AB").is_none());
         assert!(parse_spool_command("Q R CLASS AB").is_none());
+        assert!(parse_spool_command("Q R CLASS *").is_none());
     }
 
     #[test]
