@@ -313,6 +313,28 @@ fn populate_extract_vars(env: &mut Environment, editor: &Editor) {
     env.set_compound("VERIFY", "1", RexxValue::new(&verify_start));
     env.set_compound("VERIFY", "2", RexxValue::new(&verify_end));
 
+    // TABLINE: tab-stop ruler display
+    env.set_compound("TABLINE", "0", RexxValue::new("1"));
+    env.set_compound(
+        "TABLINE",
+        "1",
+        RexxValue::new(if editor.show_tabline() { "ON" } else { "OFF" }),
+    );
+
+    // ZONE: zone boundaries (left and right)
+    // EXTRACT variables must be numeric for REXX arithmetic.
+    // When zone_right is unlimited, use trunc() (matches IBM XEDIT
+    // EXTRACT /ZONE/ behavior). QUERY ZONE uses "*" for display only.
+    let zone_left = editor.zone_left().to_string();
+    let zone_right = if editor.zone_right() == usize::MAX {
+        editor.trunc().to_string()
+    } else {
+        editor.zone_right().to_string()
+    };
+    env.set_compound("ZONE", "0", RexxValue::new("2"));
+    env.set_compound("ZONE", "1", RexxValue::new(&zone_left));
+    env.set_compound("ZONE", "2", RexxValue::new(&zone_right));
+
     // LASTMSG: last message text
     let lastmsg = editor.last_message().unwrap_or("");
     env.set_compound("LASTMSG", "0", RexxValue::new("1"));

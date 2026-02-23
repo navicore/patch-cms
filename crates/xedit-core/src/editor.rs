@@ -54,6 +54,7 @@ pub struct Editor {
     show_number: bool,
     show_prefix: bool,
     show_scale: bool,
+    show_tabline: bool,
     case_respect: bool,
     hex: bool,
     stay: bool,
@@ -153,10 +154,11 @@ impl Editor {
             fs,
             trunc: 72,
             zone_left: 1,
-            zone_right: 72,
+            zone_right: usize::MAX,
             show_number: true,
             show_prefix: true,
             show_scale: false,
+            show_tabline: false,
             case_respect: false,
             hex: false,
             stay: true,
@@ -247,6 +249,18 @@ impl Editor {
 
     pub fn show_scale(&self) -> bool {
         self.show_scale
+    }
+
+    pub fn show_tabline(&self) -> bool {
+        self.show_tabline
+    }
+
+    pub fn zone_left(&self) -> usize {
+        self.zone_left
+    }
+
+    pub fn zone_right(&self) -> usize {
+        self.zone_right
     }
 
     pub fn case_respect(&self) -> bool {
@@ -668,7 +682,6 @@ impl Editor {
             .unwrap_or(80);
         if max_width > self.trunc {
             self.trunc = max_width;
-            self.zone_right = max_width;
             self.verify_end = max_width;
         }
 
@@ -902,9 +915,24 @@ impl Editor {
 
     fn cmd_locate(&mut self, target: &Target) -> Result<CommandResult> {
         let case_respect = self.case_respect;
+        let zone_left = self.zone_left;
+        let zone_right = self.zone_right;
         let buffer = &self.buffer;
         let resolved = target.resolve(self.current_line, buffer.len(), case_respect, &|n| {
-            buffer.line_text(n).map(String::from)
+            buffer.line_text(n).map(|text| {
+                // Fast path: default zone covers the whole line
+                if zone_left <= 1 && zone_right == usize::MAX {
+                    return String::from(text);
+                }
+                let chars: Vec<char> = text.chars().collect();
+                let start = zone_left.saturating_sub(1).min(chars.len());
+                let end = zone_right.min(chars.len());
+                if start >= end {
+                    String::new()
+                } else {
+                    chars[start..end].iter().collect()
+                }
+            })
         });
         match resolved {
             Some(line) => {
@@ -930,15 +958,39 @@ impl Editor {
         target: Option<&Target>,
         count: Option<usize>,
     ) -> Result<CommandResult> {
-        self.snapshot_for_undo();
+        // Note: `count` limits total changes across all lines (at most one
+        // replacement per line). IBM XEDIT treats count as a per-line limit,
+        // allowing multiple replacements within a single line. This is a
+        // deliberate simplification.
+        if from.is_empty() {
+            return Err(XeditError::InvalidCommand(
+                "CHANGE: search string cannot be empty".to_string(),
+            ));
+        }
         let max_changes = count.unwrap_or(1);
         let mut changes_made = 0;
+        let mut snapshot_taken = false;
+
+        let zone_left = self.zone_left;
+        let zone_right = self.zone_right;
 
         let end_line = if let Some(t) = target {
             let case_respect = self.case_respect;
             let buffer = &self.buffer;
             t.resolve(self.current_line, buffer.len(), case_respect, &|n| {
-                buffer.line_text(n).map(String::from)
+                buffer.line_text(n).map(|text| {
+                    if zone_left <= 1 && zone_right == usize::MAX {
+                        return String::from(text);
+                    }
+                    let chars: Vec<char> = text.chars().collect();
+                    let start = zone_left.saturating_sub(1).min(chars.len());
+                    let end = zone_right.min(chars.len());
+                    if start >= end {
+                        String::new()
+                    } else {
+                        chars[start..end].iter().collect()
+                    }
+                })
             })
             .unwrap_or(self.buffer.len())
         } else {
@@ -951,20 +1003,78 @@ impl Editor {
             self.current_line
         };
 
+        // Work with char-level indices to avoid byte-offset mismatches
+        // when case-folding changes byte lengths (e.g. ﬁ → FI, ß → SS).
+        // needle_chars is loop-invariant — compute once.
+        let needle_chars: Vec<char> = if self.case_respect {
+            from.chars().collect()
+        } else {
+            from.chars().flat_map(|c| c.to_uppercase()).collect()
+        };
+
         for line_num in start..=end_line {
             if changes_made >= max_changes {
                 break;
             }
             if let Some(line) = self.buffer.get(line_num) {
                 let text = line.text().to_string();
-                let (needle, haystack) = if self.case_respect {
-                    (from.to_string(), text.clone())
+                // Cheap byte-length pre-check: UTF-8 byte_len >= char_count,
+                // so if byte_len < zone_left the line can't reach the zone.
+                if zone_left.saturating_sub(1) >= text.len() {
+                    continue;
+                }
+                let chars: Vec<char> = text.chars().collect();
+                let z_start = zone_left.saturating_sub(1).min(chars.len());
+                let z_end = zone_right.min(chars.len());
+                if z_start >= z_end {
+                    continue;
+                }
+                let zone_chars = &chars[z_start..z_end];
+
+                // Find needle and compute zone_idx + match_zone_len.
+                let match_result = if self.case_respect {
+                    // Case-sensitive: search zone_chars directly (no copy).
+                    zone_chars
+                        .windows(needle_chars.len())
+                        .position(|w| w == needle_chars.as_slice())
+                        .map(|zcp| (zcp, needle_chars.len()))
                 } else {
-                    (from.to_uppercase(), text.to_uppercase())
+                    // Case-insensitive: build uppercased haystack with an
+                    // index map from haystack position → zone char index.
+                    let mut haystack_chars = Vec::new();
+                    let mut hc_to_zc = Vec::new();
+                    for (zi, zc) in zone_chars.iter().enumerate() {
+                        for uc in zc.to_uppercase() {
+                            haystack_chars.push(uc);
+                            hc_to_zc.push(zi);
+                        }
+                    }
+                    haystack_chars
+                        .windows(needle_chars.len())
+                        .enumerate()
+                        .find(|(p, w)| {
+                            // Match must start at a zone-char boundary, not
+                            // mid-expansion (e.g. reject matching inside ß→SS).
+                            let at_boundary = *p == 0 || hc_to_zc[*p] != hc_to_zc[p - 1];
+                            at_boundary && *w == needle_chars.as_slice()
+                        })
+                        .map(|(zcp, _)| {
+                            let zi_start = hc_to_zc[zcp];
+                            let zi_end = hc_to_zc[zcp + needle_chars.len() - 1] + 1;
+                            (zi_start, zi_end - zi_start)
+                        })
                 };
 
-                if let Some(pos) = haystack.find(&needle) {
-                    let new_text = format!("{}{}{}", &text[..pos], to, &text[pos + from.len()..]);
+                if let Some((zone_idx, match_zone_len)) = match_result {
+                    let abs_char_pos = z_start + zone_idx;
+                    // Build new text: prefix + replacement + suffix
+                    let prefix: String = chars[..abs_char_pos].iter().collect();
+                    let suffix: String = chars[abs_char_pos + match_zone_len..].iter().collect();
+                    let new_text = format!("{}{}{}", prefix, to, suffix);
+                    if !snapshot_taken {
+                        self.snapshot_for_undo();
+                        snapshot_taken = true;
+                    }
                     if let Some(line_mut) = self.buffer.get_mut(line_num) {
                         line_mut.set_text(new_text);
                     }
@@ -1228,11 +1338,11 @@ impl Editor {
             ));
         }
         let zone_start = col1.unwrap_or(self.zone_left);
-        let zone_end = col2.unwrap_or(self.zone_right);
-        if zone_start > zone_end {
+        let raw_zone_end = col2.unwrap_or(self.zone_right);
+        if zone_start > raw_zone_end {
             return Err(XeditError::InvalidCommand(format!(
                 "COMPRESS: col1 ({}) exceeds zone end ({})",
-                zone_start, zone_end
+                zone_start, raw_zone_end
             )));
         }
         let original = self
@@ -1240,6 +1350,12 @@ impl Editor {
             .line_text(self.current_line)
             .unwrap_or("")
             .to_string();
+        // Clamp zone_end to actual line length for safety
+        let zone_end = raw_zone_end.min(original.chars().count());
+        if zone_start > zone_end {
+            // Line does not reach zone_start — nothing to do
+            return Ok(CommandResult::ok());
+        }
         let result = compress_line(&original, zone_start, zone_end, &self.tab_stops);
         if result != original {
             self.snapshot_for_undo();
@@ -1261,11 +1377,11 @@ impl Editor {
             return Err(XeditError::InvalidCommand("No line to expand".to_string()));
         }
         let zone_start = col1.unwrap_or(self.zone_left);
-        let zone_end = col2.unwrap_or(self.zone_right);
-        if zone_start > zone_end {
+        let raw_zone_end = col2.unwrap_or(self.zone_right);
+        if zone_start > raw_zone_end {
             return Err(XeditError::InvalidCommand(format!(
                 "EXPAND: col1 ({}) exceeds zone end ({})",
-                zone_start, zone_end
+                zone_start, raw_zone_end
             )));
         }
         let original = self
@@ -1273,6 +1389,12 @@ impl Editor {
             .line_text(self.current_line)
             .unwrap_or("")
             .to_string();
+        // Clamp zone_end to actual line length for safety
+        let zone_end = raw_zone_end.min(original.chars().count());
+        if zone_start > zone_end {
+            // Line does not reach zone_start — nothing to do
+            return Ok(CommandResult::ok());
+        }
         let result = expand_line(&original, zone_start, zone_end, &self.tab_stops);
         if result != original {
             self.snapshot_for_undo();
@@ -1379,7 +1501,6 @@ impl Editor {
         match subcmd {
             SetCommand::Trunc(n) => {
                 self.trunc = *n;
-                self.zone_right = *n;
             }
             SetCommand::Zone(left, right) => {
                 self.zone_left = *left;
@@ -1421,6 +1542,7 @@ impl Editor {
             SetCommand::MacroPath(paths) => {
                 self.macro_path = paths.clone();
             }
+            SetCommand::TabLine(on) => self.show_tabline = *on,
             SetCommand::Tabs(stops) => {
                 if stops.is_empty() {
                     // Reset to defaults
@@ -1455,6 +1577,16 @@ impl Editor {
                 let stops: Vec<String> = self.tab_stops.iter().map(|s| s.to_string()).collect();
                 format!("Tabs={}", stops.join(" "))
             }
+            "TABLINE" => format!("TabLine={}", if self.show_tabline { "ON" } else { "OFF" }),
+            "ZONE" => {
+                let right = if self.zone_right == usize::MAX {
+                    "*".to_string()
+                } else {
+                    self.zone_right.to_string()
+                };
+                format!("Zone={} {}", self.zone_left, right)
+            }
+            "VERIFY" => format!("Verify={} {}", self.verify_start, self.verify_end),
             _ => {
                 return Err(XeditError::InvalidCommand(format!(
                     "Unknown QUERY: {}",
@@ -3147,7 +3279,8 @@ if ftype.1 = 'RS' then
     fn compress_col1_exceeds_zone_errors() {
         let mut ed = editor_with_lines(&["hello   world"]);
         ed.current_line = 1;
-        // zone_right defaults to 72, so col1=80 > zone_end=72
+        // Set explicit zone, then col1=80 > zone_end=72
+        ed.execute(&Command::Set(SetCommand::Zone(1, 72))).unwrap();
         let result = ed.execute(&Command::Compress(Some(80), None));
         assert!(result.is_err());
     }
@@ -3156,6 +3289,7 @@ if ftype.1 = 'RS' then
     fn expand_col1_exceeds_zone_errors() {
         let mut ed = editor_with_lines(&["hello\tworld"]);
         ed.current_line = 1;
+        ed.execute(&Command::Set(SetCommand::Zone(1, 72))).unwrap();
         let result = ed.execute(&Command::Expand(Some(80), None));
         assert!(result.is_err());
     }
@@ -3170,7 +3304,7 @@ if ftype.1 = 'RS' then
 
     #[test]
     fn compress_single_col_arg() {
-        // COMPRESS 5 — col1=5, col2 defaults to zone_right (72)
+        // COMPRESS 5 — col1=5, col2 defaults to zone_right
         let mut ed = editor_with_lines(&["1234    rest"]);
         ed.current_line = 1;
         ed.execute(&Command::Set(SetCommand::Tabs(vec![1, 9, 17])))
@@ -3314,5 +3448,387 @@ if ftype.1 = 'RS' then
         assert_eq!(ed.buffer().line_text(2), Some("x"));
         assert_eq!(ed.buffer().line_text(3), Some("y"));
         assert_eq!(ed.current_line(), 3); // advanced to last inserted
+    }
+
+    // -- ZONE enforcement in LOCATE tests --
+
+    #[test]
+    fn locate_in_zone_finds_match() {
+        // "hello world" — zone 1-5 = "hello"
+        let mut ed = editor_with_lines(&["hello world", "other"]);
+        ed.current_line = 0;
+        ed.execute(&Command::Set(SetCommand::Zone(1, 5))).unwrap();
+        // "hello" is in zone 1-5
+        let result = ed.execute(&Command::Locate(Target::StringForward("hello".into())));
+        assert!(result.is_ok());
+        assert_eq!(ed.current_line(), 1);
+    }
+
+    #[test]
+    fn locate_outside_zone_not_found() {
+        // "hello world" — zone 1-5 = "hello", "world" is outside
+        let mut ed = editor_with_lines(&["hello world", "other"]);
+        ed.current_line = 0;
+        ed.execute(&Command::Set(SetCommand::Zone(1, 5))).unwrap();
+        let result = ed.execute(&Command::Locate(Target::StringForward("world".into())));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn locate_zone_boundary() {
+        // Zone starts at col 7: "hello world" zone 7-11 = "world"
+        let mut ed = editor_with_lines(&["hello world"]);
+        ed.current_line = 0;
+        ed.execute(&Command::Set(SetCommand::Zone(7, 11))).unwrap();
+        let result = ed.execute(&Command::Locate(Target::StringForward("world".into())));
+        assert!(result.is_ok());
+        assert_eq!(ed.current_line(), 1);
+    }
+
+    // -- ZONE enforcement in CHANGE tests --
+
+    #[test]
+    fn change_in_zone() {
+        let mut ed = editor_with_lines(&["hello world"]);
+        ed.execute(&Command::Set(SetCommand::Zone(1, 5))).unwrap();
+        ed.execute(&Command::Change {
+            from: "hello".into(),
+            to: "HELLO".into(),
+            target: None,
+            count: None,
+        })
+        .unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("HELLO world"));
+    }
+
+    #[test]
+    fn change_outside_zone_not_found() {
+        let mut ed = editor_with_lines(&["hello world"]);
+        ed.execute(&Command::Set(SetCommand::Zone(1, 5))).unwrap();
+        let result = ed.execute(&Command::Change {
+            from: "world".into(),
+            to: "WORLD".into(),
+            target: None,
+            count: None,
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn change_preserves_outside_zone() {
+        // Zone 1-5, change "he" to "HE" — rest of line untouched
+        let mut ed = editor_with_lines(&["hello world"]);
+        ed.execute(&Command::Set(SetCommand::Zone(1, 5))).unwrap();
+        ed.execute(&Command::Change {
+            from: "he".into(),
+            to: "HE".into(),
+            target: None,
+            count: None,
+        })
+        .unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("HEllo world"));
+    }
+
+    #[test]
+    fn change_zone_boundary() {
+        // Zone 7-11 = "world", change "world" to "EARTH"
+        let mut ed = editor_with_lines(&["hello world"]);
+        ed.execute(&Command::Set(SetCommand::Zone(7, 11))).unwrap();
+        ed.execute(&Command::Change {
+            from: "world".into(),
+            to: "EARTH".into(),
+            target: None,
+            count: None,
+        })
+        .unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("hello EARTH"));
+    }
+
+    #[test]
+    fn locate_zone_boundary_non_ascii() {
+        // "café world" — zone 1-3 = "caf", 'é' at code-point 4 is outside
+        let mut ed = editor_with_lines(&["café world"]);
+        ed.current_line = 0;
+        ed.execute(&Command::Set(SetCommand::Zone(1, 3))).unwrap();
+        // "caf" is in zone
+        let result = ed.execute(&Command::Locate(Target::StringForward("caf".into())));
+        assert!(result.is_ok());
+        // "é" at code-point 4 is outside zone
+        let result = ed.execute(&Command::Locate(Target::StringForward("é".into())));
+        assert!(result.is_err());
+    }
+
+    // -- TABLINE tests --
+
+    #[test]
+    fn tabline_default_off() {
+        let ed = Editor::new();
+        assert!(!ed.show_tabline());
+    }
+
+    #[test]
+    fn set_tabline_on() {
+        let mut ed = Editor::new();
+        ed.execute(&Command::Set(SetCommand::TabLine(true)))
+            .unwrap();
+        assert!(ed.show_tabline());
+    }
+
+    #[test]
+    fn query_tabline() {
+        let mut ed = Editor::new();
+        let result = ed.execute(&Command::Query("TABLINE".into())).unwrap();
+        assert_eq!(result.message, Some("TabLine=OFF".to_string()));
+        ed.execute(&Command::Set(SetCommand::TabLine(true)))
+            .unwrap();
+        let result = ed.execute(&Command::Query("TABLINE".into())).unwrap();
+        assert_eq!(result.message, Some("TabLine=ON".to_string()));
+    }
+
+    #[test]
+    fn query_zone() {
+        let mut ed = Editor::new();
+        let result = ed.execute(&Command::Query("ZONE".into())).unwrap();
+        // Unlimited zone_right displays as *
+        assert_eq!(result.message, Some("Zone=1 *".to_string()));
+    }
+
+    #[test]
+    fn query_verify() {
+        let mut ed = Editor::new();
+        let result = ed.execute(&Command::Query("VERIFY".into())).unwrap();
+        assert_eq!(result.message, Some("Verify=1 80".to_string()));
+    }
+
+    #[test]
+    fn change_zone_case_insensitive_with_non_ascii() {
+        // Non-ASCII chars in zone — verify char-level matching works
+        // "café world" zone 1-4 = "café", case-insensitive change "café" → "BEAN"
+        let mut ed = editor_with_lines(&["café world"]);
+        ed.execute(&Command::Set(SetCommand::Case(CaseSetting::Ignore)))
+            .unwrap();
+        ed.execute(&Command::Set(SetCommand::Zone(1, 4))).unwrap();
+        ed.execute(&Command::Change {
+            from: "CAFÉ".into(),
+            to: "BEAN".into(),
+            target: None,
+            count: None,
+        })
+        .unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("BEAN world"));
+    }
+
+    #[test]
+    fn change_case_insensitive_rejects_mid_expansion_match() {
+        // "ßa" uppercases to "SSA". Needle "SA" matches at haystack[1..3]
+        // but position 1 is mid-expansion of 'ß'. Should NOT match.
+        let mut ed = editor_with_lines(&["ßa"]);
+        ed.execute(&Command::Set(SetCommand::Case(CaseSetting::Ignore)))
+            .unwrap();
+        let result = ed.execute(&Command::Change {
+            from: "SA".into(),
+            to: "X".into(),
+            target: None,
+            count: None,
+        });
+        assert!(result.is_err(), "Should not match mid-expansion");
+        assert_eq!(ed.buffer().line_text(1), Some("ßa")); // unchanged
+    }
+
+    #[test]
+    fn change_case_insensitive_expanding_casefold() {
+        // 'ß' uppercases to "SS" (1 zone char → 2 haystack chars).
+        // Replacing "SS" should consume only 'ß', not 'ß' + next char.
+        let mut ed = editor_with_lines(&["ßello world"]);
+        ed.execute(&Command::Set(SetCommand::Case(CaseSetting::Ignore)))
+            .unwrap();
+        ed.execute(&Command::Change {
+            from: "SS".into(),
+            to: "X".into(),
+            target: None,
+            count: None,
+        })
+        .unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("Xello world"));
+    }
+
+    #[test]
+    fn change_empty_from_errors() {
+        let mut ed = editor_with_lines(&["hello"]);
+        let result = ed.execute(&Command::Change {
+            from: "".into(),
+            to: "x".into(),
+            target: None,
+            count: None,
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn locate_beyond_col72_default_zone() {
+        // Default zone_right is unlimited — LOCATE should find text past col 72
+        let long_line = format!("{}{}", " ".repeat(80), "FINDME");
+        let mut ed = editor_with_lines(&[&long_line]);
+        ed.current_line = 0;
+        let result = ed.execute(&Command::Locate(Target::StringForward("FINDME".into())));
+        assert!(result.is_ok());
+        assert_eq!(ed.current_line(), 1);
+    }
+
+    #[test]
+    fn change_beyond_col72_default_zone() {
+        // Default zone_right is unlimited — CHANGE should work past col 72
+        let long_line = format!("{}old", " ".repeat(80));
+        let mut ed = editor_with_lines(&[&long_line]);
+        ed.execute(&Command::Change {
+            from: "old".into(),
+            to: "new".into(),
+            target: None,
+            count: None,
+        })
+        .unwrap();
+        let text = ed.buffer().line_text(1).unwrap();
+        assert!(text.ends_with("new"));
+    }
+
+    #[test]
+    fn trunc_does_not_clobber_zone() {
+        let mut ed = Editor::new();
+        ed.execute(&Command::Set(SetCommand::Zone(5, 40))).unwrap();
+        ed.execute(&Command::Set(SetCommand::Trunc(80))).unwrap();
+        let result = ed.execute(&Command::Query("ZONE".into())).unwrap();
+        assert_eq!(result.message, Some("Zone=5 40".to_string()));
+    }
+
+    #[test]
+    fn query_zone_after_explicit_set() {
+        let mut ed = Editor::new();
+        ed.execute(&Command::Set(SetCommand::Zone(1, 72))).unwrap();
+        let result = ed.execute(&Command::Query("ZONE".into())).unwrap();
+        assert_eq!(result.message, Some("Zone=1 72".to_string()));
+    }
+
+    #[test]
+    fn change_case_sensitive_after_expanding_char() {
+        // Case-sensitive: 'ß' occupies 1 position in haystack (no expansion).
+        // A match on "a" after 'ß' should replace 'a', not 'ß'.
+        let mut ed = editor_with_lines(&["ßa"]);
+        // case_respect defaults to false; set it true
+        ed.execute(&Command::Set(SetCommand::Case(CaseSetting::Respect)))
+            .unwrap();
+        ed.execute(&Command::Change {
+            from: "a".into(),
+            to: "X".into(),
+            target: None,
+            count: None,
+        })
+        .unwrap();
+        assert_eq!(ed.buffer().line_text(1), Some("ßX"));
+    }
+
+    #[test]
+    fn change_count_with_zone_skips_out_of_zone() {
+        // 4 lines: lines 1,3 have "old" in zone (cols 1-5), lines 2,4 have it outside
+        let mut ed = editor_with_lines(&[
+            "old  rest",     // "old" at cols 1-3 — in zone
+            "     old rest", // "old" at cols 6-8 — outside zone
+            "old  more",     // "old" at cols 1-3 — in zone
+            "     old more", // "old" at cols 6-8 — outside zone
+        ]);
+        ed.execute(&Command::Set(SetCommand::Zone(1, 5))).unwrap();
+        ed.current_line = 0; // start from TOF to scan all lines
+        let result = ed
+            .execute(&Command::Change {
+                from: "old".into(),
+                to: "NEW".into(),
+                target: None,
+                count: Some(2),
+            })
+            .unwrap();
+        // Should change lines 1 and 3 (in-zone), skip lines 2 and 4 (out-of-zone)
+        assert_eq!(result.message, Some("2 change(s) made".to_string()));
+        assert_eq!(ed.buffer().line_text(1), Some("NEW  rest"));
+        assert_eq!(ed.buffer().line_text(2), Some("     old rest")); // unchanged
+        assert_eq!(ed.buffer().line_text(3), Some("NEW  more"));
+        assert_eq!(ed.buffer().line_text(4), Some("     old more")); // unchanged
+    }
+
+    #[test]
+    fn change_no_match_does_not_push_undo() {
+        let mut ed = editor_with_lines(&["hello world"]);
+        let result = ed.execute(&Command::Change {
+            from: "xyz".into(),
+            to: "abc".into(),
+            target: None,
+            count: None,
+        });
+        assert!(result.is_err());
+        // No undo snapshot should have been pushed
+        let undo_result = ed.execute(&Command::Undo);
+        assert!(undo_result.is_err()); // nothing to undo
+    }
+
+    #[test]
+    fn compress_with_default_unlimited_zone() {
+        // Default zone_right is usize::MAX — COMPRESS should work without panic
+        let mut ed = editor_with_lines(&["hello   world"]);
+        ed.current_line = 1;
+        ed.execute(&Command::Set(SetCommand::Tabs(vec![1, 9])))
+            .unwrap();
+        // No explicit SET ZONE — uses default unlimited zone
+        ed.execute(&Command::Compress(None, None)).unwrap();
+        let text = ed.buffer().line_text(1).unwrap();
+        assert!(text.contains('\t'));
+    }
+
+    #[test]
+    fn expand_with_default_unlimited_zone() {
+        // Default zone_right is usize::MAX — EXPAND should work without panic
+        let mut ed = editor_with_lines(&["hello\tworld"]);
+        ed.current_line = 1;
+        ed.execute(&Command::Set(SetCommand::Tabs(vec![1, 9])))
+            .unwrap();
+        // No explicit SET ZONE — uses default unlimited zone
+        ed.execute(&Command::Expand(None, None)).unwrap();
+        let text = ed.buffer().line_text(1).unwrap();
+        assert!(!text.contains('\t'));
+    }
+
+    #[test]
+    fn compress_col1_exceeds_line_length_unlimited_zone() {
+        // Default unlimited zone — col1=80 on a short line is a no-op
+        let mut ed = editor_with_lines(&["hi"]);
+        ed.current_line = 1;
+        let result = ed.execute(&Command::Compress(Some(80), None));
+        assert!(result.is_ok());
+        assert_eq!(ed.buffer().line_text(1), Some("hi")); // unchanged
+    }
+
+    #[test]
+    fn expand_col1_exceeds_line_length_unlimited_zone() {
+        // Default unlimited zone — col1=80 on a short line is a no-op
+        let mut ed = editor_with_lines(&["hi"]);
+        ed.current_line = 1;
+        let result = ed.execute(&Command::Expand(Some(80), None));
+        assert!(result.is_ok());
+        assert_eq!(ed.buffer().line_text(1), Some("hi")); // unchanged
+    }
+
+    #[test]
+    fn compress_empty_line_noop() {
+        // Empty line with default zone — should be a no-op, not an error
+        let mut ed = editor_with_lines(&[""]);
+        ed.current_line = 1;
+        let result = ed.execute(&Command::Compress(None, None));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn expand_empty_line_noop() {
+        // Empty line with default zone — should be a no-op, not an error
+        let mut ed = editor_with_lines(&[""]);
+        ed.current_line = 1;
+        let result = ed.execute(&Command::Expand(None, None));
+        assert!(result.is_ok());
     }
 }

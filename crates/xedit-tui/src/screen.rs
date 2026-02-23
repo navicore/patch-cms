@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -89,6 +90,7 @@ enum RenderRow {
     },
     Eof,
     Scale,
+    TabLine,
     Reserved {
         text: String,
     },
@@ -173,6 +175,53 @@ fn make_scale_line(width: usize) -> Line<'static> {
             ruler.push(char::from_digit(digit, 10).unwrap_or('.'));
         } else if col % 5 == 0 {
             ruler.push('+');
+        } else {
+            ruler.push('.');
+        }
+    }
+
+    let text = format!("{}{}", BLANK_PREFIX, ruler);
+    Line::from(Span::styled(text, Style::default().fg(SCALE_FG)))
+}
+
+/// Extract the verify-visible columns from a line of text.
+/// `start` and `end` are 1-based column positions.
+/// Returns `Cow::Borrowed` when the full line is visible (zero allocation).
+fn apply_verify_filter<'a>(text: &'a str, start: usize, end: usize) -> Cow<'a, str> {
+    // O(1) conservative fast path: since byte_len >= char_count for all
+    // UTF-8, end >= byte_len implies end >= char_count — safe for any text.
+    if start <= 1 && end >= text.len() {
+        return Cow::Borrowed(text);
+    }
+    // Char-count check (one traversal, no allocation) before committing
+    // to a Vec<char>. Avoids allocating just to discard it.
+    let char_count = text.chars().count();
+    if start <= 1 && end >= char_count {
+        return Cow::Borrowed(text);
+    }
+    // Only allocate when we actually need to slice
+    let chars: Vec<char> = text.chars().collect();
+    let s = start.saturating_sub(1).min(chars.len());
+    let e = end.min(chars.len());
+    if s >= e {
+        Cow::Owned(String::new())
+    } else {
+        Cow::Owned(chars[s..e].iter().collect())
+    }
+}
+
+/// Build an IBM XEDIT–style tab-stop ruler (tabline).
+/// Places `T` at each tab stop column, `.` elsewhere.
+/// `verify_start` maps display position 1 to file column `verify_start`.
+fn make_tabline(width: usize, tab_stops: &[usize], verify_start: usize) -> Line<'static> {
+    let data_width = width.saturating_sub(PREFIX_WIDTH);
+    let mut ruler = String::with_capacity(data_width);
+
+    for col in 1..=data_width {
+        let file_col = verify_start.saturating_add(col - 1);
+        // tab_stops is sorted (by SET TABS parser), so binary_search is O(log n)
+        if tab_stops.binary_search(&file_col).is_ok() {
+            ruler.push('T');
         } else {
             ruler.push('.');
         }
@@ -362,6 +411,9 @@ fn build_screen_layout(editor: &Editor, height: usize, width: usize) -> ScreenLa
     // HEX takes priority over WRAP (IBM XEDIT behavior)
     let wrap_mode = editor.wrap() && !hex_mode;
     let scale_mode = editor.show_scale();
+    let tabline_mode = editor.show_tabline();
+    let verify_start = editor.verify_start();
+    let verify_end = editor.verify_end();
 
     let display_list = build_display_list(editor);
 
@@ -402,7 +454,11 @@ fn build_screen_layout(editor: &Editor, height: usize, width: usize) -> ScreenLa
                     let text_len = editor
                         .buffer()
                         .line_text(*n)
-                        .map(|t| t.chars().count())
+                        .map(|t| {
+                            apply_verify_filter(t, verify_start, verify_end)
+                                .chars()
+                                .count()
+                        })
                         .unwrap_or(0);
                     if text_len <= data_width {
                         1
@@ -496,6 +552,10 @@ fn build_screen_layout(editor: &Editor, height: usize, width: usize) -> ScreenLa
                         line_num: *n,
                         is_current,
                     });
+                    // TabLine goes after DataLine, before hex nibble rows
+                    if is_current && tabline_mode && current > 0 && content_rows.len() < available {
+                        content_rows.push(RenderRow::TabLine);
+                    }
                     if content_rows.len() < available {
                         content_rows.push(RenderRow::HexHigh { line_num: *n });
                     }
@@ -517,11 +577,18 @@ fn build_screen_layout(editor: &Editor, height: usize, width: usize) -> ScreenLa
                             chunk_idx: chunk,
                         });
                     }
+                    // TabLine after all physical rows of the wrapped line
+                    if is_current && tabline_mode && current > 0 && content_rows.len() < available {
+                        content_rows.push(RenderRow::TabLine);
+                    }
                 } else {
                     content_rows.push(RenderRow::DataLine {
                         line_num: *n,
                         is_current,
                     });
+                    if is_current && tabline_mode && current > 0 && content_rows.len() < available {
+                        content_rows.push(RenderRow::TabLine);
+                    }
                 }
             }
             DisplayItem::Shadow(count) => {
@@ -594,6 +661,8 @@ fn render_file_area(
 
     let shadow_fg = resolve_color(editor, "Shadow", SHADOW_FG);
     let data_width = width.saturating_sub(PREFIX_WIDTH);
+    let verify_start = editor.verify_start();
+    let verify_end = editor.verify_end();
 
     let mut lines: Vec<Line> = Vec::with_capacity(height);
 
@@ -608,11 +677,10 @@ fn render_file_area(
             } => {
                 let prefix_text = prefix_inputs.get(line_num);
                 if let Some(text) = editor.buffer().line_text(*line_num) {
-                    // make_data_line already truncates to data_width by chars,
-                    // so no pre-truncation needed here.
+                    let filtered = apply_verify_filter(text, verify_start, verify_end);
                     lines.push(make_data_line(
                         *line_num,
-                        text,
+                        &filtered,
                         *is_current,
                         editor.show_number(),
                         width,
@@ -622,13 +690,19 @@ fn render_file_area(
                     lines.push(make_empty_row(width));
                 }
             }
+            // Note: VERIFY in hex mode filters by code-point count, not byte
+            // count. For multi-byte chars the hex ruler and text ruler may
+            // disagree about column alignment. This matches XEDIT's original
+            // code-point-oriented design (EBCDIC was single-byte).
             RenderRow::HexHigh { line_num } => {
                 let text = editor.buffer().line_text(*line_num).unwrap_or("");
-                lines.push(make_hex_nibble_line(text, data_width, true));
+                let filtered = apply_verify_filter(text, verify_start, verify_end);
+                lines.push(make_hex_nibble_line(&filtered, data_width, true));
             }
             RenderRow::HexLow { line_num } => {
                 let text = editor.buffer().line_text(*line_num).unwrap_or("");
-                lines.push(make_hex_nibble_line(text, data_width, false));
+                let filtered = apply_verify_filter(text, verify_start, verify_end);
+                lines.push(make_hex_nibble_line(&filtered, data_width, false));
             }
             RenderRow::WrapCont {
                 line_num,
@@ -640,7 +714,8 @@ fn render_file_area(
                     "WrapCont should not exist when data_width == 0"
                 );
                 let text = editor.buffer().line_text(*line_num).unwrap_or("");
-                let chunk_text: String = text
+                let filtered = apply_verify_filter(text, verify_start, verify_end);
+                let chunk_text: String = filtered
                     .chars()
                     .skip(*chunk_idx * data_width)
                     .take(data_width)
@@ -676,6 +751,9 @@ fn render_file_area(
             }
             RenderRow::Scale => {
                 lines.push(make_scale_line(width));
+            }
+            RenderRow::TabLine => {
+                lines.push(make_tabline(width, editor.tab_stops(), verify_start));
             }
             RenderRow::Reserved { text } => {
                 let padded = format!("{:<width$}", text, width = width);
@@ -1124,6 +1202,8 @@ mod tests {
             "end",
         ]);
         ed.execute(&Command::Set(SetCommand::Wrap(true))).unwrap();
+        ed.execute(&Command::Set(SetCommand::Verify(1, 200)))
+            .unwrap();
 
         let layout = build_screen_layout(&ed, 40, 80);
 
@@ -1344,6 +1424,8 @@ mod tests {
         let text = "A".repeat(74).to_string() + &"B".repeat(74) + "CC";
         let mut ed = make_test_editor(&[&text]);
         ed.execute(&Command::Set(SetCommand::Wrap(true))).unwrap();
+        ed.execute(&Command::Set(SetCommand::Verify(1, 200)))
+            .unwrap();
         let layout = build_screen_layout(&ed, 20, 80);
 
         let data_width = 74usize;
@@ -1440,5 +1522,258 @@ mod tests {
         // Should be just the blank prefix, no panic or garbled output
         assert_eq!(text.trim(), "");
         assert!(text.len() >= PREFIX_WIDTH);
+    }
+
+    // --- apply_verify_filter ---
+
+    #[test]
+    fn verify_filter_default_shows_all() {
+        // Default verify 1..80 shows the full line (for lines <= 80 chars)
+        let result = apply_verify_filter("hello world", 1, 80);
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn verify_filter_restricts_display() {
+        // verify 1..5 shows only first 5 chars
+        let result = apply_verify_filter("hello world", 1, 5);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn verify_filter_beyond_line_length() {
+        // verify range beyond line length: show what exists
+        let result = apply_verify_filter("hi", 1, 80);
+        assert_eq!(result, "hi");
+    }
+
+    #[test]
+    fn verify_filter_middle_columns() {
+        // verify 7..11 shows "world"
+        let result = apply_verify_filter("hello world", 7, 11);
+        assert_eq!(result, "world");
+    }
+
+    #[test]
+    fn verify_filter_empty_when_start_beyond_text() {
+        let result = apply_verify_filter("hi", 10, 20);
+        assert_eq!(result, "");
+    }
+
+    // --- make_tabline ---
+
+    #[test]
+    fn tabline_marks_tab_stops() {
+        let tab_stops = vec![1, 9, 17];
+        let line = make_tabline(80, &tab_stops, 1);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let ruler = &text[PREFIX_WIDTH..];
+        // col 1 = T, col 2 = ., col 9 = T, col 17 = T
+        assert_eq!(ruler.chars().nth(0), Some('T'), "col 1 = T");
+        assert_eq!(ruler.chars().nth(1), Some('.'), "col 2 = .");
+        assert_eq!(ruler.chars().nth(8), Some('T'), "col 9 = T");
+        assert_eq!(ruler.chars().nth(16), Some('T'), "col 17 = T");
+    }
+
+    #[test]
+    fn tabline_no_stops() {
+        let line = make_tabline(20, &[], 1);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let ruler = &text[PREFIX_WIDTH..];
+        assert!(ruler.chars().all(|c| c == '.'));
+    }
+
+    // --- tabline layout ---
+
+    #[test]
+    fn layout_tabline_adds_row_after_current() {
+        let mut ed = make_test_editor(&["line1", "line2", "line3"]);
+        ed.execute(&Command::Down(1)).unwrap(); // current = 2
+        ed.execute(&Command::Set(SetCommand::TabLine(true)))
+            .unwrap();
+
+        let layout = build_screen_layout(&ed, 10, 80);
+        // Find the current DataLine row
+        let cur_row = layout
+            .rows
+            .iter()
+            .position(|r| {
+                matches!(
+                    r,
+                    RenderRow::DataLine {
+                        is_current: true,
+                        ..
+                    }
+                )
+            })
+            .expect("should have current line");
+        // Next row should be TabLine
+        assert!(
+            matches!(layout.rows[cur_row + 1], RenderRow::TabLine),
+            "TabLine should appear right after current line, got {:?}",
+            layout.rows[cur_row + 1]
+        );
+    }
+
+    #[test]
+    fn layout_tabline_not_at_tof() {
+        let mut ed = make_test_editor(&["line1"]);
+        ed.execute(&Command::Top).unwrap(); // current = 0 (TOF)
+        ed.execute(&Command::Set(SetCommand::TabLine(true)))
+            .unwrap();
+
+        let layout = build_screen_layout(&ed, 10, 80);
+        // TabLine should NOT appear at TOF
+        assert!(
+            !layout.rows.iter().any(|r| matches!(r, RenderRow::TabLine)),
+            "TabLine should not appear at TOF"
+        );
+    }
+
+    #[test]
+    fn layout_scale_and_tabline_coexist() {
+        let mut ed = make_test_editor(&["line1", "line2", "line3"]);
+        ed.execute(&Command::Set(SetCommand::Scale(true))).unwrap();
+        ed.execute(&Command::Set(SetCommand::TabLine(true)))
+            .unwrap();
+
+        let layout = build_screen_layout(&ed, 20, 80);
+        let has_scale = layout.rows.iter().any(|r| matches!(r, RenderRow::Scale));
+        let has_tabline = layout.rows.iter().any(|r| matches!(r, RenderRow::TabLine));
+        assert!(has_scale, "Should have scale");
+        assert!(has_tabline, "Should have tabline");
+
+        // Scale should appear before current line, tabline after
+        let scale_pos = layout
+            .rows
+            .iter()
+            .position(|r| matches!(r, RenderRow::Scale))
+            .unwrap();
+        let cur_pos = layout
+            .rows
+            .iter()
+            .position(|r| {
+                matches!(
+                    r,
+                    RenderRow::DataLine {
+                        is_current: true,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let tab_pos = layout
+            .rows
+            .iter()
+            .position(|r| matches!(r, RenderRow::TabLine))
+            .unwrap();
+        assert!(scale_pos < cur_pos, "Scale before current line");
+        assert!(tab_pos > cur_pos, "TabLine after current line");
+    }
+
+    #[test]
+    fn tabline_with_verify_offset() {
+        // VERIFY 10 80: display position 1 = file column 10
+        // Tab stop at file column 17 should appear at display position 8
+        let tab_stops = vec![1, 9, 17, 25];
+        let line = make_tabline(80, &tab_stops, 10);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let ruler = &text[PREFIX_WIDTH..];
+        // display pos 1 = file col 10, no tab stop → '.'
+        assert_eq!(ruler.chars().nth(0), Some('.'), "display 1 (file 10) = .");
+        // display pos 8 = file col 17, tab stop → 'T'
+        assert_eq!(ruler.chars().nth(7), Some('T'), "display 8 (file 17) = T");
+        // display pos 16 = file col 25, tab stop → 'T'
+        assert_eq!(ruler.chars().nth(15), Some('T'), "display 16 (file 25) = T");
+    }
+
+    #[test]
+    fn layout_wrap_verify_shorter_than_data_width() {
+        // 120-char line, VERIFY 1–60, data_width=74 (width=80-PREFIX_WIDTH=6)
+        // After verify filter: 60 chars fits in 1 row (60 < 74)
+        // Without the fix, row_counts would say 2 rows (120/74 rounded up)
+        let long_line = "A".repeat(120);
+        let mut ed = make_test_editor(&[&long_line]);
+        ed.execute(&Command::Set(SetCommand::Wrap(true))).unwrap();
+        ed.execute(&Command::Set(SetCommand::Verify(1, 60)))
+            .unwrap();
+
+        let layout = build_screen_layout(&ed, 10, 80);
+        // Should NOT have any WrapCont rows since filtered text (60 chars) fits in data_width (74)
+        let wrap_count = layout
+            .rows
+            .iter()
+            .filter(|r| matches!(r, RenderRow::WrapCont { .. }))
+            .count();
+        assert_eq!(
+            wrap_count, 0,
+            "Filtered 60-char text should fit in 74-col data_width without wrapping"
+        );
+    }
+
+    #[test]
+    fn layout_tabline_before_hex_rows() {
+        let mut ed = make_test_editor(&["Hello"]);
+        ed.execute(&Command::Set(SetCommand::Hex(true))).unwrap();
+        ed.execute(&Command::Set(SetCommand::TabLine(true)))
+            .unwrap();
+
+        let layout = build_screen_layout(&ed, 20, 80);
+        let cur_data = layout
+            .rows
+            .iter()
+            .position(|r| {
+                matches!(
+                    r,
+                    RenderRow::DataLine {
+                        is_current: true,
+                        ..
+                    }
+                )
+            })
+            .expect("should have current DataLine");
+        // TabLine should be immediately after DataLine, before HexHigh
+        assert!(
+            matches!(layout.rows[cur_data + 1], RenderRow::TabLine),
+            "TabLine should follow DataLine, got {:?}",
+            layout.rows[cur_data + 1]
+        );
+        assert!(
+            matches!(layout.rows[cur_data + 2], RenderRow::HexHigh { .. }),
+            "HexHigh should follow TabLine, got {:?}",
+            layout.rows[cur_data + 2]
+        );
+    }
+
+    #[test]
+    fn layout_tabline_after_all_wrap_rows() {
+        // Long line that wraps: TabLine should follow the last WrapCont, not chunk 0
+        let long_line = "A".repeat(200);
+        let mut ed = make_test_editor(&[&long_line]);
+        ed.execute(&Command::Set(SetCommand::Wrap(true))).unwrap();
+        ed.execute(&Command::Set(SetCommand::TabLine(true)))
+            .unwrap();
+        ed.execute(&Command::Set(SetCommand::Verify(1, 200)))
+            .unwrap();
+
+        let layout = build_screen_layout(&ed, 20, 80);
+        // Find the TabLine position
+        let tab_pos = layout
+            .rows
+            .iter()
+            .position(|r| matches!(r, RenderRow::TabLine))
+            .expect("should have TabLine");
+        // All WrapCont rows should precede the TabLine
+        let last_wrap = layout
+            .rows
+            .iter()
+            .rposition(|r| matches!(r, RenderRow::WrapCont { .. }))
+            .expect("should have WrapCont rows");
+        assert!(
+            tab_pos > last_wrap,
+            "TabLine (row {}) should be after last WrapCont (row {})",
+            tab_pos,
+            last_wrap
+        );
     }
 }
