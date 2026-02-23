@@ -22,8 +22,11 @@ pub trait SpoolBackend {
         data: &str,
     ) -> Result<u64>;
 
-    /// Dequeue the next file from the given device queue.
-    /// Returns the spool file metadata and its content.
+    /// Dequeue the next file from the given device queue (raw FIFO pop).
+    ///
+    /// Note: `SpoolManager::receive` uses `dequeue_by_id` instead (to skip
+    /// held files). This method is retained for backend-level operations
+    /// and testing.
     fn dequeue(&mut self, device: SpoolDevice) -> Result<(SpoolFile, String)>;
 
     /// List files in a device queue, optionally filtered by class.

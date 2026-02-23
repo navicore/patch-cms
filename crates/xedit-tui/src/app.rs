@@ -1007,37 +1007,27 @@ impl App {
         let filespec = format!("{} {} {}", fname, ftype, mode);
 
         // Write to CMS filesystem — re-enqueue on failure to prevent data loss
-        let write_ok = if let Some(ref mut proc) = self.cms_processor {
+        let write_err: Option<String> = if let Some(ref mut proc) = self.cms_processor {
             match cms_core::FileSpec::parse(&filespec) {
                 Ok(spec) => match proc.filesystem_mut().write_file(&spec, &content) {
                     Ok(()) => {
                         self.editor_mut()
                             .set_message(format!("File {} {} {} received", fname, ftype, mode));
-                        true
+                        None
                     }
-                    Err(e) => {
-                        self.editor_mut()
-                            .set_message(format!("DMSSPL100E Write error - {}", e));
-                        false
-                    }
+                    Err(e) => Some(e.to_string()),
                 },
-                Err(e) => {
-                    self.editor_mut()
-                        .set_message(format!("DMSSPL024E Invalid filespec - {}", e));
-                    false
-                }
+                Err(e) => Some(format!("Invalid filespec - {}", e)),
             }
         } else {
-            self.editor_mut()
-                .set_message("DMSSPL100E CMS not available");
-            false
+            Some("CMS not available".to_string())
         };
 
         // Re-enqueue with original metadata if the write failed.
         // Note: the file gets a new spool ID and goes to the back of the queue.
         // Hold status is not preserved (the user was actively receiving, so the
         // file was not held). This is an error-recovery path to prevent data loss.
-        if !write_ok {
+        if let Some(reason) = write_err {
             use cms_spool::SpoolBackend;
             if let Some(ref mut mgr) = self.spool_manager {
                 let dest = if spool_file.dest_user.is_empty() {
@@ -1056,8 +1046,8 @@ impl App {
                 ) {
                     Ok(new_id) => {
                         self.editor_mut().set_message(format!(
-                            "DMSSPL100E Write failed - file re-queued as spoolid {:>04}",
-                            new_id
+                            "DMSSPL100E {} - file re-queued as spoolid {:>04}",
+                            reason, new_id
                         ));
                     }
                     Err(e) => {

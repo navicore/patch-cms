@@ -84,7 +84,10 @@ impl DirectoryBackend {
         let path = self.next_id_path();
         let tmp_path = path.with_extension("tmp");
         fs::write(&tmp_path, id.to_string())?;
-        fs::rename(&tmp_path, &path)?;
+        if let Err(e) = fs::rename(&tmp_path, &path) {
+            let _ = fs::remove_file(&tmp_path); // best-effort cleanup
+            return Err(SpoolError::Io(e));
+        }
         Ok(())
     }
 
@@ -119,7 +122,13 @@ impl DirectoryBackend {
                     if let Some(stem) = path.file_stem() {
                         if let Some(id_str) = stem.to_str() {
                             if let Ok(file_id) = id_str.parse::<u64>() {
-                                let meta_str = fs::read_to_string(&path)?;
+                                let meta_str = match fs::read_to_string(&path) {
+                                    Ok(s) => s,
+                                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                        continue; // removed between readdir and read
+                                    }
+                                    Err(e) => return Err(SpoolError::Io(e)),
+                                };
                                 match SpoolFile::from_meta_string(&meta_str) {
                                     Some(sf) if sf.spool_id == file_id => {
                                         entries.push((sf, path.clone()));
@@ -254,14 +263,22 @@ impl SpoolBackend for DirectoryBackend {
                 None => true,
             };
             if matches {
-                // Remove .meta first; ignore NotFound (may already be gone)
+                // Best-effort removal: skip individual I/O failures so a
+                // single problematic entry doesn't prevent purging the rest.
                 match fs::remove_file(self.meta_path(device, sf.spool_id)) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(SpoolError::Io(e)),
+                    Ok(()) => {
+                        let _ = remove_file_ignore_not_found(&self.data_path(device, sf.spool_id));
+                        count += 1;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        // Already gone — still counts as purged
+                        let _ = remove_file_ignore_not_found(&self.data_path(device, sf.spool_id));
+                        count += 1;
+                    }
+                    Err(_) => {
+                        // Skip this entry; continue with the rest
+                    }
                 }
-                remove_file_ignore_not_found(&self.data_path(device, sf.spool_id))?;
-                count += 1;
             }
         }
 

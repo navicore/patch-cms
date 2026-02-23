@@ -78,6 +78,13 @@ mod tests {
     }
 
     #[test]
+    fn error_display_all_held() {
+        let e = SpoolError::AllHeld;
+        assert!(e.to_string().contains("HOLD"));
+        assert_eq!(e.rc(), 4);
+    }
+
+    #[test]
     fn error_display_invalid_parameter() {
         let e = SpoolError::InvalidParameter("FOOBAR".to_string());
         assert!(e.to_string().contains("FOOBAR"));
