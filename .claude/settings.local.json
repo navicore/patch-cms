@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(cargo clippy:*)",
-      "Bash(cargo test:*)"
+      "Bash(cargo test:*)",
+      "Bash(wc:*)",
+      "Bash(grep #\\\\[test\\\\]:*)"
     ]
   }
 }

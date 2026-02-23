@@ -21,6 +21,14 @@ fn main() {
             match cms_support::setup_cms(base_path) {
                 Ok((processor, cms_fs)) => {
                     app = app::App::with_cms(processor, cms_fs, base_path.to_string());
+
+                    #[cfg(feature = "spool")]
+                    {
+                        match cms_support::setup_spool(base_path, "USER") {
+                            Ok(spool_mgr) => app.set_spool_manager(spool_mgr),
+                            Err(e) => eprintln!("Spool setup warning: {}", e),
+                        }
+                    }
                 }
                 Err(e) => {
                     eprintln!("CMS setup error: {}", e);

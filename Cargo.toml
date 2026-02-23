@@ -4,6 +4,7 @@ members = [
     "crates/xedit-core",
     "crates/xedit-tui",
     "crates/cms-core",
+    "crates/cms-spool",
 ]
 
 [workspace.package]

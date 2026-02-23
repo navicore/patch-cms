@@ -168,6 +168,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cms-spool"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1201,6 +1208,7 @@ name = "xedit-tui"
 version = "0.1.0"
 dependencies = [
  "cms-core",
+ "cms-spool",
  "crossterm",
  "ratatui",
  "tempfile",

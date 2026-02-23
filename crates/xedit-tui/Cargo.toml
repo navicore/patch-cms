@@ -13,10 +13,12 @@ path = "src/main.rs"
 default = ["rexx"]
 rexx = ["xedit-core/rexx"]
 cms = ["dep:cms-core"]
+spool = ["cms", "dep:cms-spool"]
 
 [dependencies]
 xedit-core = { path = "../xedit-core", default-features = false }
 cms-core = { path = "../cms-core", optional = true }
+cms-spool = { path = "../cms-spool", optional = true }
 crossterm = "0.28"
 ratatui = "0.29"
 

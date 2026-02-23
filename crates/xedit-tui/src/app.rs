@@ -65,6 +65,10 @@ pub struct App {
     cms_processor: Option<cms_core::CommandProcessor>,
     #[cfg(feature = "cms")]
     cms_base_path: Option<String>,
+
+    // Spool manager (only present when built with --features spool)
+    #[cfg(feature = "spool")]
+    spool_manager: Option<cms_spool::SpoolManager<cms_spool::directory::DirectoryBackend>>,
 }
 
 impl App {
@@ -89,6 +93,8 @@ impl App {
             cms_processor: None,
             #[cfg(feature = "cms")]
             cms_base_path: None,
+            #[cfg(feature = "spool")]
+            spool_manager: None,
         }
     }
 
@@ -117,7 +123,18 @@ impl App {
             input_text: String::new(),
             should_quit: false,
             file_area_edited: false,
+            #[cfg(feature = "spool")]
+            spool_manager: None,
         }
+    }
+
+    /// Set the spool manager on an App already in CMS mode.
+    #[cfg(feature = "spool")]
+    pub fn set_spool_manager(
+        &mut self,
+        manager: cms_spool::SpoolManager<cms_spool::directory::DirectoryBackend>,
+    ) {
+        self.spool_manager = Some(manager);
     }
 
     // -- Accessor helpers --
@@ -802,7 +819,7 @@ impl App {
                 }
             },
             Err(xedit_err) => {
-                if !self.try_cms_command(text) {
+                if !self.try_cms_command(text) && !self.try_spool_command(text) {
                     self.editor_mut().set_message(xedit_err);
                 }
             }
@@ -836,6 +853,179 @@ impl App {
     #[cfg(not(feature = "cms"))]
     fn try_cms_command(&mut self, _text: &str) -> bool {
         false
+    }
+
+    /// Try to execute a command via the spool subsystem.
+    /// Returns true if the spool layer recognized and handled the command.
+    #[cfg(feature = "spool")]
+    fn try_spool_command(&mut self, text: &str) -> bool {
+        use cms_spool::command::{execute_spool_command, parse_spool_command, SpoolCommand};
+
+        let cmd = match parse_spool_command(text) {
+            Some(cmd) => cmd,
+            None => return false,
+        };
+
+        // SENDFILE and RECEIVE need CMS filesystem bridging
+        match &cmd {
+            SpoolCommand::SendFile {
+                filename,
+                filetype,
+                filemode,
+                dest_user,
+            } => {
+                return self.handle_sendfile(filename, filetype, *filemode, dest_user.as_deref());
+            }
+            SpoolCommand::Receive {
+                filename,
+                filetype,
+                filemode,
+            } => {
+                return self.handle_receive(
+                    filename.as_deref(),
+                    filetype.as_deref(),
+                    *filemode,
+                );
+            }
+            _ => {}
+        }
+
+        // All other spool commands dispatch directly
+        if let Some(ref mut mgr) = self.spool_manager {
+            let result = execute_spool_command(&cmd, mgr);
+            let msg = if result.messages.is_empty() {
+                format!("RC={}", result.rc)
+            } else {
+                result.messages.join(" | ")
+            };
+            self.editor_mut().set_message(msg);
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(not(feature = "spool"))]
+    fn try_spool_command(&mut self, _text: &str) -> bool {
+        false
+    }
+
+    /// Handle SENDFILE: read file from CMS filesystem, enqueue on reader.
+    #[cfg(feature = "spool")]
+    fn handle_sendfile(
+        &mut self,
+        filename: &str,
+        filetype: &str,
+        filemode: Option<char>,
+        dest_user: Option<&str>,
+    ) -> bool {
+        let mode = filemode.unwrap_or('A');
+        let filespec = format!("{} {} {}", filename, filetype, mode);
+
+        // Read file content from CMS filesystem
+        let content = if let Some(ref mut proc) = self.cms_processor {
+            match proc.filesystem().read_file(
+                &cms_core::FileSpec::parse(&filespec).unwrap_or_else(|_| {
+                    // Fallback — shouldn't happen with valid SENDFILE args
+                    cms_core::FileSpec::parse(&format!("{} {} A", filename, filetype)).unwrap()
+                }),
+            ) {
+                Ok(data) => data,
+                Err(e) => {
+                    self.editor_mut()
+                        .set_message(format!("DMSSPL028E File not found - {}", e));
+                    return true;
+                }
+            }
+        } else {
+            self.editor_mut()
+                .set_message("DMSSPL100I CMS not available");
+            return true;
+        };
+
+        // Enqueue on spool
+        if let Some(ref mut mgr) = self.spool_manager {
+            match mgr.send_file(filename, filetype, &content, dest_user) {
+                Ok(id) => {
+                    let dest = dest_user
+                        .map(|s| s.to_ascii_uppercase())
+                        .unwrap_or_else(|| mgr.user_id().to_string());
+                    self.editor_mut().set_message(format!(
+                        "File {} {} sent to {} - spoolid {:>04}",
+                        filename.to_ascii_uppercase(),
+                        filetype.to_ascii_uppercase(),
+                        dest,
+                        id
+                    ));
+                }
+                Err(e) => {
+                    self.editor_mut().set_message(e.to_string());
+                }
+            }
+        } else {
+            self.editor_mut()
+                .set_message("DMSSPL100I Spool not available");
+        }
+        true
+    }
+
+    /// Handle RECEIVE: dequeue from reader, write to CMS filesystem.
+    #[cfg(feature = "spool")]
+    fn handle_receive(
+        &mut self,
+        rename_fn: Option<&str>,
+        rename_ft: Option<&str>,
+        filemode: Option<char>,
+    ) -> bool {
+        let (orig_fn, orig_ft, content) = if let Some(ref mut mgr) = self.spool_manager {
+            match mgr.receive() {
+                Ok(result) => result,
+                Err(e) => {
+                    self.editor_mut().set_message(e.to_string());
+                    return true;
+                }
+            }
+        } else {
+            self.editor_mut()
+                .set_message("DMSSPL100I Spool not available");
+            return true;
+        };
+
+        let fname = rename_fn
+            .map(|s| s.to_ascii_uppercase())
+            .unwrap_or(orig_fn);
+        let ftype = rename_ft
+            .map(|s| s.to_ascii_uppercase())
+            .unwrap_or(orig_ft);
+        let mode = filemode.unwrap_or('A');
+
+        let filespec = format!("{} {} {}", fname, ftype, mode);
+
+        // Write to CMS filesystem
+        if let Some(ref mut proc) = self.cms_processor {
+            match cms_core::FileSpec::parse(&filespec) {
+                Ok(spec) => match proc.filesystem_mut().write_file(&spec, &content) {
+                    Ok(()) => {
+                        self.editor_mut().set_message(format!(
+                            "File {} {} {} received",
+                            fname, ftype, mode
+                        ));
+                    }
+                    Err(e) => {
+                        self.editor_mut()
+                            .set_message(format!("DMSSPL100I Write error - {}", e));
+                    }
+                },
+                Err(e) => {
+                    self.editor_mut()
+                        .set_message(format!("DMSSPL024E Invalid filespec - {}", e));
+                }
+            }
+        } else {
+            self.editor_mut()
+                .set_message("DMSSPL100I CMS not available");
+        }
+        true
     }
 
     fn apply_cursor_request(&mut self) {
