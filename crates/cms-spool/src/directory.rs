@@ -212,37 +212,22 @@ impl SpoolBackend for DirectoryBackend {
         Ok(())
     }
 
-    fn requeue_front(
-        &mut self,
-        device: SpoolDevice,
-        filename: &str,
-        filetype: &str,
-        origin_user: &str,
-        dest_user: &str,
-        class: SpoolClass,
-        data: &str,
-    ) -> Result<u64> {
-        // Find the minimum existing ID in the queue; place this file before it
-        let entries = self.read_entries(device)?;
-        let min_id = entries.first().map(|(sf, _)| sf.spool_id).unwrap_or(1);
-        let id = if min_id > 0 { min_id - 1 } else { 0 };
+    fn dequeue_by_id(&mut self, device: SpoolDevice, spool_id: u64) -> Result<(SpoolFile, String)> {
+        let meta_path = self.meta_path(device, spool_id);
+        if !meta_path.exists() {
+            return Err(SpoolError::FileNotFound(spool_id));
+        }
 
-        // If ID 0 is already taken, fall back to allocate_id (goes to back)
-        let id = if id == 0 && self.meta_path(device, 0).exists() {
-            self.allocate_id()?
-        } else {
-            id
-        };
+        let data = fs::read_to_string(self.data_path(device, spool_id))?;
+        let meta_str = fs::read_to_string(&meta_path)?;
+        let sf =
+            SpoolFile::from_meta_string(&meta_str).ok_or(SpoolError::FileNotFound(spool_id))?;
 
-        let mut sf = SpoolFile::new(id, filename, filetype, origin_user, device);
-        sf.dest_user = dest_user.to_ascii_uppercase();
-        sf.class = class;
-        sf.records = data.lines().count();
+        // Remove .meta first so orphaned .data is harmless if interrupted
+        fs::remove_file(meta_path)?;
+        remove_file_ignore_not_found(&self.data_path(device, spool_id))?;
 
-        fs::write(self.data_path(device, id), data)?;
-        fs::write(self.meta_path(device, id), sf.to_meta_string())?;
-
-        Ok(id)
+        Ok((sf, data))
     }
 
     fn purge_all(&mut self, device: SpoolDevice, class: Option<SpoolClass>) -> Result<usize> {

@@ -130,44 +130,18 @@ impl<B: SpoolBackend> SpoolManager<B> {
 
     /// Receive the next file from the reader (RECEIVE).
     ///
-    /// Skips held files and dequeues the first non-held entry.
+    /// Skips held files and dequeues the first non-held entry by ID,
+    /// leaving all other entries (including held ones) in place.
     /// Returns `AllHeld` (RC=4) if only held files remain.
     /// Returns `ReaderEmpty` (RC=2) if the queue is empty.
     pub fn receive(&mut self) -> Result<(SpoolFile, String)> {
-        // Scan the queue for the first non-held file
         let files = self.backend.list_queue(SpoolDevice::Reader, None)?;
         if files.is_empty() {
             return Err(crate::error::SpoolError::ReaderEmpty);
         }
-        let target = files.iter().find(|sf| !sf.hold);
-        match target {
+        match files.iter().find(|sf| !sf.hold) {
             None => Err(crate::error::SpoolError::AllHeld),
-            Some(sf) => {
-                let target_id = sf.spool_id;
-                // Dequeue entries from front, re-enqueuing held ones,
-                // until we reach the target
-                let mut held_files: Vec<(SpoolFile, String)> = Vec::new();
-                loop {
-                    let (sf, data) = self.backend.dequeue(SpoolDevice::Reader)?;
-                    if sf.spool_id == target_id {
-                        // Re-enqueue the held files we passed over
-                        for (hsf, hdata) in held_files {
-                            let hsf: SpoolFile = hsf;
-                            self.backend.enqueue(
-                                SpoolDevice::Reader,
-                                &hsf.filename,
-                                &hsf.filetype,
-                                &hsf.origin_user,
-                                &hsf.dest_user,
-                                hsf.class,
-                                &hdata,
-                            )?;
-                        }
-                        return Ok((sf, data));
-                    }
-                    held_files.push((sf, data));
-                }
-            }
+            Some(sf) => self.backend.dequeue_by_id(SpoolDevice::Reader, sf.spool_id),
         }
     }
 
@@ -505,10 +479,11 @@ mod tests {
         let (sf, data) = mgr.receive().unwrap();
         assert_eq!(sf.filename, "FREE");
         assert_eq!(data, "free data\n");
-        // Held file should still be in queue
+        // Held file should still be in queue with hold flag preserved
         let remaining = mgr.query_device(SpoolDevice::Reader, None).unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].filename, "HELD");
+        assert!(remaining[0].hold);
     }
 
     #[test]

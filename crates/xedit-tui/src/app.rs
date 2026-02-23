@@ -1042,7 +1042,7 @@ impl App {
                 } else {
                     Some(spool_file.dest_user.as_str())
                 };
-                match mgr.backend_mut().requeue_front(
+                match mgr.backend_mut().enqueue(
                     cms_spool::SpoolDevice::Reader,
                     &spool_file.filename,
                     &spool_file.filetype,

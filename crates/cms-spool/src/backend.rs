@@ -36,20 +36,9 @@ pub trait SpoolBackend {
     /// Returns the number of files purged.
     fn purge_all(&mut self, device: SpoolDevice, class: Option<SpoolClass>) -> Result<usize>;
 
-    /// Re-enqueue a file at the front of a device queue, preserving FIFO position.
-    /// Used to restore a file after a failed RECEIVE write.
-    /// Returns the assigned spool ID.
-    #[allow(clippy::too_many_arguments)]
-    fn requeue_front(
-        &mut self,
-        device: SpoolDevice,
-        filename: &str,
-        filetype: &str,
-        origin_user: &str,
-        dest_user: &str,
-        class: SpoolClass,
-        data: &str,
-    ) -> Result<u64>;
+    /// Dequeue a specific file by spool ID from a device queue.
+    /// Returns the spool file metadata and content, leaving all other entries in place.
+    fn dequeue_by_id(&mut self, device: SpoolDevice, spool_id: u64) -> Result<(SpoolFile, String)>;
 
     /// Transfer a file from one device queue to another (e.g., printer → reader for SENDFILE).
     /// This is an internal operation: enqueue on target, dequeue from source.
@@ -141,29 +130,15 @@ impl SpoolBackend for InMemoryBackend {
         Ok(files)
     }
 
-    fn requeue_front(
-        &mut self,
-        device: SpoolDevice,
-        filename: &str,
-        filetype: &str,
-        origin_user: &str,
-        dest_user: &str,
-        class: SpoolClass,
-        data: &str,
-    ) -> Result<u64> {
-        let id = self.next_id;
-        self.next_id += 1;
-
-        let mut sf = SpoolFile::new(id, filename, filetype, origin_user, device);
-        sf.dest_user = dest_user.to_ascii_uppercase();
-        sf.class = class;
-        sf.records = data.lines().count();
-
-        self.queues
-            .entry(device)
-            .or_default()
-            .push_front((sf, data.to_string()));
-        Ok(id)
+    fn dequeue_by_id(&mut self, device: SpoolDevice, spool_id: u64) -> Result<(SpoolFile, String)> {
+        let queue = self.queues.entry(device).or_default();
+        let pos = queue.iter().position(|(sf, _)| sf.spool_id == spool_id);
+        match pos {
+            Some(idx) => Ok(queue
+                .remove(idx)
+                .expect("index from position should be valid")),
+            None => Err(crate::error::SpoolError::FileNotFound(spool_id)),
+        }
     }
 
     fn purge(&mut self, device: SpoolDevice, spool_id: u64) -> Result<()> {

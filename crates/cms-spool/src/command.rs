@@ -185,7 +185,10 @@ fn parse_spool_device(parts: &[&str]) -> Option<SpoolCommand> {
             "COPY" => {
                 i += 1;
                 if i < parts.len() {
-                    copies = parts[i].parse().ok();
+                    match parts[i].parse::<u32>() {
+                        Ok(n) if n >= 1 => copies = Some(n),
+                        _ => return None, // invalid copy count — RC=24
+                    }
                 }
             }
             _ => return None, // unknown option — RC=24
@@ -241,17 +244,22 @@ fn parse_sendfile(parts: &[&str]) -> Option<SpoolCommand> {
         }
     }
 
-    // Optional TO <userid>
-    while i < parts.len() {
+    // Optional TO <userid> — reject any other tokens
+    if i < parts.len() {
         let word = parts[i].to_ascii_uppercase();
         if word == "TO" {
             i += 1;
             if i < parts.len() {
                 dest_user = Some(parts[i].to_ascii_uppercase());
+                i += 1;
             }
-            break;
+        } else {
+            return None; // unexpected token — RC=24
         }
-        i += 1;
+    }
+    // Reject trailing tokens
+    if i < parts.len() {
+        return None;
     }
 
     Some(SpoolCommand::SendFile {
@@ -329,10 +337,14 @@ fn parse_query(parts: &[&str]) -> Option<SpoolCommand> {
 
     let class = if parts.len() > 1 {
         let word = parts[1].to_ascii_uppercase();
-        if word == "CLASS" && parts.len() > 2 {
-            SpoolClass::new(parts[2].chars().next().unwrap_or('A'))
+        if word == "CLASS" {
+            if parts.len() > 2 {
+                SpoolClass::new(parts[2].chars().next().unwrap_or('A'))
+            } else {
+                return None; // dangling CLASS without value — RC=24
+            }
         } else {
-            None
+            return None; // unknown query option — RC=24
         }
     } else {
         None
