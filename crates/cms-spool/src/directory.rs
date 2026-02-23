@@ -171,7 +171,7 @@ impl SpoolBackend for DirectoryBackend {
     fn dequeue(&mut self, device: SpoolDevice) -> Result<(SpoolFile, String)> {
         let entries = self.read_entries(device)?;
         if entries.is_empty() {
-            return Err(SpoolError::ReaderEmpty);
+            return Err(SpoolError::QueueEmpty(device));
         }
 
         let (sf, _meta_path) = &entries[0];
@@ -284,27 +284,28 @@ impl SpoolBackend for DirectoryBackend {
             SpoolFile::from_meta_string(&meta_str).ok_or(SpoolError::FileNotFound(spool_id))?;
         let data = fs::read_to_string(&data_path)?;
 
-        // Remove from source — .meta first so orphaned .data is harmless
+        // Allocate new ID BEFORE deleting source — prevents data loss if
+        // allocate_id fails (e.g. disk full writing .next_id)
+        let new_id = self.allocate_id()?;
+
+        // Write destination — .meta first for crash safety
+        sf.spool_id = new_id;
+        sf.device = SpoolDevice::Reader;
+        sf.dest_user = dest_user.to_ascii_uppercase();
+
+        fs::write(
+            self.meta_path(SpoolDevice::Reader, new_id),
+            sf.to_meta_string(),
+        )?;
+        fs::write(self.data_path(SpoolDevice::Reader, new_id), &data)?;
+
+        // Remove source only after destination is fully written
         match fs::remove_file(&meta_path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(SpoolError::Io(e)),
         }
         remove_file_ignore_not_found(&data_path)?;
-
-        // Allocate a fresh ID to avoid collision with existing reader files
-        let new_id = self.allocate_id()?;
-
-        // Update metadata and write to reader with new ID
-        sf.spool_id = new_id;
-        sf.device = SpoolDevice::Reader;
-        sf.dest_user = dest_user.to_ascii_uppercase();
-
-        fs::write(self.data_path(SpoolDevice::Reader, new_id), &data)?;
-        fs::write(
-            self.meta_path(SpoolDevice::Reader, new_id),
-            sf.to_meta_string(),
-        )?;
 
         Ok(())
     }

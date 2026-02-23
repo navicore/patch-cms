@@ -133,11 +133,11 @@ impl<B: SpoolBackend> SpoolManager<B> {
     /// Skips held files and dequeues the first non-held entry by ID,
     /// leaving all other entries (including held ones) in place.
     /// Returns `AllHeld` (RC=4) if only held files remain.
-    /// Returns `ReaderEmpty` (RC=2) if the queue is empty.
+    /// Returns `QueueEmpty` (RC=2) if the queue is empty.
     pub fn receive(&mut self) -> Result<(SpoolFile, String)> {
         let files = self.backend.list_queue(SpoolDevice::Reader, None)?;
         if files.is_empty() {
-            return Err(crate::error::SpoolError::ReaderEmpty);
+            return Err(crate::error::SpoolError::QueueEmpty(SpoolDevice::Reader));
         }
         match files.iter().find(|sf| !sf.hold) {
             None => Err(crate::error::SpoolError::AllHeld),
@@ -410,7 +410,7 @@ mod tests {
                 assert_eq!(e.rc(), 2);
                 assert!(e.to_string().contains("No files"));
             }
-            _ => panic!("Expected ReaderEmpty error"),
+            _ => panic!("Expected QueueEmpty error"),
         }
     }
 

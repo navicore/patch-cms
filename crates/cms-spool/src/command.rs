@@ -383,7 +383,7 @@ fn parse_query(parts: &[&str]) -> Option<SpoolCommand> {
         let word = parts[1].to_ascii_uppercase();
         if word == "CLASS" {
             if parts.len() > 2 {
-                SpoolClass::new(parts[2].chars().next().unwrap_or('A'))
+                parts[2].chars().next().and_then(SpoolClass::new)
             } else {
                 return None; // dangling CLASS without value — RC=24
             }
@@ -471,8 +471,7 @@ pub fn execute_spool_command<B: SpoolBackend>(
                 if files.is_empty() {
                     SpoolCommandResult::ok_with(vec![format!("No files in {}", device)])
                 } else {
-                    let mut msgs =
-                        vec!["SPOOLID  FILE     TYPE     CL RECS  HOLD DEST".to_string()];
+                    let mut msgs = vec!["SPOOLID FILE     TYPE     CL  RECS HOLD DEST".to_string()];
                     for f in &files {
                         msgs.push(f.summary());
                     }

@@ -113,7 +113,7 @@ impl SpoolBackend for InMemoryBackend {
         let queue = self.queues.entry(device).or_default();
         queue
             .pop_front()
-            .ok_or(crate::error::SpoolError::ReaderEmpty)
+            .ok_or(crate::error::SpoolError::QueueEmpty(device))
     }
 
     fn list_queue(&self, device: SpoolDevice, class: Option<SpoolClass>) -> Result<Vec<SpoolFile>> {

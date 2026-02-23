@@ -5,8 +5,8 @@ use std::io;
 #[derive(Debug)]
 #[allow(dead_code)] // InvalidParameter and UnknownCommand reserved for future use
 pub enum SpoolError {
-    /// Reader queue is empty (RC=2)
-    ReaderEmpty,
+    /// Device queue is empty (RC=2)
+    QueueEmpty(crate::device::SpoolDevice),
     /// Invalid parameter or option (RC=24)
     InvalidParameter(String),
     /// File not found in spool queue (RC=28)
@@ -22,7 +22,9 @@ pub enum SpoolError {
 impl fmt::Display for SpoolError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SpoolError::ReaderEmpty => write!(f, "DMSSPR002E No files in your reader"),
+            SpoolError::QueueEmpty(device) => {
+                write!(f, "DMSSPR002E No files in your {}", device)
+            }
             SpoolError::InvalidParameter(s) => {
                 write!(f, "DMSSPR024E Invalid parameter - {}", s)
             }
@@ -52,7 +54,7 @@ impl SpoolError {
     /// Return the CMS-style return code for this error.
     pub fn rc(&self) -> i32 {
         match self {
-            SpoolError::ReaderEmpty => 2,
+            SpoolError::QueueEmpty(_) => 2,
             SpoolError::AllHeld => 4,
             SpoolError::InvalidParameter(_) => 24,
             SpoolError::FileNotFound(_) => 28,
@@ -69,9 +71,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn error_display_reader_empty() {
-        let e = SpoolError::ReaderEmpty;
-        assert!(e.to_string().contains("No files in your reader"));
+    fn error_display_queue_empty() {
+        let e = SpoolError::QueueEmpty(crate::device::SpoolDevice::Reader);
+        assert!(e.to_string().contains("No files in your READER"));
         assert_eq!(e.rc(), 2);
     }
 
@@ -118,7 +120,7 @@ mod tests {
     fn error_messages_have_ibm_prefix() {
         // All error messages should start with DMSSPRnnnE or DMSSPRnnnI
         let errors = vec![
-            SpoolError::ReaderEmpty,
+            SpoolError::QueueEmpty(crate::device::SpoolDevice::Reader),
             SpoolError::AllHeld,
             SpoolError::InvalidParameter("X".to_string()),
             SpoolError::FileNotFound(1),

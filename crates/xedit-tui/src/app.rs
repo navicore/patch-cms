@@ -1033,7 +1033,10 @@ impl App {
             false
         };
 
-        // Re-enqueue with original metadata if the write failed
+        // Re-enqueue with original metadata if the write failed.
+        // Note: the file gets a new spool ID and goes to the back of the queue.
+        // Hold status is not preserved (the user was actively receiving, so the
+        // file was not held). This is an error-recovery path to prevent data loss.
         if !write_ok {
             use cms_spool::SpoolBackend;
             if let Some(ref mut mgr) = self.spool_manager {
