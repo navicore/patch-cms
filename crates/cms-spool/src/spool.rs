@@ -139,7 +139,12 @@ impl<B: SpoolBackend> SpoolManager<B> {
         if files.is_empty() {
             return Err(crate::error::SpoolError::QueueEmpty(SpoolDevice::Reader));
         }
-        match files.iter().find(|sf| !sf.hold) {
+        // Find first non-held file addressed to this user (or with no dest)
+        let user_id = &self.user_id;
+        let target = files
+            .iter()
+            .find(|sf| !sf.hold && (sf.dest_user.is_empty() || sf.dest_user == *user_id));
+        match target {
             None => Err(crate::error::SpoolError::AllHeld),
             Some(sf) => self.backend.dequeue_by_id(SpoolDevice::Reader, sf.spool_id),
         }

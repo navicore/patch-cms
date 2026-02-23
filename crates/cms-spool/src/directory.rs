@@ -67,16 +67,15 @@ impl DirectoryBackend {
 
     fn read_next_id(&self) -> Result<u64> {
         let path = self.next_id_path();
-        if path.exists() {
-            let content = fs::read_to_string(&path)?;
-            content.trim().parse().map_err(|_| {
+        match fs::read_to_string(&path) {
+            Ok(content) => content.trim().parse().map_err(|_| {
                 SpoolError::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!("Corrupt .next_id file: {:?}", path),
                 ))
-            })
-        } else {
-            Ok(1)
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(1),
+            Err(e) => Err(SpoolError::Io(e)),
         }
     }
 
@@ -119,14 +118,16 @@ impl DirectoryBackend {
                 if ext == "meta" {
                     if let Some(stem) = path.file_stem() {
                         if let Some(id_str) = stem.to_str() {
-                            if let Ok(_id) = id_str.parse::<u64>() {
+                            if let Ok(file_id) = id_str.parse::<u64>() {
                                 let meta_str = fs::read_to_string(&path)?;
                                 match SpoolFile::from_meta_string(&meta_str) {
-                                    Some(sf) => entries.push((sf, path.clone())),
-                                    None => {
-                                        // Skip corrupt metadata — the entry is invisible
-                                        // but we don't brick the entire queue. The orphaned
-                                        // .data file (if any) is harmless on disk.
+                                    Some(sf) if sf.spool_id == file_id => {
+                                        entries.push((sf, path.clone()));
+                                    }
+                                    _ => {
+                                        // Skip corrupt or mismatched metadata.
+                                        // The entry is invisible but we don't
+                                        // brick the entire queue.
                                     }
                                 }
                             }
@@ -624,5 +625,29 @@ mod tests {
             .unwrap();
 
         assert_eq!(id2, id1 + 1);
+    }
+
+    #[test]
+    fn interrupted_enqueue_meta_only() {
+        let (backend, _dir) = make_backend();
+        // Simulate a crashed enqueue: .meta exists but .data is missing
+        let meta_content =
+            "SPOOL_ID=99\nFILENAME=ORPHAN\nFILETYPE=DATA\nORIGIN_USER=U\nDEVICE=READER\n";
+        fs::write(backend.meta_path(SpoolDevice::Reader, 99), meta_content).unwrap();
+
+        // list_queue sees it
+        let files = backend.list_queue(SpoolDevice::Reader, None).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].filename, "ORPHAN");
+
+        // dequeue_by_id fails with Io error (missing .data)
+        let mut backend = backend;
+        let result = backend.dequeue_by_id(SpoolDevice::Reader, 99);
+        assert!(result.is_err());
+
+        // purge can clean it up
+        backend.purge(SpoolDevice::Reader, 99).unwrap();
+        let files = backend.list_queue(SpoolDevice::Reader, None).unwrap();
+        assert!(files.is_empty());
     }
 }

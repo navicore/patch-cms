@@ -160,17 +160,20 @@ fn parse_spool_device(parts: &[&str]) -> Option<SpoolCommand> {
     let mut continuous = None;
     let mut copies = None;
 
-    let mut seen = std::collections::HashSet::new();
+    let mut seen: std::collections::HashSet<&'static str> = std::collections::HashSet::new();
     let mut i = 1;
     while i < parts.len() {
         let word = parts[i].to_ascii_uppercase();
         // Reject duplicate keywords
-        let keyword = match word.as_str() {
+        let keyword: &'static str = match word.as_str() {
             "HOLD" | "NOHOLD" => "HOLD",
             "CONT" | "NOCONT" => "CONT",
-            other => other,
+            "CLASS" => "CLASS",
+            "DEST" => "DEST",
+            "COPY" => "COPY",
+            _ => "", // unknown — handled by match below
         };
-        if !seen.insert(keyword.to_string()) {
+        if !keyword.is_empty() && !seen.insert(keyword) {
             return None; // duplicate option — RC=24
         }
         match word.as_str() {
@@ -405,9 +408,15 @@ fn parse_query(parts: &[&str]) -> Option<SpoolCommand> {
 
 /// Execute a parsed spool command against a SpoolManager.
 ///
-/// This function bridges parsed commands to the SpoolManager API.
-/// SENDFILE and RECEIVE require external file I/O (reading/writing CMS files),
-/// so they return special result codes that the TUI layer handles.
+/// Execute a parsed spool command against a SpoolManager.
+///
+/// Handles SPOOL, PURGE, and QUERY commands. SENDFILE and RECEIVE require
+/// external file I/O and must be handled by the caller before invoking this
+/// function (see `SpoolCommand::SendFile` and `SpoolCommand::Receive`).
+///
+/// # Panics
+///
+/// Panics if called with `SpoolCommand::SendFile` or `SpoolCommand::Receive`.
 pub fn execute_spool_command<B: SpoolBackend>(
     cmd: &SpoolCommand,
     manager: &mut SpoolManager<B>,
@@ -445,13 +454,10 @@ pub fn execute_spool_command<B: SpoolBackend>(
             )])
         }
         SpoolCommand::SendFile { .. } => {
-            // SENDFILE requires external file I/O — the TUI layer handles this.
-            // Return a sentinel that the TUI can detect.
-            SpoolCommandResult::error(-1, "SENDFILE must be handled by the TUI layer".to_string())
+            panic!("SENDFILE must be handled by the caller, not execute_spool_command")
         }
         SpoolCommand::Receive { .. } => {
-            // RECEIVE requires external file I/O — the TUI layer handles this.
-            SpoolCommandResult::error(-1, "RECEIVE must be handled by the TUI layer".to_string())
+            panic!("RECEIVE must be handled by the caller, not execute_spool_command")
         }
         SpoolCommand::Purge { device, target } => match target {
             PurgeTarget::All => match manager.purge_all(*device, None) {
@@ -779,19 +785,19 @@ mod tests {
     }
 
     #[test]
-    fn execute_sendfile_returns_sentinel() {
+    #[should_panic(expected = "SENDFILE must be handled by the caller")]
+    fn execute_sendfile_panics() {
         let mut mgr = make_manager();
         let cmd = parse_spool_command("SE MYFILE DATA A").unwrap();
-        let result = execute_spool_command(&cmd, &mut mgr);
-        assert_eq!(result.rc, -1); // sentinel for TUI handling
+        let _ = execute_spool_command(&cmd, &mut mgr);
     }
 
     #[test]
-    fn execute_receive_returns_sentinel() {
+    #[should_panic(expected = "RECEIVE must be handled by the caller")]
+    fn execute_receive_panics() {
         let mut mgr = make_manager();
         let cmd = parse_spool_command("REC").unwrap();
-        let result = execute_spool_command(&cmd, &mut mgr);
-        assert_eq!(result.rc, -1); // sentinel for TUI handling
+        let _ = execute_spool_command(&cmd, &mut mgr);
     }
 
     #[test]
