@@ -919,14 +919,19 @@ impl App {
         let mode = filemode.unwrap_or('A');
         let filespec = format!("{} {} {}", filename, filetype, mode);
 
+        // Parse filespec — report error if user input is invalid
+        let spec = match cms_core::FileSpec::parse(&filespec) {
+            Ok(s) => s,
+            Err(e) => {
+                self.editor_mut()
+                    .set_message(format!("DMSSPL024E Invalid filespec - {}", e));
+                return true;
+            }
+        };
+
         // Read file content from CMS filesystem
         let content = if let Some(ref mut proc) = self.cms_processor {
-            match proc
-                .filesystem()
-                .read_file(&cms_core::FileSpec::parse(&filespec).unwrap_or_else(|_| {
-                    // Fallback — shouldn't happen with valid SENDFILE args
-                    cms_core::FileSpec::parse(&format!("{} {} A", filename, filetype)).unwrap()
-                })) {
+            match proc.filesystem().read_file(&spec) {
                 Ok(data) => data,
                 Err(e) => {
                     self.editor_mut()
@@ -968,7 +973,8 @@ impl App {
 
     /// Handle RECEIVE: dequeue from reader, write to CMS filesystem.
     ///
-    /// If the write fails, re-enqueue the file so data is not lost.
+    /// If the write fails, re-enqueue the file with its original metadata
+    /// so data is not lost.
     #[cfg(feature = "spool")]
     fn handle_receive(
         &mut self,
@@ -976,7 +982,7 @@ impl App {
         rename_ft: Option<&str>,
         filemode: Option<char>,
     ) -> bool {
-        let (orig_fn, orig_ft, content) = if let Some(ref mut mgr) = self.spool_manager {
+        let (spool_file, content) = if let Some(ref mut mgr) = self.spool_manager {
             match mgr.receive() {
                 Ok(result) => result,
                 Err(e) => {
@@ -992,10 +998,10 @@ impl App {
 
         let fname = rename_fn
             .map(|s| s.to_ascii_uppercase())
-            .unwrap_or_else(|| orig_fn.clone());
+            .unwrap_or_else(|| spool_file.filename.clone());
         let ftype = rename_ft
             .map(|s| s.to_ascii_uppercase())
-            .unwrap_or_else(|| orig_ft.clone());
+            .unwrap_or_else(|| spool_file.filetype.clone());
         let mode = filemode.unwrap_or('A');
 
         let filespec = format!("{} {} {}", fname, ftype, mode);
@@ -1027,10 +1033,27 @@ impl App {
             false
         };
 
-        // Re-enqueue the file if the write failed so data is not lost
+        // Re-enqueue with original metadata if the write failed
         if !write_ok {
+            use cms_spool::SpoolBackend;
             if let Some(ref mut mgr) = self.spool_manager {
-                let _ = mgr.send_file(&orig_fn, &orig_ft, &content, None);
+                let dest = if spool_file.dest_user.is_empty() {
+                    None
+                } else {
+                    Some(spool_file.dest_user.as_str())
+                };
+                if let Err(e) = mgr.backend_mut().enqueue(
+                    cms_spool::SpoolDevice::Reader,
+                    &spool_file.filename,
+                    &spool_file.filetype,
+                    &spool_file.origin_user,
+                    dest.unwrap_or(""),
+                    spool_file.class,
+                    &content,
+                ) {
+                    self.editor_mut()
+                        .set_message(format!("DMSSPL100I Re-enqueue failed, data lost - {}", e));
+                }
             }
         }
         true

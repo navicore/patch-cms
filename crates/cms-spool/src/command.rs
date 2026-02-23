@@ -285,7 +285,12 @@ fn parse_purge(parts: &[&str]) -> Option<SpoolCommand> {
 
     let device = lookup_device(parts[0])?;
 
-    let target = if parts.len() > 1 {
+    // Require explicit ALL or a spool ID — bare "PURGE <device>" is invalid (RC=24)
+    if parts.len() < 2 {
+        return None;
+    }
+
+    let target = {
         let word = parts[1].to_ascii_uppercase();
         if word == "ALL" {
             PurgeTarget::All
@@ -294,8 +299,6 @@ fn parse_purge(parts: &[&str]) -> Option<SpoolCommand> {
         } else {
             return None;
         }
-    } else {
-        PurgeTarget::All
     };
 
     Some(SpoolCommand::Purge { device, target })
@@ -577,15 +580,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_purge_default_all() {
-        let cmd = parse_spool_command("PUR PRT").unwrap();
-        match cmd {
-            SpoolCommand::Purge { device, target } => {
-                assert_eq!(device, SpoolDevice::Printer);
-                assert_eq!(target, PurgeTarget::All);
-            }
-            _ => panic!("Expected Purge command"),
-        }
+    fn parse_purge_bare_device_is_error() {
+        // Bare "PUR PRT" without ALL or spool ID is invalid per CMS semantics
+        assert!(parse_spool_command("PUR PRT").is_none());
     }
 
     #[test]
@@ -737,7 +734,7 @@ mod tests {
 
     #[test]
     fn abbreviation_pur_works() {
-        assert!(parse_spool_command("PUR R").is_some());
+        assert!(parse_spool_command("PUR R ALL").is_some());
     }
 
     #[test]

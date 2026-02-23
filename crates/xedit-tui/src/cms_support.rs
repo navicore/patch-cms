@@ -186,9 +186,9 @@ mod tests {
 
         mgr.send_file("TEST", "DATA", "hello world\n", None)
             .unwrap();
-        let (fname, ftype, content) = mgr.receive().unwrap();
-        assert_eq!(fname, "TEST");
-        assert_eq!(ftype, "DATA");
+        let (sf, content) = mgr.receive().unwrap();
+        assert_eq!(sf.filename, "TEST");
+        assert_eq!(sf.filetype, "DATA");
         assert_eq!(content, "hello world\n");
     }
 }

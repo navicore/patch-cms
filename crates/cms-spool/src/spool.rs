@@ -102,8 +102,9 @@ impl<B: SpoolBackend> SpoolManager<B> {
 
     /// Send a file to a user's reader (SENDFILE).
     ///
-    /// The file content is provided directly. The file is enqueued on the
-    /// reader device using the printer's current class configuration.
+    /// The file content is provided directly. The file is punched through
+    /// the virtual punch device and routed to the recipient's reader.
+    /// The spool class comes from the punch device configuration.
     pub fn send_file(
         &mut self,
         filename: &str,
@@ -114,7 +115,7 @@ impl<B: SpoolBackend> SpoolManager<B> {
         let dest = dest_user
             .map(|s| s.to_ascii_uppercase())
             .unwrap_or_else(|| self.user_id.clone());
-        let class = self.reader_config.class;
+        let class = self.punch_config.class;
 
         self.backend.enqueue(
             SpoolDevice::Reader,
@@ -129,10 +130,9 @@ impl<B: SpoolBackend> SpoolManager<B> {
 
     /// Receive the next file from the reader (RECEIVE).
     ///
-    /// Returns (filename, filetype, content) if a file is available.
-    pub fn receive(&mut self) -> Result<(String, String, String)> {
-        let (sf, data) = self.backend.dequeue(SpoolDevice::Reader)?;
-        Ok((sf.filename, sf.filetype, data))
+    /// Returns the full spool file metadata and content.
+    pub fn receive(&mut self) -> Result<(SpoolFile, String)> {
+        self.backend.dequeue(SpoolDevice::Reader)
     }
 
     /// Print a file (enqueue on printer).
@@ -244,9 +244,9 @@ mod tests {
             .unwrap();
         assert!(id > 0);
 
-        let (fname, ftype, content) = mgr.receive().unwrap();
-        assert_eq!(fname, "MYFILE");
-        assert_eq!(ftype, "DATA");
+        let (sf, content) = mgr.receive().unwrap();
+        assert_eq!(sf.filename, "MYFILE");
+        assert_eq!(sf.filetype, "DATA");
         assert_eq!(content, "hello world\n");
     }
 
@@ -328,6 +328,24 @@ mod tests {
 
         let count = mgr.purge_all(SpoolDevice::Printer, None).unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn send_file_uses_punch_class() {
+        let mut mgr = make_manager();
+        mgr.configure_device(
+            SpoolDevice::Punch,
+            Some(SpoolClass('Z')),
+            None,
+            None,
+            None,
+            None,
+        );
+        mgr.send_file("FILE1", "DATA", "content\n", None).unwrap();
+
+        let files = mgr.query_device(SpoolDevice::Reader, None).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].class, SpoolClass('Z'));
     }
 
     #[test]
@@ -465,13 +483,13 @@ mod tests {
         mgr.send_file("SECOND", "DATA", "2\n", None).unwrap();
         mgr.send_file("THIRD", "DATA", "3\n", None).unwrap();
 
-        let (f1, _, _) = mgr.receive().unwrap();
-        let (f2, _, _) = mgr.receive().unwrap();
-        let (f3, _, _) = mgr.receive().unwrap();
+        let (sf1, _) = mgr.receive().unwrap();
+        let (sf2, _) = mgr.receive().unwrap();
+        let (sf3, _) = mgr.receive().unwrap();
 
-        assert_eq!(f1, "FIRST");
-        assert_eq!(f2, "SECOND");
-        assert_eq!(f3, "THIRD");
+        assert_eq!(sf1.filename, "FIRST");
+        assert_eq!(sf2.filename, "SECOND");
+        assert_eq!(sf3.filename, "THIRD");
     }
 
     #[test]

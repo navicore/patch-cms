@@ -162,9 +162,9 @@ impl SpoolBackend for DirectoryBackend {
         let data = fs::read_to_string(self.data_path(device, id))?;
         let sf = sf.clone();
 
-        // Remove files — propagate errors so callers know the dequeue state
-        fs::remove_file(self.data_path(device, id))?;
+        // Remove .meta first so orphaned .data is harmless if interrupted
         fs::remove_file(self.meta_path(device, id))?;
+        fs::remove_file(self.data_path(device, id))?;
 
         Ok((sf, data))
     }
@@ -190,8 +190,9 @@ impl SpoolBackend for DirectoryBackend {
             return Err(SpoolError::FileNotFound(spool_id));
         }
 
-        fs::remove_file(data_path)?;
+        // Remove .meta first so orphaned .data is harmless if interrupted
         fs::remove_file(meta_path)?;
+        fs::remove_file(data_path)?;
         Ok(())
     }
 
@@ -205,8 +206,9 @@ impl SpoolBackend for DirectoryBackend {
                 None => true,
             };
             if matches {
-                fs::remove_file(self.data_path(device, sf.spool_id))?;
+                // Remove .meta first so orphaned .data is harmless if interrupted
                 fs::remove_file(self.meta_path(device, sf.spool_id))?;
+                fs::remove_file(self.data_path(device, sf.spool_id))?;
                 count += 1;
             }
         }
@@ -231,9 +233,9 @@ impl SpoolBackend for DirectoryBackend {
         let mut sf =
             SpoolFile::from_meta_string(&meta_str).ok_or(SpoolError::FileNotFound(spool_id))?;
 
-        // Remove from source — propagate errors
-        fs::remove_file(self.data_path(from_device, spool_id))?;
+        // Remove from source — .meta first so orphaned .data is harmless
         fs::remove_file(self.meta_path(from_device, spool_id))?;
+        fs::remove_file(self.data_path(from_device, spool_id))?;
 
         // Allocate a fresh ID to avoid collision with existing reader files
         let new_id = self.allocate_id()?;
