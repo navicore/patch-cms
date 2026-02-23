@@ -159,8 +159,11 @@ impl SpoolBackend for DirectoryBackend {
         sf.class = class;
         sf.records = data.lines().count();
 
-        fs::write(self.data_path(device, id), data)?;
+        // Write .meta first: if .data write fails, the entry is visible but
+        // dequeue_by_id will surface an Io error and it can be purged.
+        // This is consistent with meta-first-on-delete crash safety.
         fs::write(self.meta_path(device, id), sf.to_meta_string())?;
+        fs::write(self.data_path(device, id), data)?;
 
         Ok(id)
     }

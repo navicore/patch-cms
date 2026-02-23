@@ -109,7 +109,7 @@ impl SpoolFile {
                     "DEST_USER" => dest_user = value.to_string(),
                     "CLASS" => {
                         if let Some(c) = value.chars().next() {
-                            if let Some(sc) = SpoolClass::new(c) {
+                            if let Some(sc) = SpoolClass::for_file(c) {
                                 class = sc;
                             }
                         }
@@ -196,5 +196,15 @@ mod tests {
         // Missing required fields should return None
         let result = SpoolFile::from_meta_string("SPOOL_ID=1\nFILENAME=X\n");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn spool_file_meta_rejects_wildcard_class() {
+        // CLASS=* in a .meta file should be treated as default (A), not wildcard
+        let meta =
+            "SPOOL_ID=1\nFILENAME=TEST\nFILETYPE=DATA\nORIGIN_USER=U\nCLASS=*\nDEVICE=READER\n";
+        let sf = SpoolFile::from_meta_string(meta).unwrap();
+        // for_file rejects '*', so class stays at default 'A'
+        assert_eq!(sf.class, SpoolClass::default());
     }
 }

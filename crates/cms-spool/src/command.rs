@@ -160,16 +160,27 @@ fn parse_spool_device(parts: &[&str]) -> Option<SpoolCommand> {
     let mut continuous = None;
     let mut copies = None;
 
+    let mut seen = std::collections::HashSet::new();
     let mut i = 1;
     while i < parts.len() {
         let word = parts[i].to_ascii_uppercase();
+        // Reject duplicate keywords
+        let keyword = match word.as_str() {
+            "HOLD" | "NOHOLD" => "HOLD",
+            "CONT" | "NOCONT" => "CONT",
+            other => other,
+        };
+        if !seen.insert(keyword.to_string()) {
+            return None; // duplicate option — RC=24
+        }
         match word.as_str() {
             "CLASS" => {
                 i += 1;
                 if i >= parts.len() {
                     return None; // dangling CLASS — RC=24
                 }
-                match SpoolClass::for_file(parts[i].chars().next().unwrap_or('A')) {
+                let ch = parts[i].chars().next();
+                match ch.and_then(SpoolClass::for_file) {
                     Some(c) => class = Some(c),
                     None => return None, // invalid class char — RC=24
                 }
@@ -253,10 +264,11 @@ fn parse_sendfile(parts: &[&str]) -> Option<SpoolCommand> {
         let word = parts[i].to_ascii_uppercase();
         if word == "TO" {
             i += 1;
-            if i < parts.len() {
-                dest_user = Some(parts[i].to_ascii_uppercase());
-                i += 1;
+            if i >= parts.len() {
+                return None; // dangling TO — RC=24
             }
+            dest_user = Some(parts[i].to_ascii_uppercase());
+            i += 1;
         } else {
             return None; // unexpected token — RC=24
         }
@@ -905,6 +917,18 @@ mod tests {
     #[test]
     fn copy_non_numeric_rejected() {
         assert!(parse_spool_command("SP PRT COPY abc").is_none());
+    }
+
+    #[test]
+    fn sendfile_dangling_to_rejected() {
+        assert!(parse_spool_command("SE MYFILE DATA TO").is_none());
+    }
+
+    #[test]
+    fn spool_duplicate_options_rejected() {
+        assert!(parse_spool_command("SP PRT CLASS A CLASS B").is_none());
+        assert!(parse_spool_command("SP PRT HOLD HOLD").is_none());
+        assert!(parse_spool_command("SP PRT HOLD NOHOLD").is_none());
     }
 
     // -- Phase 8e: edge case and polish tests --

@@ -3,6 +3,7 @@ use std::io;
 
 /// Errors from the spool subsystem.
 #[derive(Debug)]
+#[allow(dead_code)] // InvalidParameter and UnknownCommand reserved for future use
 pub enum SpoolError {
     /// Reader queue is empty (RC=2)
     ReaderEmpty,
