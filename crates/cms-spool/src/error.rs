@@ -29,7 +29,7 @@ impl fmt::Display for SpoolError {
             SpoolError::UnknownCommand(s) => {
                 write!(f, "DMSSPR024E Unknown spool command - {}", s)
             }
-            SpoolError::Io(e) => write!(f, "DMSSPR100I I/O error - {}", e),
+            SpoolError::Io(e) => write!(f, "DMSSPR100E I/O error - {}", e),
         }
     }
 }
@@ -103,7 +103,7 @@ mod tests {
         let io_err = io::Error::new(io::ErrorKind::PermissionDenied, "denied");
         let e = SpoolError::Io(io_err);
         let msg = e.to_string();
-        assert!(msg.contains("DMSSPR100I"));
+        assert!(msg.contains("DMSSPR100E"));
         assert!(msg.contains("denied"));
     }
 

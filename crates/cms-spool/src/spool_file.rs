@@ -51,7 +51,7 @@ impl SpoolFile {
     /// Format a one-line summary for QUERY output.
     pub fn summary(&self) -> String {
         format!(
-            "{:>6} {:8} {:8} {} {:>5} {} {}",
+            "{:>7} {:8} {:8} {} {:>5} {} {}",
             self.spool_id,
             self.filename,
             self.filetype,

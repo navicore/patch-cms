@@ -131,7 +131,17 @@ impl<B: SpoolBackend> SpoolManager<B> {
     /// Receive the next file from the reader (RECEIVE).
     ///
     /// Returns the full spool file metadata and content.
+    /// Files with `hold = true` are skipped (RC=4).
     pub fn receive(&mut self) -> Result<(SpoolFile, String)> {
+        // Peek at the front of the queue to check hold status
+        let files = self.backend.list_queue(SpoolDevice::Reader, None)?;
+        if let Some(first) = files.first() {
+            if first.hold {
+                return Err(crate::error::SpoolError::InvalidParameter(
+                    "File in HOLD status".to_string(),
+                ));
+            }
+        }
         self.backend.dequeue(SpoolDevice::Reader)
     }
 
@@ -402,6 +412,34 @@ mod tests {
             }
             _ => panic!("Expected ReaderEmpty error"),
         }
+    }
+
+    #[test]
+    fn receive_rejects_held_file() {
+        use crate::backend::SpoolBackend;
+        let mut backend = InMemoryBackend::new();
+        // Enqueue a file
+        backend
+            .enqueue(
+                SpoolDevice::Reader,
+                "HELD",
+                "FILE",
+                "USER1",
+                "",
+                SpoolClass::default(),
+                "data\n",
+            )
+            .unwrap();
+        // Directly set hold on the queued entry
+        if let Some(queue) = backend.queues_mut().get_mut(&SpoolDevice::Reader) {
+            if let Some((sf, _)) = queue.front_mut() {
+                sf.hold = true;
+            }
+        }
+        let mut mgr = SpoolManager::new(backend, "TESTUSER");
+        let result = mgr.receive();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("HOLD"));
     }
 
     #[test]

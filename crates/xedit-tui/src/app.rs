@@ -897,7 +897,7 @@ impl App {
             self.editor_mut().set_message(msg);
         } else {
             self.editor_mut()
-                .set_message("DMSSPL100I Spool not available");
+                .set_message("DMSSPL100E Spool not available");
         }
         true
     }
@@ -941,7 +941,7 @@ impl App {
             }
         } else {
             self.editor_mut()
-                .set_message("DMSSPL100I CMS not available");
+                .set_message("DMSSPL100E CMS not available");
             return true;
         };
 
@@ -966,7 +966,7 @@ impl App {
             }
         } else {
             self.editor_mut()
-                .set_message("DMSSPL100I Spool not available");
+                .set_message("DMSSPL100E Spool not available");
         }
         true
     }
@@ -992,7 +992,7 @@ impl App {
             }
         } else {
             self.editor_mut()
-                .set_message("DMSSPL100I Spool not available");
+                .set_message("DMSSPL100E Spool not available");
             return true;
         };
 
@@ -1017,7 +1017,7 @@ impl App {
                     }
                     Err(e) => {
                         self.editor_mut()
-                            .set_message(format!("DMSSPL100I Write error - {}", e));
+                            .set_message(format!("DMSSPL100E Write error - {}", e));
                         false
                     }
                 },
@@ -1029,7 +1029,7 @@ impl App {
             }
         } else {
             self.editor_mut()
-                .set_message("DMSSPL100I CMS not available");
+                .set_message("DMSSPL100E CMS not available");
             false
         };
 
@@ -1042,7 +1042,7 @@ impl App {
                 } else {
                     Some(spool_file.dest_user.as_str())
                 };
-                if let Err(e) = mgr.backend_mut().enqueue(
+                match mgr.backend_mut().enqueue(
                     cms_spool::SpoolDevice::Reader,
                     &spool_file.filename,
                     &spool_file.filetype,
@@ -1051,8 +1051,18 @@ impl App {
                     spool_file.class,
                     &content,
                 ) {
-                    self.editor_mut()
-                        .set_message(format!("DMSSPL100I Re-enqueue failed, data lost - {}", e));
+                    Ok(new_id) => {
+                        self.editor_mut().set_message(format!(
+                            "DMSSPL100E Write failed - file re-queued as spoolid {:>04}",
+                            new_id
+                        ));
+                    }
+                    Err(e) => {
+                        self.editor_mut().set_message(format!(
+                            "DMSSPL100E Re-enqueue failed, data lost - {}",
+                            e
+                        ));
+                    }
                 }
             }
         }

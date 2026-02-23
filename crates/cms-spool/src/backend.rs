@@ -49,16 +49,27 @@ pub trait SpoolBackend {
 /// In-memory spool backend for testing.
 pub struct InMemoryBackend {
     next_id: u64,
-    queues: std::collections::HashMap<SpoolDevice, Vec<(SpoolFile, String)>>,
+    queues: std::collections::HashMap<SpoolDevice, std::collections::VecDeque<(SpoolFile, String)>>,
 }
 
 impl InMemoryBackend {
     pub fn new() -> Self {
+        use std::collections::VecDeque;
         let mut queues = std::collections::HashMap::new();
-        queues.insert(SpoolDevice::Reader, Vec::new());
-        queues.insert(SpoolDevice::Printer, Vec::new());
-        queues.insert(SpoolDevice::Punch, Vec::new());
+        queues.insert(SpoolDevice::Reader, VecDeque::new());
+        queues.insert(SpoolDevice::Printer, VecDeque::new());
+        queues.insert(SpoolDevice::Punch, VecDeque::new());
         Self { next_id: 1, queues }
+    }
+}
+
+impl InMemoryBackend {
+    /// Access the raw queues (e.g., to set hold flags directly).
+    pub fn queues_mut(
+        &mut self,
+    ) -> &mut std::collections::HashMap<SpoolDevice, std::collections::VecDeque<(SpoolFile, String)>>
+    {
+        &mut self.queues
     }
 }
 
@@ -90,24 +101,20 @@ impl SpoolBackend for InMemoryBackend {
         self.queues
             .entry(device)
             .or_default()
-            .push((sf, data.to_string()));
+            .push_back((sf, data.to_string()));
         Ok(id)
     }
 
     fn dequeue(&mut self, device: SpoolDevice) -> Result<(SpoolFile, String)> {
         let queue = self.queues.entry(device).or_default();
-        if queue.is_empty() {
-            return Err(crate::error::SpoolError::ReaderEmpty);
-        }
-        Ok(queue.remove(0))
+        queue
+            .pop_front()
+            .ok_or(crate::error::SpoolError::ReaderEmpty)
     }
 
     fn list_queue(&self, device: SpoolDevice, class: Option<SpoolClass>) -> Result<Vec<SpoolFile>> {
-        let queue = self
-            .queues
-            .get(&device)
-            .map(|q| q.as_slice())
-            .unwrap_or(&[]);
+        let empty = std::collections::VecDeque::new();
+        let queue = self.queues.get(&device).unwrap_or(&empty);
         let files: Vec<SpoolFile> = queue
             .iter()
             .filter(|(sf, _)| match class {
@@ -124,7 +131,7 @@ impl SpoolBackend for InMemoryBackend {
         let pos = queue.iter().position(|(sf, _)| sf.spool_id == spool_id);
         match pos {
             Some(idx) => {
-                queue.remove(idx);
+                let _ = queue.remove(idx);
                 Ok(())
             }
             None => Err(crate::error::SpoolError::FileNotFound(spool_id)),
@@ -151,13 +158,19 @@ impl SpoolBackend for InMemoryBackend {
         let pos = queue.iter().position(|(sf, _)| sf.spool_id == spool_id);
         match pos {
             Some(idx) => {
-                let (mut sf, data) = queue.remove(idx);
+                let (mut sf, data) = queue
+                    .remove(idx)
+                    .expect("index from position should be valid");
+                // Allocate a fresh ID (consistent with DirectoryBackend)
+                let new_id = self.next_id;
+                self.next_id += 1;
+                sf.spool_id = new_id;
                 sf.device = SpoolDevice::Reader;
                 sf.dest_user = dest_user.to_ascii_uppercase();
                 self.queues
                     .entry(SpoolDevice::Reader)
                     .or_default()
-                    .push((sf, data));
+                    .push_back((sf, data));
                 Ok(())
             }
             None => Err(crate::error::SpoolError::FileNotFound(spool_id)),

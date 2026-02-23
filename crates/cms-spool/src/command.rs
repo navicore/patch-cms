@@ -185,7 +185,7 @@ fn parse_spool_device(parts: &[&str]) -> Option<SpoolCommand> {
                     copies = parts[i].parse().ok();
                 }
             }
-            _ => {}
+            _ => return None, // unknown option — RC=24
         }
         i += 1;
     }
@@ -785,6 +785,13 @@ mod tests {
             SpoolCommand::Spool { continuous, .. } => assert_eq!(continuous, Some(true)),
             _ => panic!("Expected Spool"),
         }
+    }
+
+    #[test]
+    fn spool_unknown_option_rejected() {
+        // Unknown options should return None (RC=24)
+        assert!(parse_spool_command("SP PRT BOGUSOPT VALUE").is_none());
+        assert!(parse_spool_command("SP PRT COPIES 3").is_none()); // COPIES vs COPY
     }
 
     // -- Phase 8e: edge case and polish tests --
