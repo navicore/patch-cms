@@ -124,10 +124,9 @@ impl DirectoryBackend {
                                 match SpoolFile::from_meta_string(&meta_str) {
                                     Some(sf) => entries.push((sf, path.clone())),
                                     None => {
-                                        return Err(SpoolError::Io(std::io::Error::new(
-                                            std::io::ErrorKind::InvalidData,
-                                            format!("Corrupt spool metadata: {}", path.display()),
-                                        )));
+                                        // Skip corrupt metadata — the entry is invisible
+                                        // but we don't brick the entire queue. The orphaned
+                                        // .data file (if any) is harmless on disk.
                                     }
                                 }
                             }
@@ -201,12 +200,14 @@ impl SpoolBackend for DirectoryBackend {
         let data_path = self.data_path(device, spool_id);
         let meta_path = self.meta_path(device, spool_id);
 
-        if !meta_path.exists() {
-            return Err(SpoolError::FileNotFound(spool_id));
+        // Remove .meta first — map NotFound to FileNotFound(spool_id)
+        match fs::remove_file(&meta_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(SpoolError::FileNotFound(spool_id));
+            }
+            Err(e) => return Err(SpoolError::Io(e)),
         }
-
-        // Remove .meta first so orphaned .data is harmless if interrupted
-        fs::remove_file(meta_path)?;
         // Ignore NotFound on .data (may be absent from interrupted enqueue)
         remove_file_ignore_not_found(&data_path)?;
         Ok(())
@@ -214,18 +215,27 @@ impl SpoolBackend for DirectoryBackend {
 
     fn dequeue_by_id(&mut self, device: SpoolDevice, spool_id: u64) -> Result<(SpoolFile, String)> {
         let meta_path = self.meta_path(device, spool_id);
-        if !meta_path.exists() {
-            return Err(SpoolError::FileNotFound(spool_id));
-        }
+        let data_path = self.data_path(device, spool_id);
 
-        let data = fs::read_to_string(self.data_path(device, spool_id))?;
-        let meta_str = fs::read_to_string(&meta_path)?;
+        // Read metadata — map NotFound to FileNotFound(spool_id)
+        let meta_str = match fs::read_to_string(&meta_path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(SpoolError::FileNotFound(spool_id));
+            }
+            Err(e) => return Err(SpoolError::Io(e)),
+        };
         let sf =
             SpoolFile::from_meta_string(&meta_str).ok_or(SpoolError::FileNotFound(spool_id))?;
+        let data = fs::read_to_string(&data_path)?;
 
         // Remove .meta first so orphaned .data is harmless if interrupted
-        fs::remove_file(meta_path)?;
-        remove_file_ignore_not_found(&self.data_path(device, spool_id))?;
+        match fs::remove_file(&meta_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(SpoolError::Io(e)),
+        }
+        remove_file_ignore_not_found(&data_path)?;
 
         Ok((sf, data))
     }
@@ -257,19 +267,27 @@ impl SpoolBackend for DirectoryBackend {
         dest_user: &str,
     ) -> Result<()> {
         let meta_path = self.meta_path(from_device, spool_id);
-        if !meta_path.exists() {
-            return Err(SpoolError::FileNotFound(spool_id));
-        }
+        let data_path = self.data_path(from_device, spool_id);
 
-        // Read existing data and metadata
-        let data = fs::read_to_string(self.data_path(from_device, spool_id))?;
-        let meta_str = fs::read_to_string(&meta_path)?;
+        // Read existing data and metadata — map NotFound to FileNotFound
+        let meta_str = match fs::read_to_string(&meta_path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(SpoolError::FileNotFound(spool_id));
+            }
+            Err(e) => return Err(SpoolError::Io(e)),
+        };
         let mut sf =
             SpoolFile::from_meta_string(&meta_str).ok_or(SpoolError::FileNotFound(spool_id))?;
+        let data = fs::read_to_string(&data_path)?;
 
         // Remove from source — .meta first so orphaned .data is harmless
-        fs::remove_file(self.meta_path(from_device, spool_id))?;
-        remove_file_ignore_not_found(&self.data_path(from_device, spool_id))?;
+        match fs::remove_file(&meta_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(SpoolError::Io(e)),
+        }
+        remove_file_ignore_not_found(&data_path)?;
 
         // Allocate a fresh ID to avoid collision with existing reader files
         let new_id = self.allocate_id()?;

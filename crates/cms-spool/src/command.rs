@@ -132,17 +132,18 @@ pub fn parse_spool_command(input: &str) -> Option<SpoolCommand> {
         return None;
     }
 
-    let mut parts: Vec<&str> = trimmed.split_whitespace().collect();
-    let cmd_word = parts.remove(0);
+    let parts: Vec<&str> = trimmed.split_whitespace().collect();
+    let cmd_word = parts[0];
+    let rest = &parts[1..];
 
     let cmd_name = lookup_command(cmd_word)?;
 
     match cmd_name {
-        "SPOOL" => parse_spool_device(&parts),
-        "SENDFILE" => parse_sendfile(&parts),
-        "RECEIVE" => parse_receive(&parts),
-        "PURGE" => parse_purge(&parts),
-        "QUERY" => parse_query(&parts),
+        "SPOOL" => parse_spool_device(rest),
+        "SENDFILE" => parse_sendfile(rest),
+        "RECEIVE" => parse_receive(rest),
+        "PURGE" => parse_purge(rest),
+        "QUERY" => parse_query(rest),
         _ => None,
     }
 }
@@ -165,18 +166,20 @@ fn parse_spool_device(parts: &[&str]) -> Option<SpoolCommand> {
         match word.as_str() {
             "CLASS" => {
                 i += 1;
-                if i < parts.len() {
-                    match SpoolClass::for_file(parts[i].chars().next().unwrap_or('A')) {
-                        Some(c) => class = Some(c),
-                        None => return None, // invalid class char — RC=24
-                    }
+                if i >= parts.len() {
+                    return None; // dangling CLASS — RC=24
+                }
+                match SpoolClass::for_file(parts[i].chars().next().unwrap_or('A')) {
+                    Some(c) => class = Some(c),
+                    None => return None, // invalid class char — RC=24
                 }
             }
             "DEST" => {
                 i += 1;
-                if i < parts.len() {
-                    dest = Some(parts[i].to_ascii_uppercase());
+                if i >= parts.len() {
+                    return None; // dangling DEST — RC=24
                 }
+                dest = Some(parts[i].to_ascii_uppercase());
             }
             "HOLD" => hold = Some(true),
             "NOHOLD" => hold = Some(false),
@@ -184,11 +187,12 @@ fn parse_spool_device(parts: &[&str]) -> Option<SpoolCommand> {
             "NOCONT" => continuous = Some(false),
             "COPY" => {
                 i += 1;
-                if i < parts.len() {
-                    match parts[i].parse::<u32>() {
-                        Ok(n) if n >= 1 => copies = Some(n),
-                        _ => return None, // invalid copy count — RC=24
-                    }
+                if i >= parts.len() {
+                    return None; // dangling COPY — RC=24
+                }
+                match parts[i].parse::<u32>() {
+                    Ok(n) if n >= 1 => copies = Some(n),
+                    _ => return None, // invalid copy count — RC=24
                 }
             }
             _ => return None, // unknown option — RC=24
@@ -285,15 +289,38 @@ fn parse_receive(parts: &[&str]) -> Option<SpoolCommand> {
     } else {
         None
     };
-    let filemode = if parts.len() > 2 {
-        parts[2]
-            .to_ascii_uppercase()
-            .chars()
-            .next()
-            .filter(|c| c.is_ascii_uppercase())
+    let mut consumed = if filetype.is_some() { 2 } else { 1 };
+    let filemode = if parts.len() > consumed {
+        let word = parts[consumed].to_ascii_uppercase();
+        // Filemode: single letter or letter+digit
+        let mut chars = word.chars();
+        if let Some(first) = chars.next() {
+            if first.is_ascii_uppercase() {
+                let valid = match chars.next() {
+                    None => true,
+                    Some(d) if d.is_ascii_digit() => chars.next().is_none(),
+                    _ => false,
+                };
+                if valid {
+                    consumed += 1;
+                    Some(first)
+                } else {
+                    return None; // invalid filemode — RC=24
+                }
+            } else {
+                return None; // invalid filemode — RC=24
+            }
+        } else {
+            None
+        }
     } else {
         None
     };
+
+    // Reject trailing tokens
+    if consumed < parts.len() {
+        return None;
+    }
 
     Some(SpoolCommand::Receive {
         filename,
@@ -325,6 +352,11 @@ fn parse_purge(parts: &[&str]) -> Option<SpoolCommand> {
         }
     };
 
+    // Reject trailing tokens
+    if parts.len() > 2 {
+        return None;
+    }
+
     Some(SpoolCommand::Purge { device, target })
 }
 
@@ -349,6 +381,12 @@ fn parse_query(parts: &[&str]) -> Option<SpoolCommand> {
     } else {
         None
     };
+
+    // Reject trailing tokens (valid forms: Q R, Q R CLASS A)
+    let expected_len = if class.is_some() { 3 } else { 1 };
+    if parts.len() > expected_len {
+        return None;
+    }
 
     Some(SpoolCommand::Query { device, class })
 }
@@ -825,6 +863,48 @@ mod tests {
     fn spool_invalid_class_rejected() {
         assert!(parse_spool_command("SP PRT CLASS *").is_none());
         assert!(parse_spool_command("SP PRT CLASS 1").is_none());
+    }
+
+    #[test]
+    fn spool_dangling_keywords_rejected() {
+        assert!(parse_spool_command("SP PRT CLASS").is_none());
+        assert!(parse_spool_command("SP PRT DEST").is_none());
+        assert!(parse_spool_command("SP PRT COPY").is_none());
+    }
+
+    #[test]
+    fn receive_trailing_tokens_rejected() {
+        assert!(parse_spool_command("REC FOO BAR A EXTRA").is_none());
+    }
+
+    #[test]
+    fn receive_invalid_filemode_rejected() {
+        assert!(parse_spool_command("REC FOO BAR 123").is_none());
+    }
+
+    #[test]
+    fn sendfile_junk_tokens_rejected() {
+        assert!(parse_spool_command("SE FILE DATA A JUNK TO JONES").is_none());
+    }
+
+    #[test]
+    fn purge_trailing_tokens_rejected() {
+        assert!(parse_spool_command("PUR R ALL EXTRA").is_none());
+    }
+
+    #[test]
+    fn query_dangling_class_rejected() {
+        assert!(parse_spool_command("Q R CLASS").is_none());
+    }
+
+    #[test]
+    fn copy_zero_rejected() {
+        assert!(parse_spool_command("SP PRT COPY 0").is_none());
+    }
+
+    #[test]
+    fn copy_non_numeric_rejected() {
+        assert!(parse_spool_command("SP PRT COPY abc").is_none());
     }
 
     // -- Phase 8e: edge case and polish tests --
