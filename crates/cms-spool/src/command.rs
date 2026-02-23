@@ -80,15 +80,20 @@ fn lookup_command(input: &str) -> Option<&'static str> {
             return Some(name);
         }
     }
-    // Abbreviation match
-    let mut matches = Vec::new();
+    // Abbreviation match — no Vec needed, just count
+    let mut found = None;
+    let mut count = 0usize;
     for &(name, min_abbrev) in SPOOL_COMMAND_TABLE {
         if input_upper.len() >= min_abbrev && name.starts_with(&input_upper) {
-            matches.push(name);
+            found = Some(name);
+            count += 1;
+            if count > 1 {
+                return None;
+            }
         }
     }
-    if matches.len() == 1 {
-        Some(matches[0])
+    if count == 1 {
+        found
     } else {
         None
     }
@@ -108,15 +113,20 @@ fn lookup_device(input: &str) -> Option<SpoolDevice> {
             return Some(device);
         }
     }
-    // Abbreviation match
-    let mut matches = Vec::new();
+    // Abbreviation match — no Vec needed, just count
+    let mut found = None;
+    let mut count = 0usize;
     for &(name, min_abbrev, device) in DEVICE_TABLE {
         if input_upper.len() >= min_abbrev && name.starts_with(&input_upper) {
-            matches.push(device);
+            found = Some(device);
+            count += 1;
+            if count > 1 {
+                return None;
+            }
         }
     }
-    if matches.len() == 1 {
-        Some(matches[0])
+    if count == 1 {
+        found
     } else {
         None
     }
@@ -182,8 +192,10 @@ fn parse_spool_device(parts: &[&str]) -> Option<SpoolCommand> {
                 if i >= parts.len() {
                     return None; // dangling CLASS — RC=24
                 }
-                let ch = parts[i].chars().next();
-                match ch.and_then(SpoolClass::for_file) {
+                if parts[i].len() != 1 {
+                    return None; // class must be exactly one character — RC=24
+                }
+                match parts[i].chars().next().and_then(SpoolClass::for_file) {
                     Some(c) => class = Some(c),
                     None => return None, // invalid class char — RC=24
                 }
@@ -386,6 +398,9 @@ fn parse_query(parts: &[&str]) -> Option<SpoolCommand> {
         let word = parts[1].to_ascii_uppercase();
         if word == "CLASS" {
             if parts.len() > 2 {
+                if parts[2].len() != 1 {
+                    return None; // class must be exactly one character — RC=24
+                }
                 parts[2].chars().next().and_then(SpoolClass::new)
             } else {
                 return None; // dangling CLASS without value — RC=24
@@ -414,9 +429,8 @@ fn parse_query(parts: &[&str]) -> Option<SpoolCommand> {
 /// external file I/O and must be handled by the caller before invoking this
 /// function (see `SpoolCommand::SendFile` and `SpoolCommand::Receive`).
 ///
-/// # Panics
-///
-/// Panics if called with `SpoolCommand::SendFile` or `SpoolCommand::Receive`.
+/// Returns RC=24 if called with `SpoolCommand::SendFile` or
+/// `SpoolCommand::Receive` (these require CMS filesystem bridging).
 pub fn execute_spool_command<B: SpoolBackend>(
     cmd: &SpoolCommand,
     manager: &mut SpoolManager<B>,
@@ -454,10 +468,10 @@ pub fn execute_spool_command<B: SpoolBackend>(
             )])
         }
         SpoolCommand::SendFile { .. } => {
-            panic!("SENDFILE must be handled by the caller, not execute_spool_command")
+            SpoolCommandResult::error(24, "DMSSPR024E SENDFILE requires CMS filesystem bridging")
         }
         SpoolCommand::Receive { .. } => {
-            panic!("RECEIVE must be handled by the caller, not execute_spool_command")
+            SpoolCommandResult::error(24, "DMSSPR024E RECEIVE requires CMS filesystem bridging")
         }
         SpoolCommand::Purge { device, target } => match target {
             PurgeTarget::All => match manager.purge_all(*device, None) {
@@ -785,19 +799,19 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "SENDFILE must be handled by the caller")]
-    fn execute_sendfile_panics() {
+    fn execute_sendfile_returns_rc24() {
         let mut mgr = make_manager();
         let cmd = parse_spool_command("SE MYFILE DATA A").unwrap();
-        let _ = execute_spool_command(&cmd, &mut mgr);
+        let result = execute_spool_command(&cmd, &mut mgr);
+        assert_eq!(result.rc, 24);
     }
 
     #[test]
-    #[should_panic(expected = "RECEIVE must be handled by the caller")]
-    fn execute_receive_panics() {
+    fn execute_receive_returns_rc24() {
         let mut mgr = make_manager();
         let cmd = parse_spool_command("REC").unwrap();
-        let _ = execute_spool_command(&cmd, &mut mgr);
+        let result = execute_spool_command(&cmd, &mut mgr);
+        assert_eq!(result.rc, 24);
     }
 
     #[test]
@@ -880,6 +894,8 @@ mod tests {
     fn spool_invalid_class_rejected() {
         assert!(parse_spool_command("SP PRT CLASS *").is_none());
         assert!(parse_spool_command("SP PRT CLASS 1").is_none());
+        assert!(parse_spool_command("SP PRT CLASS AB").is_none());
+        assert!(parse_spool_command("Q R CLASS AB").is_none());
     }
 
     #[test]

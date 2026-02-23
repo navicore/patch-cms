@@ -139,12 +139,17 @@ impl<B: SpoolBackend> SpoolManager<B> {
         if files.is_empty() {
             return Err(crate::error::SpoolError::QueueEmpty(SpoolDevice::Reader));
         }
-        // Find first non-held file addressed to this user (or with no dest)
+        // Filter to files addressed to this user (or with no dest)
         let user_id = &self.user_id;
-        let target = files
+        let my_files: Vec<_> = files
             .iter()
-            .find(|sf| !sf.hold && (sf.dest_user.is_empty() || sf.dest_user == *user_id));
-        match target {
+            .filter(|sf| sf.dest_user.is_empty() || sf.dest_user == *user_id)
+            .collect();
+        if my_files.is_empty() {
+            return Err(crate::error::SpoolError::QueueEmpty(SpoolDevice::Reader));
+        }
+        // Find first non-held file among the user's files
+        match my_files.iter().find(|sf| !sf.hold) {
             None => Err(crate::error::SpoolError::AllHeld),
             Some(sf) => self.backend.dequeue_by_id(SpoolDevice::Reader, sf.spool_id),
         }
@@ -489,6 +494,29 @@ mod tests {
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].filename, "HELD");
         assert!(remaining[0].hold);
+    }
+
+    #[test]
+    fn receive_other_user_files_returns_queue_empty() {
+        use crate::backend::SpoolBackend;
+        let mut backend = InMemoryBackend::new();
+        // Enqueue a file addressed to a different user
+        backend
+            .enqueue(
+                SpoolDevice::Reader,
+                "FILE1",
+                "DATA",
+                "JONES",
+                "JONES",
+                SpoolClass::default(),
+                "data\n",
+            )
+            .unwrap();
+        let mut mgr = SpoolManager::new(backend, "SMITH");
+        let result = mgr.receive();
+        assert!(result.is_err());
+        // Should be RC=2 (queue empty from this user's perspective), not RC=4
+        assert_eq!(result.unwrap_err().rc(), 2);
     }
 
     #[test]

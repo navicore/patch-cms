@@ -254,8 +254,12 @@ impl SpoolBackend for DirectoryBackend {
                 None => true,
             };
             if matches {
-                // Remove .meta first so orphaned .data is harmless if interrupted
-                fs::remove_file(self.meta_path(device, sf.spool_id))?;
+                // Remove .meta first; ignore NotFound (may already be gone)
+                match fs::remove_file(self.meta_path(device, sf.spool_id)) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(SpoolError::Io(e)),
+                }
                 remove_file_ignore_not_found(&self.data_path(device, sf.spool_id))?;
                 count += 1;
             }
