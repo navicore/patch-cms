@@ -1024,11 +1024,13 @@ impl App {
         };
 
         // Re-enqueue with original metadata if the write failed.
-        // Note: the file gets a new spool ID and goes to the back of the queue.
-        // Hold and copies fields are not preserved (SpoolBackend::enqueue
-        // defaults them to hold=false, copies=1). This is acceptable: the user
-        // was actively receiving (so hold was false), and copies is a device
-        // config property rather than a per-file attribute in this context.
+        // Known limitations of re-enqueue:
+        // - File gets a new spool ID and goes to the back of the queue.
+        // - copies is reset to 1 (SpoolBackend::enqueue has no copies param;
+        //   this is a known trait gap — see SpoolFile::copies).
+        // - hold is preserved via the enqueue hold parameter.
+        // The user was actively receiving, so these limitations are acceptable
+        // for this error-recovery path.
         if let Some(reason) = write_err {
             use cms_spool::SpoolBackend;
             if let Some(ref mut mgr) = self.spool_manager {
@@ -1044,7 +1046,7 @@ impl App {
                     &spool_file.origin_user,
                     dest.unwrap_or(""),
                     spool_file.class,
-                    false,
+                    spool_file.hold,
                     &content,
                 ) {
                     Ok(new_id) => {

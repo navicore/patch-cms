@@ -466,8 +466,8 @@ pub fn execute_spool_command<B: SpoolBackend>(
                 *copies,
             );
             let cfg = manager.device_config(*device);
-            SpoolCommandResult::ok_with(vec![format!(
-                "{} CLASS {} DEST {} COPY {} {}{}",
+            let mut msg = format!(
+                "{} CLASS {} DEST {} COPY {}",
                 device,
                 cfg.class,
                 if cfg.dest.is_empty() {
@@ -476,9 +476,14 @@ pub fn execute_spool_command<B: SpoolBackend>(
                     &cfg.dest
                 },
                 cfg.copies,
-                if cfg.hold { "HOLD " } else { "" },
-                if cfg.continuous { "CONT" } else { "" },
-            )])
+            );
+            if cfg.hold {
+                msg.push_str(" HOLD");
+            }
+            if cfg.continuous {
+                msg.push_str(" CONT");
+            }
+            SpoolCommandResult::ok_with(vec![msg])
         }
         SpoolCommand::SendFile { .. } => {
             SpoolCommandResult::error(24, "DMSSPL024E SENDFILE requires CMS filesystem bridging")

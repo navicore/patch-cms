@@ -272,7 +272,9 @@ impl SpoolBackend for DirectoryBackend {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(SpoolError::Io(e)),
         }
-        remove_file_ignore_not_found(&data_path)?;
+        // Best-effort .data removal — content is already in memory,
+        // so never lose it over a .data delete error.
+        let _ = remove_file_ignore_not_found(&data_path);
 
         Ok((sf, data))
     }
@@ -294,8 +296,8 @@ impl SpoolBackend for DirectoryBackend {
                         count += 1;
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        // Already gone — clean up .data but don't count
                         let _ = remove_file_ignore_not_found(&self.data_path(device, sf.spool_id));
-                        count += 1;
                     }
                     Err(e) => {
                         if first_err.is_none() {
