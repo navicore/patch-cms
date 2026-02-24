@@ -194,9 +194,11 @@ impl SpoolBackend for DirectoryBackend {
             match fs::read_to_string(self.data_path(device, id)) {
                 Ok(data) => {
                     let sf = sf.clone();
-                    // Remove .meta first so orphaned .data is harmless
-                    fs::remove_file(self.meta_path(device, id))?;
-                    remove_file_ignore_not_found(&self.data_path(device, id))?;
+                    // Remove .meta first so orphaned .data is harmless.
+                    // Best-effort .data removal — never lose the content
+                    // that is already in memory.
+                    let _ = fs::remove_file(self.meta_path(device, id));
+                    let _ = remove_file_ignore_not_found(&self.data_path(device, id));
                     return Ok((sf, data));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -254,7 +256,13 @@ impl SpoolBackend for DirectoryBackend {
         };
         let sf =
             SpoolFile::from_meta_string(&meta_str).ok_or(SpoolError::FileNotFound(spool_id))?;
-        let data = fs::read_to_string(&data_path)?;
+        let data = match fs::read_to_string(&data_path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(SpoolError::FileNotFound(spool_id));
+            }
+            Err(e) => return Err(SpoolError::Io(e)),
+        };
 
         // Remove .meta first so orphaned .data is harmless if interrupted
         match fs::remove_file(&meta_path) {
@@ -689,9 +697,53 @@ mod tests {
         let mut backend = backend;
         let result = backend.dequeue_by_id(SpoolDevice::Reader, 99);
         assert!(result.is_err());
+        assert_eq!(result.unwrap_err().rc(), 28); // FileNotFound, not Io
 
         backend.purge(SpoolDevice::Reader, 99).unwrap();
         let files = backend.list_queue(SpoolDevice::Reader, None).unwrap();
         assert!(files.is_empty());
+    }
+
+    #[test]
+    fn receive_multi_user_directory_backend() {
+        use crate::spool::SpoolManager;
+
+        let (mut backend, _dir) = make_backend();
+        // Enqueue a file for user B, then one for user A
+        backend
+            .enqueue(
+                SpoolDevice::Reader,
+                "FORB",
+                "DATA",
+                "SENDER",
+                "USERB",
+                SpoolClass::default(),
+                "b-data\n",
+            )
+            .unwrap();
+        backend
+            .enqueue(
+                SpoolDevice::Reader,
+                "FORA",
+                "DATA",
+                "SENDER",
+                "USERA",
+                SpoolClass::default(),
+                "a-data\n",
+            )
+            .unwrap();
+
+        // User A receives only their file
+        let mut mgr = SpoolManager::new(backend, "USERA");
+        let (sf, data) = mgr.receive().unwrap();
+        assert_eq!(sf.filename, "FORA");
+        assert_eq!(sf.dest_user, "USERA");
+        assert_eq!(data, "a-data\n");
+
+        // User B's file is still in the queue
+        let remaining = mgr.query_device(SpoolDevice::Reader, None).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].filename, "FORB");
+        assert_eq!(remaining[0].dest_user, "USERB");
     }
 }

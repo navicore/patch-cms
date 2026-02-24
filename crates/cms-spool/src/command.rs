@@ -423,8 +423,6 @@ fn parse_query(parts: &[&str]) -> Option<SpoolCommand> {
 
 /// Execute a parsed spool command against a SpoolManager.
 ///
-/// Execute a parsed spool command against a SpoolManager.
-///
 /// Handles SPOOL, PURGE, and QUERY commands. SENDFILE and RECEIVE require
 /// external file I/O and must be handled by the caller before invoking this
 /// function (see `SpoolCommand::SendFile` and `SpoolCommand::Receive`).
