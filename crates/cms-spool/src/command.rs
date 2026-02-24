@@ -489,7 +489,8 @@ pub fn execute_spool_command<B: SpoolBackend>(
                 if files.is_empty() {
                     SpoolCommandResult::ok_with(vec![format!("No files in {}", device)])
                 } else {
-                    let mut msgs = vec!["SPOOLID FILE     TYPE     CL  RECS HOLD DEST".to_string()];
+                    //       7 ' ' 8        ' ' 8        ' ' 2  5     ' ' 4    ' '
+                    let mut msgs = vec!["SPOOLID FILE     TYPE     CL RECS HOLD DEST".to_string()];
                     for f in &files {
                         msgs.push(f.summary());
                     }
@@ -1057,8 +1058,22 @@ mod tests {
         let result = execute_spool_command(&cmd, &mut mgr);
         assert_eq!(result.rc, 0);
         assert!(result.messages.len() >= 2); // header + at least one entry
-        assert!(result.messages[0].contains("SPOOLID"));
-        assert!(result.messages[1].contains("TEST"));
+        let header = &result.messages[0];
+        let data = &result.messages[1];
+        assert!(header.contains("SPOOLID"));
+        assert!(data.contains("TEST"));
+        // Verify key column positions align between header and data
+        let h_cl = header.find("CL").expect("header missing CL");
+        let d_cl = data[h_cl..]
+            .find(|c: char| c.is_ascii_uppercase())
+            .map(|p| p + h_cl);
+        assert_eq!(
+            Some(h_cl),
+            d_cl,
+            "class column misaligned:\nH: {}\nD: {}",
+            header,
+            data
+        );
     }
 
     #[test]

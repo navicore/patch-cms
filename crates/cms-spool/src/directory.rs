@@ -235,8 +235,9 @@ impl SpoolBackend for DirectoryBackend {
             }
             Err(e) => return Err(SpoolError::Io(e)),
         }
-        // Ignore NotFound on .data (may be absent from interrupted enqueue)
-        remove_file_ignore_not_found(&data_path)?;
+        // Best-effort .data removal — entry is already invisible after
+        // .meta deletion, so any .data error is non-fatal.
+        let _ = remove_file_ignore_not_found(&data_path);
         Ok(())
     }
 
@@ -348,13 +349,11 @@ impl SpoolBackend for DirectoryBackend {
             sf.to_meta_string(),
         )?;
 
-        // Remove source only after destination is fully written
-        match fs::remove_file(&meta_path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(SpoolError::Io(e)),
-        }
-        remove_file_ignore_not_found(&data_path)?;
+        // Best-effort source removal — destination is fully written,
+        // so source cleanup errors are non-fatal (avoids duplicate entries
+        // on retry).
+        let _ = fs::remove_file(&meta_path);
+        let _ = remove_file_ignore_not_found(&data_path);
 
         Ok(())
     }
@@ -749,5 +748,35 @@ mod tests {
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].filename, "FORB");
         assert_eq!(remaining[0].dest_user, "USERB");
+    }
+
+    #[test]
+    fn dequeue_auto_purges_orphaned_meta() {
+        let (mut backend, _dir) = make_backend();
+        // Create an orphaned .meta (no .data) with spool ID 1
+        let meta_content =
+            "SPOOL_ID=1\nFILENAME=ORPHAN\nFILETYPE=DATA\nORIGIN_USER=U\nDEVICE=READER\n";
+        fs::write(backend.meta_path(SpoolDevice::Reader, 1), meta_content).unwrap();
+
+        // Enqueue a valid file (gets ID from counter, not 1)
+        backend
+            .enqueue(
+                SpoolDevice::Reader,
+                "VALID",
+                "FILE",
+                "U",
+                "",
+                SpoolClass::default(),
+                "valid data\n",
+            )
+            .unwrap();
+
+        // dequeue skips the orphan and returns the valid file
+        let (sf, data) = backend.dequeue(SpoolDevice::Reader).unwrap();
+        assert_eq!(sf.filename, "VALID");
+        assert_eq!(data, "valid data\n");
+
+        // The orphaned .meta should have been auto-purged
+        assert!(!backend.meta_path(SpoolDevice::Reader, 1).exists());
     }
 }
