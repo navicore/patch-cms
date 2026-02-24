@@ -130,7 +130,7 @@ impl DirectoryBackend {
                                     Err(e) => return Err(SpoolError::Io(e)),
                                 };
                                 match SpoolFile::from_meta_string(&meta_str) {
-                                    Some(sf) if sf.spool_id == file_id => {
+                                    Some(sf) if sf.spool_id == file_id && sf.device == device => {
                                         entries.push((sf, path.clone()));
                                     }
                                     _ => {
@@ -160,6 +160,7 @@ impl SpoolBackend for DirectoryBackend {
         origin_user: &str,
         dest_user: &str,
         class: SpoolClass,
+        hold: bool,
         data: &str,
     ) -> Result<u64> {
         let id = self.allocate_id()?;
@@ -167,6 +168,7 @@ impl SpoolBackend for DirectoryBackend {
         let mut sf = SpoolFile::new(id, filename, filetype, origin_user, device);
         sf.dest_user = dest_user.to_ascii_uppercase();
         sf.class = class;
+        sf.hold = hold;
         sf.records = data.lines().count();
 
         // Write .data first, then .meta. The create order is opposite to the
@@ -278,6 +280,7 @@ impl SpoolBackend for DirectoryBackend {
     fn purge_all(&mut self, device: SpoolDevice, class: Option<SpoolClass>) -> Result<usize> {
         let entries = self.read_entries(device)?;
         let mut count = 0;
+        let mut first_err: Option<std::io::Error> = None;
 
         for (sf, _) in &entries {
             let matches = match class {
@@ -285,25 +288,28 @@ impl SpoolBackend for DirectoryBackend {
                 None => true,
             };
             if matches {
-                // Best-effort removal: skip individual I/O failures so a
-                // single problematic entry doesn't prevent purging the rest.
                 match fs::remove_file(self.meta_path(device, sf.spool_id)) {
                     Ok(()) => {
                         let _ = remove_file_ignore_not_found(&self.data_path(device, sf.spool_id));
                         count += 1;
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        // Already gone — still counts as purged
                         let _ = remove_file_ignore_not_found(&self.data_path(device, sf.spool_id));
                         count += 1;
                     }
-                    Err(_) => {
-                        // Skip this entry; continue with the rest
+                    Err(e) => {
+                        if first_err.is_none() {
+                            first_err = Some(e);
+                        }
                     }
                 }
             }
         }
 
+        // Surface the first I/O error after purging as many as possible
+        if let Some(e) = first_err {
+            return Err(SpoolError::Io(e));
+        }
         Ok(count)
     }
 
@@ -350,10 +356,13 @@ impl SpoolBackend for DirectoryBackend {
             sf.to_meta_string(),
         )?;
 
-        // Best-effort source removal — destination is fully written,
-        // so source cleanup errors are non-fatal (avoids duplicate entries
-        // on retry).
-        let _ = fs::remove_file(&meta_path);
+        // Remove source after destination is written. Propagate non-NotFound
+        // errors on .meta removal to avoid silent duplicate entries.
+        match fs::remove_file(&meta_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(SpoolError::Io(e)),
+        }
         let _ = remove_file_ignore_not_found(&data_path);
 
         Ok(())
@@ -392,6 +401,7 @@ mod tests {
                 "USER1",
                 "",
                 SpoolClass::default(),
+                false,
                 "hello\n",
             )
             .unwrap();
@@ -411,6 +421,7 @@ mod tests {
                 "USER1",
                 "",
                 SpoolClass('B'),
+                false,
                 "line1\nline2\n",
             )
             .unwrap();
@@ -440,6 +451,7 @@ mod tests {
                 "U",
                 "",
                 SpoolClass::default(),
+                false,
                 "d",
             )
             .unwrap();
@@ -460,6 +472,7 @@ mod tests {
                 "U",
                 "",
                 SpoolClass::default(),
+                false,
                 "d1",
             )
             .unwrap();
@@ -471,6 +484,7 @@ mod tests {
                 "U",
                 "",
                 SpoolClass::default(),
+                false,
                 "d2",
             )
             .unwrap();
@@ -492,6 +506,7 @@ mod tests {
                 "U",
                 "",
                 SpoolClass('A'),
+                false,
                 "d",
             )
             .unwrap();
@@ -503,6 +518,7 @@ mod tests {
                 "U",
                 "",
                 SpoolClass('B'),
+                false,
                 "d",
             )
             .unwrap();
@@ -525,6 +541,7 @@ mod tests {
                 "U",
                 "",
                 SpoolClass::default(),
+                false,
                 "d",
             )
             .unwrap();
@@ -552,6 +569,7 @@ mod tests {
                 "U",
                 "",
                 SpoolClass::default(),
+                false,
                 "d",
             )
             .unwrap();
@@ -563,6 +581,7 @@ mod tests {
                 "U",
                 "",
                 SpoolClass::default(),
+                false,
                 "d",
             )
             .unwrap();
@@ -582,6 +601,7 @@ mod tests {
                 "U",
                 "",
                 SpoolClass('A'),
+                false,
                 "d",
             )
             .unwrap();
@@ -593,6 +613,7 @@ mod tests {
                 "U",
                 "",
                 SpoolClass('B'),
+                false,
                 "d",
             )
             .unwrap();
@@ -618,6 +639,7 @@ mod tests {
                 "USER1",
                 "",
                 SpoolClass::default(),
+                false,
                 "content here\n",
             )
             .unwrap();
@@ -653,6 +675,7 @@ mod tests {
                     "U",
                     "",
                     SpoolClass::default(),
+                    false,
                     "d",
                 )
                 .unwrap()
@@ -668,6 +691,7 @@ mod tests {
                 "U",
                 "",
                 SpoolClass::default(),
+                false,
                 "d",
             )
             .unwrap();
@@ -722,6 +746,7 @@ mod tests {
                 "SENDER",
                 "USERB",
                 SpoolClass::default(),
+                false,
                 "b-data\n",
             )
             .unwrap();
@@ -733,6 +758,7 @@ mod tests {
                 "SENDER",
                 "USERA",
                 SpoolClass::default(),
+                false,
                 "a-data\n",
             )
             .unwrap();
@@ -768,6 +794,7 @@ mod tests {
                 "U",
                 "",
                 SpoolClass::default(),
+                false,
                 "valid data\n",
             )
             .unwrap();

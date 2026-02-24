@@ -116,6 +116,7 @@ impl<B: SpoolBackend> SpoolManager<B> {
             .map(|s| s.to_ascii_uppercase())
             .unwrap_or_else(|| self.user_id.clone());
         let class = self.punch_config.class;
+        let hold = self.punch_config.hold;
 
         self.backend.enqueue(
             SpoolDevice::Reader,
@@ -124,6 +125,7 @@ impl<B: SpoolBackend> SpoolManager<B> {
             &self.user_id,
             &dest,
             class,
+            hold,
             data,
         )
     }
@@ -168,6 +170,7 @@ impl<B: SpoolBackend> SpoolManager<B> {
     pub fn print_file(&mut self, filename: &str, filetype: &str, data: &str) -> Result<u64> {
         let class = self.printer_config.class;
         let dest = self.printer_config.dest.clone();
+        let hold = self.printer_config.hold;
         self.backend.enqueue(
             SpoolDevice::Printer,
             filename,
@@ -175,6 +178,7 @@ impl<B: SpoolBackend> SpoolManager<B> {
             &self.user_id,
             &dest,
             class,
+            hold,
             data,
         )
     }
@@ -183,6 +187,7 @@ impl<B: SpoolBackend> SpoolManager<B> {
     pub fn punch_file(&mut self, filename: &str, filetype: &str, data: &str) -> Result<u64> {
         let class = self.punch_config.class;
         let dest = self.punch_config.dest.clone();
+        let hold = self.punch_config.hold;
         self.backend.enqueue(
             SpoolDevice::Punch,
             filename,
@@ -190,6 +195,7 @@ impl<B: SpoolBackend> SpoolManager<B> {
             &self.user_id,
             &dest,
             class,
+            hold,
             data,
         )
     }
@@ -378,6 +384,17 @@ mod tests {
     }
 
     #[test]
+    fn send_file_uses_punch_hold() {
+        let mut mgr = make_manager();
+        mgr.configure_device(SpoolDevice::Punch, None, None, Some(true), None, None);
+        mgr.send_file("FILE1", "DATA", "content\n", None).unwrap();
+
+        let files = mgr.query_device(SpoolDevice::Reader, None).unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].hold);
+    }
+
+    #[test]
     fn spool_command_result_ok() {
         let r = SpoolCommandResult::ok();
         assert_eq!(r.rc, 0);
@@ -445,6 +462,7 @@ mod tests {
                 "USER1",
                 "",
                 SpoolClass::default(),
+                false,
                 "data\n",
             )
             .unwrap();
@@ -474,6 +492,7 @@ mod tests {
                 "USER1",
                 "",
                 SpoolClass::default(),
+                false,
                 "held data\n",
             )
             .unwrap();
@@ -485,6 +504,7 @@ mod tests {
                 "USER1",
                 "",
                 SpoolClass::default(),
+                false,
                 "free data\n",
             )
             .unwrap();
@@ -518,6 +538,7 @@ mod tests {
                 "JONES",
                 "JONES",
                 SpoolClass::default(),
+                false,
                 "data\n",
             )
             .unwrap();

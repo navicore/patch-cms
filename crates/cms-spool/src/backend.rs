@@ -19,6 +19,7 @@ pub trait SpoolBackend {
         origin_user: &str,
         dest_user: &str,
         class: SpoolClass,
+        hold: bool,
         data: &str,
     ) -> Result<u64>;
 
@@ -95,6 +96,7 @@ impl SpoolBackend for InMemoryBackend {
         origin_user: &str,
         dest_user: &str,
         class: SpoolClass,
+        hold: bool,
         data: &str,
     ) -> Result<u64> {
         let id = self.next_id;
@@ -103,6 +105,7 @@ impl SpoolBackend for InMemoryBackend {
         let mut sf = SpoolFile::new(id, filename, filetype, origin_user, device);
         sf.dest_user = dest_user.to_ascii_uppercase();
         sf.class = class;
+        sf.hold = hold;
         sf.records = data.lines().count();
 
         self.queues
@@ -211,6 +214,7 @@ mod tests {
                 "USER1",
                 "",
                 SpoolClass::default(),
+                false,
                 "line1\nline2\n",
             )
             .unwrap();
@@ -240,6 +244,7 @@ mod tests {
                 "USER1",
                 "",
                 SpoolClass('A'),
+                false,
                 "data1",
             )
             .unwrap();
@@ -251,6 +256,7 @@ mod tests {
                 "USER1",
                 "",
                 SpoolClass('B'),
+                false,
                 "data2",
             )
             .unwrap();
@@ -276,6 +282,7 @@ mod tests {
                 "USER1",
                 "",
                 SpoolClass::default(),
+                false,
                 "data",
             )
             .unwrap();
@@ -303,6 +310,7 @@ mod tests {
                 "U",
                 "",
                 SpoolClass::default(),
+                false,
                 "d",
             )
             .unwrap();
@@ -314,6 +322,7 @@ mod tests {
                 "U",
                 "",
                 SpoolClass::default(),
+                false,
                 "d",
             )
             .unwrap();
@@ -332,6 +341,7 @@ mod tests {
                 "USER1",
                 "",
                 SpoolClass::default(),
+                false,
                 "content",
             )
             .unwrap();
@@ -358,6 +368,7 @@ mod tests {
                 "U",
                 "",
                 SpoolClass::default(),
+                false,
                 "",
             )
             .unwrap();
@@ -369,6 +380,7 @@ mod tests {
                 "U",
                 "",
                 SpoolClass::default(),
+                false,
                 "",
             )
             .unwrap();

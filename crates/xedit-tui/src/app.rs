@@ -1044,6 +1044,7 @@ impl App {
                     &spool_file.origin_user,
                     dest.unwrap_or(""),
                     spool_file.class,
+                    false,
                     &content,
                 ) {
                     Ok(new_id) => {
