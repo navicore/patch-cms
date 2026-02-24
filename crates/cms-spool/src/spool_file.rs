@@ -125,7 +125,7 @@ impl SpoolFile {
                         };
                     }
                     "HOLD" => hold = value == "true",
-                    "COPIES" => copies = value.parse().unwrap_or(1),
+                    "COPIES" => copies = value.parse().ok().filter(|&n: &u32| n >= 1).unwrap_or(1),
                     _ => {}
                 }
             }

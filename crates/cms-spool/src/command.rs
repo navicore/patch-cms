@@ -242,8 +242,15 @@ fn parse_sendfile(parts: &[&str]) -> Option<SpoolCommand> {
     }
 
     let filename = parts[0].to_ascii_uppercase();
+    if filename.len() > 8 {
+        return None; // CMS filename max 8 chars — RC=24
+    }
     let filetype = if parts.len() > 1 {
-        parts[1].to_ascii_uppercase()
+        let ft = parts[1].to_ascii_uppercase();
+        if ft.len() > 8 {
+            return None; // CMS filetype max 8 chars — RC=24
+        }
+        ft
     } else {
         return None;
     };
@@ -310,9 +317,17 @@ fn parse_receive(parts: &[&str]) -> Option<SpoolCommand> {
         });
     }
 
-    let filename = Some(parts[0].to_ascii_uppercase());
+    let fn_str = parts[0].to_ascii_uppercase();
+    if fn_str.len() > 8 {
+        return None; // CMS filename max 8 chars — RC=24
+    }
+    let filename = Some(fn_str);
     let filetype = if parts.len() > 1 {
-        Some(parts[1].to_ascii_uppercase())
+        let ft = parts[1].to_ascii_uppercase();
+        if ft.len() > 8 {
+            return None; // CMS filetype max 8 chars — RC=24
+        }
+        Some(ft)
     } else {
         None
     };
@@ -861,6 +876,11 @@ mod tests {
             SpoolCommand::Query { device, .. } => assert_eq!(device, SpoolDevice::Punch),
             _ => panic!("Expected Query"),
         }
+    }
+
+    #[test]
+    fn device_abbreviation_p_is_ambiguous() {
+        assert!(parse_spool_command("Q P").is_none());
     }
 
     #[test]

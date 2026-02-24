@@ -192,10 +192,11 @@ impl SpoolBackend for DirectoryBackend {
             match fs::read_to_string(self.data_path(device, id)) {
                 Ok(data) => {
                     let sf = sf.clone();
-                    // Remove .meta first so orphaned .data is harmless.
-                    // Best-effort .data removal — never lose the content
-                    // that is already in memory.
-                    let _ = fs::remove_file(self.meta_path(device, id));
+                    // Remove .meta first — must succeed to prevent
+                    // duplicate delivery on next dequeue call.
+                    fs::remove_file(self.meta_path(device, id))?;
+                    // Best-effort .data removal — content is already in
+                    // memory, so never lose it over a .data delete error.
                     let _ = remove_file_ignore_not_found(&self.data_path(device, id));
                     return Ok((sf, data));
                 }

@@ -151,7 +151,16 @@ impl<B: SpoolBackend> SpoolManager<B> {
         // Find first non-held file among the user's files
         match my_files.iter().find(|sf| !sf.hold) {
             None => Err(crate::error::SpoolError::AllHeld),
-            Some(sf) => self.backend.dequeue_by_id(SpoolDevice::Reader, sf.spool_id),
+            Some(sf) => self
+                .backend
+                .dequeue_by_id(SpoolDevice::Reader, sf.spool_id)
+                .map_err(|e| match e {
+                    // File removed between list_queue and dequeue_by_id
+                    crate::error::SpoolError::FileNotFound(_) => {
+                        crate::error::SpoolError::QueueEmpty(SpoolDevice::Reader)
+                    }
+                    other => other,
+                }),
         }
     }
 
