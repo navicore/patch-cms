@@ -217,7 +217,7 @@ fn parse_spool_device(parts: &[&str]) -> Option<SpoolCommand> {
                     return None; // dangling COPY — RC=24
                 }
                 match parts[i].parse::<u32>() {
-                    Ok(n) if n >= 1 => copies = Some(n),
+                    Ok(n) if (1..=255).contains(&n) => copies = Some(n),
                     _ => return None, // invalid copy count — RC=24
                 }
             }

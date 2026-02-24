@@ -100,9 +100,7 @@ pub fn setup_spool(
     user_id: &str,
 ) -> Result<cms_spool::SpoolManager<cms_spool::directory::DirectoryBackend>, String> {
     let spool_dir = std::path::Path::new(base_path).join("spool");
-    if !spool_dir.is_dir() {
-        std::fs::create_dir_all(&spool_dir).map_err(|e| e.to_string())?;
-    }
+    std::fs::create_dir_all(&spool_dir).map_err(|e| e.to_string())?;
     let backend =
         cms_spool::directory::DirectoryBackend::new(&spool_dir).map_err(|e| e.to_string())?;
     Ok(cms_spool::SpoolManager::new(backend, user_id))

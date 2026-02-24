@@ -43,9 +43,7 @@ impl DirectoryBackend {
             SpoolDevice::Punch,
         ] {
             let dir = base.join(device.dir_name());
-            if !dir.is_dir() {
-                fs::create_dir_all(&dir)?;
-            }
+            fs::create_dir_all(&dir)?;
         }
         Ok(Self {
             base: base.to_path_buf(),
@@ -326,7 +324,13 @@ impl SpoolBackend for DirectoryBackend {
         };
         let mut sf =
             SpoolFile::from_meta_string(&meta_str).ok_or(SpoolError::FileNotFound(spool_id))?;
-        let data = fs::read_to_string(&data_path)?;
+        let data = match fs::read_to_string(&data_path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(SpoolError::FileNotFound(spool_id));
+            }
+            Err(e) => return Err(SpoolError::Io(e)),
+        };
 
         // Allocate new ID BEFORE deleting source — prevents data loss if
         // allocate_id fails (e.g. disk full writing .next_id)

@@ -68,17 +68,18 @@ impl SpoolFile {
 
     /// Serialize metadata to key=value format (no serde dependency).
     pub fn to_meta_string(&self) -> String {
-        let mut s = String::new();
-        s.push_str(&format!("SPOOL_ID={}\n", self.spool_id));
-        s.push_str(&format!("FILENAME={}\n", self.filename));
-        s.push_str(&format!("FILETYPE={}\n", self.filetype));
-        s.push_str(&format!("ORIGIN_USER={}\n", self.origin_user));
-        s.push_str(&format!("DEST_USER={}\n", self.dest_user));
-        s.push_str(&format!("CLASS={}\n", self.class));
-        s.push_str(&format!("RECORDS={}\n", self.records));
-        s.push_str(&format!("DEVICE={}\n", self.device));
-        s.push_str(&format!("HOLD={}\n", self.hold));
-        s.push_str(&format!("COPIES={}\n", self.copies));
+        use std::fmt::Write as _;
+        let mut s = String::with_capacity(200);
+        let _ = writeln!(s, "SPOOL_ID={}", self.spool_id);
+        let _ = writeln!(s, "FILENAME={}", self.filename);
+        let _ = writeln!(s, "FILETYPE={}", self.filetype);
+        let _ = writeln!(s, "ORIGIN_USER={}", self.origin_user);
+        let _ = writeln!(s, "DEST_USER={}", self.dest_user);
+        let _ = writeln!(s, "CLASS={}", self.class);
+        let _ = writeln!(s, "RECORDS={}", self.records);
+        let _ = writeln!(s, "DEVICE={}", self.device);
+        let _ = writeln!(s, "HOLD={}", self.hold);
+        let _ = writeln!(s, "COPIES={}", self.copies);
         s
     }
 
