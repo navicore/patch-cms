@@ -401,7 +401,7 @@ fn parse_query(parts: &[&str]) -> Option<SpoolCommand> {
                 if parts[2].len() != 1 {
                     return None; // class must be exactly one character — RC=24
                 }
-                parts[2].chars().next().and_then(SpoolClass::for_file)
+                parts[2].chars().next().and_then(SpoolClass::new)
             } else {
                 return None; // dangling CLASS without value — RC=24
             }
@@ -894,7 +894,19 @@ mod tests {
         assert!(parse_spool_command("SP PRT CLASS 1").is_none());
         assert!(parse_spool_command("SP PRT CLASS AB").is_none());
         assert!(parse_spool_command("Q R CLASS AB").is_none());
-        assert!(parse_spool_command("Q R CLASS *").is_none());
+        // Q R CLASS * is valid (wildcard filter) — tested separately
+    }
+
+    #[test]
+    fn query_wildcard_class_accepted() {
+        let cmd = parse_spool_command("Q R CLASS *").unwrap();
+        match cmd {
+            SpoolCommand::Query { device, class } => {
+                assert_eq!(device, SpoolDevice::Reader);
+                assert_eq!(class, Some(SpoolClass::ALL));
+            }
+            _ => panic!("Expected Query"),
+        }
     }
 
     #[test]

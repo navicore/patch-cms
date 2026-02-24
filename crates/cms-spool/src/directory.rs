@@ -171,11 +171,12 @@ impl SpoolBackend for DirectoryBackend {
         sf.class = class;
         sf.records = data.lines().count();
 
-        // Write .meta first: if .data write fails, the entry is visible but
-        // dequeue_by_id will surface an Io error and it can be purged.
-        // This is consistent with meta-first-on-delete crash safety.
-        fs::write(self.meta_path(device, id), sf.to_meta_string())?;
+        // Write .data first, then .meta. The create order is opposite to the
+        // delete order (meta-first-on-delete) so that an interrupted write
+        // leaves an invisible orphaned .data rather than a visible .meta
+        // with no .data (which would block the queue).
         fs::write(self.data_path(device, id), data)?;
+        fs::write(self.meta_path(device, id), sf.to_meta_string())?;
 
         Ok(id)
     }
@@ -186,16 +187,27 @@ impl SpoolBackend for DirectoryBackend {
             return Err(SpoolError::QueueEmpty(device));
         }
 
-        let (sf, _meta_path) = &entries[0];
-        let id = sf.spool_id;
-        let data = fs::read_to_string(self.data_path(device, id))?;
-        let sf = sf.clone();
+        // Skip entries whose .data is missing (orphaned .meta from corruption);
+        // auto-purge the orphan so the queue recovers.
+        for (sf, _) in &entries {
+            let id = sf.spool_id;
+            match fs::read_to_string(self.data_path(device, id)) {
+                Ok(data) => {
+                    let sf = sf.clone();
+                    // Remove .meta first so orphaned .data is harmless
+                    fs::remove_file(self.meta_path(device, id))?;
+                    remove_file_ignore_not_found(&self.data_path(device, id))?;
+                    return Ok((sf, data));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // Orphaned .meta — purge it and try next entry
+                    let _ = fs::remove_file(self.meta_path(device, id));
+                }
+                Err(e) => return Err(SpoolError::Io(e)),
+            }
+        }
 
-        // Remove .meta first so orphaned .data is harmless if interrupted
-        fs::remove_file(self.meta_path(device, id))?;
-        remove_file_ignore_not_found(&self.data_path(device, id))?;
-
-        Ok((sf, data))
+        Err(SpoolError::QueueEmpty(device))
     }
 
     fn list_queue(&self, device: SpoolDevice, class: Option<SpoolClass>) -> Result<Vec<SpoolFile>> {
@@ -312,16 +324,17 @@ impl SpoolBackend for DirectoryBackend {
         // allocate_id fails (e.g. disk full writing .next_id)
         let new_id = self.allocate_id()?;
 
-        // Write destination — .meta first for crash safety
+        // Write destination — .data first so an interrupted write leaves
+        // an invisible orphan rather than a visible meta-only entry.
         sf.spool_id = new_id;
         sf.device = SpoolDevice::Reader;
         sf.dest_user = dest_user.to_ascii_uppercase();
 
+        fs::write(self.data_path(SpoolDevice::Reader, new_id), &data)?;
         fs::write(
             self.meta_path(SpoolDevice::Reader, new_id),
             sf.to_meta_string(),
         )?;
-        fs::write(self.data_path(SpoolDevice::Reader, new_id), &data)?;
 
         // Remove source only after destination is fully written
         match fs::remove_file(&meta_path) {
@@ -651,24 +664,32 @@ mod tests {
     }
 
     #[test]
-    fn interrupted_enqueue_meta_only() {
+    fn interrupted_enqueue_data_only_is_invisible() {
         let (backend, _dir) = make_backend();
-        // Simulate a crashed enqueue: .meta exists but .data is missing
+        // With data-first write order, an interrupted enqueue leaves .data
+        // but no .meta — the entry is invisible to the queue.
+        fs::write(backend.data_path(SpoolDevice::Reader, 99), "orphan data").unwrap();
+
+        let files = backend.list_queue(SpoolDevice::Reader, None).unwrap();
+        assert!(files.is_empty()); // invisible — correct behavior
+    }
+
+    #[test]
+    fn legacy_meta_only_entry_can_be_purged() {
+        let (backend, _dir) = make_backend();
+        // A .meta without .data (from old code or corruption) is visible
+        // but dequeue fails. purge can clean it up.
         let meta_content =
             "SPOOL_ID=99\nFILENAME=ORPHAN\nFILETYPE=DATA\nORIGIN_USER=U\nDEVICE=READER\n";
         fs::write(backend.meta_path(SpoolDevice::Reader, 99), meta_content).unwrap();
 
-        // list_queue sees it
         let files = backend.list_queue(SpoolDevice::Reader, None).unwrap();
         assert_eq!(files.len(), 1);
-        assert_eq!(files[0].filename, "ORPHAN");
 
-        // dequeue_by_id fails with Io error (missing .data)
         let mut backend = backend;
         let result = backend.dequeue_by_id(SpoolDevice::Reader, 99);
         assert!(result.is_err());
 
-        // purge can clean it up
         backend.purge(SpoolDevice::Reader, 99).unwrap();
         let files = backend.list_queue(SpoolDevice::Reader, None).unwrap();
         assert!(files.is_empty());
