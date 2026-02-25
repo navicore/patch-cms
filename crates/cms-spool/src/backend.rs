@@ -144,7 +144,7 @@ impl SpoolBackend for InMemoryBackend {
         match pos {
             Some(idx) => Ok(queue
                 .remove(idx)
-                .expect("index from position should be valid")),
+                .unwrap_or_else(|| unreachable!("index from position is always valid"))),
             None => Err(crate::error::SpoolError::FileNotFound(spool_id)),
         }
     }
@@ -183,7 +183,7 @@ impl SpoolBackend for InMemoryBackend {
             Some(idx) => {
                 let (mut sf, data) = queue
                     .remove(idx)
-                    .expect("index from position should be valid");
+                    .unwrap_or_else(|| unreachable!("index from position is always valid"));
                 // Allocate a fresh ID (consistent with DirectoryBackend)
                 let new_id = self.next_id;
                 self.next_id += 1;

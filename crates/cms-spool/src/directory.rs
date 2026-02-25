@@ -89,8 +89,10 @@ impl DirectoryBackend {
         Ok(())
     }
 
-    /// Allocate the next spool ID. Not safe for concurrent writers —
-    /// a file lock (e.g. flock) would be needed for multi-process use.
+    /// Allocate the next spool ID. **Not safe for concurrent writers** —
+    /// two processes can both read the same ID and silently overwrite each
+    /// other's `.data` file (data loss). Multi-process use requires
+    /// `O_CREAT|O_EXCL` on the data file or an advisory lock (`flock`).
     fn allocate_id(&mut self) -> Result<u64> {
         let id = self.read_next_id()?;
         self.write_next_id(id + 1)?;

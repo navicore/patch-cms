@@ -110,9 +110,9 @@ impl SpoolFile {
                     "DEST_USER" => dest_user = value.to_string(),
                     "CLASS" => {
                         if let Some(c) = value.chars().next() {
-                            if let Some(sc) = SpoolClass::for_file(c) {
-                                class = sc;
-                            }
+                            class = SpoolClass::for_file(c)?;
+                        } else {
+                            return None; // empty CLASS value
                         }
                     }
                     "RECORDS" => records = value.parse().unwrap_or(0),
@@ -201,26 +201,28 @@ mod tests {
 
     #[test]
     fn spool_file_meta_rejects_wildcard_class() {
-        // CLASS=* in a .meta file should be treated as default (A), not wildcard
         let meta =
             "SPOOL_ID=1\nFILENAME=TEST\nFILETYPE=DATA\nORIGIN_USER=U\nCLASS=*\nDEVICE=READER\n";
-        let sf = SpoolFile::from_meta_string(meta).unwrap();
-        // for_file rejects '*', so class stays at default 'A'
-        assert_eq!(sf.class, SpoolClass::default());
+        assert!(SpoolFile::from_meta_string(meta).is_none());
     }
 
     #[test]
     fn spool_file_meta_multi_char_class_uses_first() {
+        // Only first char is checked by for_file; 'A' is valid
         let meta = "SPOOL_ID=1\nFILENAME=T\nFILETYPE=D\nORIGIN_USER=U\nCLASS=AB\nDEVICE=READER\n";
         let sf = SpoolFile::from_meta_string(meta).unwrap();
-        // Only first char is used; 'A' is a valid file class
         assert_eq!(sf.class.0, 'A');
     }
 
     #[test]
-    fn spool_file_meta_empty_class_uses_default() {
+    fn spool_file_meta_empty_class_rejected() {
         let meta = "SPOOL_ID=1\nFILENAME=T\nFILETYPE=D\nORIGIN_USER=U\nCLASS=\nDEVICE=READER\n";
-        let sf = SpoolFile::from_meta_string(meta).unwrap();
-        assert_eq!(sf.class, SpoolClass::default());
+        assert!(SpoolFile::from_meta_string(meta).is_none());
+    }
+
+    #[test]
+    fn spool_file_meta_invalid_class_digit_rejected() {
+        let meta = "SPOOL_ID=1\nFILENAME=T\nFILETYPE=D\nORIGIN_USER=U\nCLASS=5\nDEVICE=READER\n";
+        assert!(SpoolFile::from_meta_string(meta).is_none());
     }
 }

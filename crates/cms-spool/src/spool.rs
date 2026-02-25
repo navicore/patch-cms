@@ -141,11 +141,18 @@ impl<B: SpoolBackend> SpoolManager<B> {
         if files.is_empty() {
             return Err(crate::error::SpoolError::QueueEmpty(SpoolDevice::Reader));
         }
-        // Filter to files addressed to this user (or with no dest)
+        // Filter to files addressed to this user. Files with empty dest_user
+        // are treated as addressed to their origin_user (not "any user").
         let user_id = &self.user_id;
         let my_files: Vec<_> = files
             .iter()
-            .filter(|sf| sf.dest_user.is_empty() || sf.dest_user == *user_id)
+            .filter(|sf| {
+                if sf.dest_user.is_empty() {
+                    sf.origin_user == *user_id
+                } else {
+                    sf.dest_user == *user_id
+                }
+            })
             .collect();
         if my_files.is_empty() {
             return Err(crate::error::SpoolError::QueueEmpty(SpoolDevice::Reader));
@@ -459,8 +466,8 @@ mod tests {
                 SpoolDevice::Reader,
                 "HELD",
                 "FILE",
-                "USER1",
-                "",
+                "TESTUSER",
+                "TESTUSER",
                 SpoolClass::default(),
                 false,
                 "data\n",
@@ -489,8 +496,8 @@ mod tests {
                 SpoolDevice::Reader,
                 "HELD",
                 "FILE",
-                "USER1",
-                "",
+                "TESTUSER",
+                "TESTUSER",
                 SpoolClass::default(),
                 false,
                 "held data\n",
@@ -501,8 +508,8 @@ mod tests {
                 SpoolDevice::Reader,
                 "FREE",
                 "FILE",
-                "USER1",
-                "",
+                "TESTUSER",
+                "TESTUSER",
                 SpoolClass::default(),
                 false,
                 "free data\n",
