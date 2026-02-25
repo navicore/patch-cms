@@ -207,23 +207,61 @@ impl<B: SpoolBackend> SpoolManager<B> {
         )
     }
 
-    /// Query files in a device queue.
+    /// Query files in a device queue, scoped to the current user.
     pub fn query_device(
         &self,
         device: SpoolDevice,
         class: Option<SpoolClass>,
     ) -> Result<Vec<SpoolFile>> {
-        self.backend.list_queue(device, class)
+        let all = self.backend.list_queue(device, class)?;
+        Ok(all
+            .into_iter()
+            .filter(|sf| {
+                sf.origin_user == self.user_id
+                    || sf.dest_user == self.user_id
+                    || sf.dest_user.is_empty()
+            })
+            .collect())
     }
 
     /// Purge a specific file from a device queue.
+    ///
+    /// Only purges files belonging to the current user.
     pub fn purge_file(&mut self, device: SpoolDevice, spool_id: u64) -> Result<()> {
+        // Verify the file belongs to this user before purging
+        let files = self.backend.list_queue(device, None)?;
+        let owned = files.iter().any(|sf| {
+            sf.spool_id == spool_id
+                && (sf.origin_user == self.user_id
+                    || sf.dest_user == self.user_id
+                    || sf.dest_user.is_empty())
+        });
+        if !owned {
+            return Err(crate::error::SpoolError::FileNotFound(spool_id));
+        }
         self.backend.purge(device, spool_id)
     }
 
-    /// Purge all files from a device queue.
+    /// Purge all files from a device queue, scoped to the current user.
     pub fn purge_all(&mut self, device: SpoolDevice, class: Option<SpoolClass>) -> Result<usize> {
-        self.backend.purge_all(device, class)
+        // Find this user's files, then purge each individually
+        let files = self.backend.list_queue(device, class)?;
+        let my_ids: Vec<u64> = files
+            .iter()
+            .filter(|sf| {
+                sf.origin_user == self.user_id
+                    || sf.dest_user == self.user_id
+                    || sf.dest_user.is_empty()
+            })
+            .map(|sf| sf.spool_id)
+            .collect();
+        let mut count = 0;
+        for id in my_ids {
+            if self.backend.purge(device, id).is_ok() {
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 
     /// Get a reference to the backend.

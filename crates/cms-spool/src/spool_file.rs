@@ -119,11 +119,10 @@ impl SpoolFile {
                     "ORIGIN_USER" => origin_user = Some(value.to_string()),
                     "DEST_USER" => dest_user = value.to_string(),
                     "CLASS" => {
-                        if let Some(c) = value.chars().next() {
-                            class = SpoolClass::for_file(c)?;
-                        } else {
-                            return None; // empty CLASS value
+                        if value.len() != 1 {
+                            return None; // CLASS must be exactly one character
                         }
+                        class = SpoolClass::for_file(value.chars().next().unwrap())?;
                     }
                     "RECORDS" => records = value.parse().unwrap_or(0),
                     "DEVICE" => {
@@ -223,11 +222,9 @@ mod tests {
     }
 
     #[test]
-    fn spool_file_meta_multi_char_class_uses_first() {
-        // Only first char is checked by for_file; 'A' is valid
+    fn spool_file_meta_multi_char_class_rejected() {
         let meta = "SPOOL_ID=1\nFILENAME=T\nFILETYPE=D\nORIGIN_USER=U\nCLASS=AB\nDEVICE=READER\n";
-        let sf = SpoolFile::from_meta_string(meta).unwrap();
-        assert_eq!(sf.class.0, 'A');
+        assert!(SpoolFile::from_meta_string(meta).is_none());
     }
 
     #[test]

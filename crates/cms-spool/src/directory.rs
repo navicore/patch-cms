@@ -30,6 +30,13 @@ fn remove_file_ignore_not_found(path: &std::path::Path) -> Result<()> {
 /// - `<id>.meta` — key=value metadata
 ///
 /// The next spool ID counter is persisted in `.next_id`.
+///
+/// # Concurrency
+///
+/// This backend is **not safe for concurrent writers**. The ID counter
+/// uses a read-modify-write sequence without file locking; concurrent
+/// processes sharing the same spool directory can produce duplicate IDs
+/// and data loss. Use a single `DirectoryBackend` instance per process.
 pub struct DirectoryBackend {
     base: PathBuf,
 }
@@ -187,6 +194,23 @@ impl SpoolBackend for DirectoryBackend {
         hold: bool,
         data: &str,
     ) -> Result<u64> {
+        // Reject strings that would corrupt the key=value .meta format
+        fn has_newline(s: &str) -> bool {
+            s.contains('\n') || s.contains('\r')
+        }
+        if filename.is_empty()
+            || filetype.is_empty()
+            || has_newline(filename)
+            || has_newline(filetype)
+            || has_newline(origin_user)
+            || has_newline(dest_user)
+        {
+            return Err(SpoolError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "spool metadata fields must not contain newlines",
+            )));
+        }
+
         let id = self.allocate_id()?;
 
         let mut sf = SpoolFile::new(id, filename, filetype, origin_user, device);
@@ -384,11 +408,16 @@ impl SpoolBackend for DirectoryBackend {
         sf.device = SpoolDevice::Reader;
         sf.dest_user = dest_user.to_ascii_uppercase();
 
-        fs::write(self.data_path(SpoolDevice::Reader, new_id), &data)?;
-        fs::write(
+        let dest_data = self.data_path(SpoolDevice::Reader, new_id);
+        fs::write(&dest_data, &data)?;
+        if let Err(e) = fs::write(
             self.meta_path(SpoolDevice::Reader, new_id),
             sf.to_meta_string(),
-        )?;
+        ) {
+            // Clean up orphaned .data — source is still intact
+            let _ = fs::remove_file(&dest_data);
+            return Err(SpoolError::Io(e));
+        }
 
         // Remove source after destination is written. Propagate non-NotFound
         // errors on .meta removal to avoid silent duplicate entries.
@@ -803,11 +832,14 @@ mod tests {
         assert_eq!(sf.dest_user, "USERA");
         assert_eq!(data, "a-data\n");
 
-        // User B's file is still in the queue
+        // User A sees no more files (user-scoped query)
         let remaining = mgr.query_device(SpoolDevice::Reader, None).unwrap();
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].filename, "FORB");
-        assert_eq!(remaining[0].dest_user, "USERB");
+        assert!(remaining.is_empty());
+
+        // User B's file is still in the backend
+        let all = mgr.backend().list_queue(SpoolDevice::Reader, None).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].filename, "FORB");
     }
 
     #[test]
