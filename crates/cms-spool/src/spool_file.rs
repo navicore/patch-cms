@@ -105,13 +105,13 @@ impl SpoolFile {
                 match key {
                     "SPOOL_ID" => spool_id = value.parse().ok(),
                     "FILENAME" => {
-                        if value.len() > 8 {
+                        if value.is_empty() || value.len() > 8 {
                             return None;
                         }
                         filename = Some(value.to_string());
                     }
                     "FILETYPE" => {
-                        if value.len() > 8 {
+                        if value.is_empty() || value.len() > 8 {
                             return None;
                         }
                         filetype = Some(value.to_string());

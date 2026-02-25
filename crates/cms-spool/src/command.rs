@@ -289,7 +289,11 @@ fn parse_sendfile(parts: &[&str]) -> Option<SpoolCommand> {
             if i >= parts.len() {
                 return None; // dangling TO — RC=24
             }
-            dest_user = Some(parts[i].to_ascii_uppercase());
+            let userid = parts[i].to_ascii_uppercase();
+            if userid.is_empty() || userid.len() > 8 {
+                return None; // CMS userid max 8 chars — RC=24
+            }
+            dest_user = Some(userid);
             i += 1;
         } else {
             return None; // unexpected token — RC=24

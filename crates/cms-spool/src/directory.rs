@@ -111,42 +111,35 @@ impl DirectoryBackend {
     fn read_entries(&self, device: SpoolDevice) -> Result<Vec<(SpoolFile, PathBuf)>> {
         let dir = self.device_dir(device);
         let mut entries = Vec::new();
+        let mut data_ids = std::collections::HashSet::new();
 
         if !dir.is_dir() {
             return Ok(entries);
         }
 
+        // Single pass: collect valid .meta entries and track all .data IDs
         for entry in fs::read_dir(&dir)? {
             let entry = entry?;
             let path = entry.path();
             if let Some(ext) = path.extension() {
-                if ext == "meta" {
-                    if let Some(stem) = path.file_stem() {
-                        if let Some(id_str) = stem.to_str() {
-                            if let Ok(file_id) = id_str.parse::<u64>() {
+                if let Some(stem) = path.file_stem() {
+                    if let Some(id_str) = stem.to_str() {
+                        if let Ok(file_id) = id_str.parse::<u64>() {
+                            if ext == "data" {
+                                data_ids.insert(file_id);
+                            } else if ext == "meta" {
                                 let meta_str = match fs::read_to_string(&path) {
                                     Ok(s) => s,
                                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                                        continue; // removed between readdir and read
+                                        continue;
                                     }
                                     Err(e) => return Err(SpoolError::Io(e)),
                                 };
                                 match SpoolFile::from_meta_string(&meta_str) {
                                     Some(sf) if sf.spool_id == file_id && sf.device == device => {
-                                        // Only include if .data exists; auto-purge
-                                        // orphaned .meta so QUERY count is accurate
-                                        let data_path = self
-                                            .device_dir(device)
-                                            .join(format!("{}.data", file_id));
-                                        if data_path.exists() {
-                                            entries.push((sf, path.clone()));
-                                        } else {
-                                            let _ = fs::remove_file(&path);
-                                        }
+                                        entries.push((sf, path.clone()));
                                     }
-                                    _ => {
-                                        // Skip corrupt or mismatched metadata.
-                                    }
+                                    _ => {}
                                 }
                             }
                         }
@@ -155,30 +148,29 @@ impl DirectoryBackend {
             }
         }
 
-        entries.sort_by_key(|(sf, _)| sf.spool_id);
-
-        // Clean up orphaned .data files (no corresponding .meta).
-        // These result from interrupted enqueue (crash after writing .data
-        // but before .meta).
-        let valid_ids: std::collections::HashSet<u64> =
-            entries.iter().map(|(sf, _)| sf.spool_id).collect();
-        if let Ok(dir_iter) = fs::read_dir(&dir) {
-            for entry in dir_iter.flatten() {
-                let path = entry.path();
-                if path.extension().is_some_and(|e| e == "data") {
-                    if let Some(id) = path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .and_then(|s| s.parse::<u64>().ok())
-                    {
-                        if !valid_ids.contains(&id) {
-                            let _ = fs::remove_file(&path);
-                        }
-                    }
+        // Filter entries to those with .data; auto-purge orphaned .meta
+        let valid_ids: std::collections::HashSet<u64> = {
+            let mut valid = std::collections::HashSet::new();
+            entries.retain(|(sf, meta_path)| {
+                if data_ids.contains(&sf.spool_id) {
+                    valid.insert(sf.spool_id);
+                    true
+                } else {
+                    let _ = fs::remove_file(meta_path);
+                    false
                 }
+            });
+            valid
+        };
+
+        // Clean up orphaned .data files (no corresponding valid .meta)
+        for &data_id in &data_ids {
+            if !valid_ids.contains(&data_id) {
+                let _ = fs::remove_file(self.device_dir(device).join(format!("{}.data", data_id)));
             }
         }
 
+        entries.sort_by_key(|(sf, _)| sf.spool_id);
         Ok(entries)
     }
 }
