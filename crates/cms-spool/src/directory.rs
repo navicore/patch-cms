@@ -420,16 +420,15 @@ impl SpoolBackend for DirectoryBackend {
             return Err(SpoolError::Io(e));
         }
 
-        // Remove source after destination is written. Propagate non-NotFound
-        // errors on .meta removal to avoid silent duplicate entries.
-        // Note: if this fails, the destination (new_id) exists in the reader
-        // but the caller only knows the source spool_id. A QUERY READER
-        // would reveal the duplicate for manual cleanup.
+        // Remove source .meta — propagate non-NotFound errors to avoid
+        // silent duplicate entries. NotFound is OK (already gone).
         match fs::remove_file(&meta_path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(SpoolError::Io(e)),
         }
+        // Best-effort .data removal — .meta is already gone so the source
+        // entry is invisible; orphaned .data is harmless.
         let _ = remove_file_ignore_not_found(&data_path);
 
         Ok(())

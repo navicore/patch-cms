@@ -134,9 +134,7 @@ impl SpoolFile {
                         }
                         class = SpoolClass::for_file(value.chars().next().unwrap())?;
                     }
-                    "RECORDS" => {
-                        records = value.parse().ok()?;
-                    }
+                    "RECORDS" => records = value.parse().unwrap_or(0),
                     "DEVICE" => {
                         device = match value {
                             "READER" => Some(SpoolDevice::Reader),
@@ -249,5 +247,13 @@ mod tests {
     fn spool_file_meta_invalid_class_digit_rejected() {
         let meta = "SPOOL_ID=1\nFILENAME=T\nFILETYPE=D\nORIGIN_USER=U\nCLASS=5\nDEVICE=READER\n";
         assert!(SpoolFile::from_meta_string(meta).is_none());
+    }
+
+    #[test]
+    fn spool_file_meta_corrupt_records_still_parses() {
+        let meta =
+            "SPOOL_ID=1\nFILENAME=T\nFILETYPE=D\nORIGIN_USER=U\nRECORDS=NaN\nDEVICE=READER\n";
+        let sf = SpoolFile::from_meta_string(meta).unwrap();
+        assert_eq!(sf.records, 0);
     }
 }
