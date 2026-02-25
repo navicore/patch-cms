@@ -116,15 +116,27 @@ impl SpoolFile {
                         }
                         filetype = Some(value.to_string());
                     }
-                    "ORIGIN_USER" => origin_user = Some(value.to_string()),
-                    "DEST_USER" => dest_user = value.to_string(),
+                    "ORIGIN_USER" => {
+                        if value.is_empty() || value.len() > 8 {
+                            return None;
+                        }
+                        origin_user = Some(value.to_string());
+                    }
+                    "DEST_USER" => {
+                        if value.len() > 8 {
+                            return None;
+                        }
+                        dest_user = value.to_string();
+                    }
                     "CLASS" => {
                         if value.len() != 1 {
                             return None; // CLASS must be exactly one character
                         }
                         class = SpoolClass::for_file(value.chars().next().unwrap())?;
                     }
-                    "RECORDS" => records = value.parse().unwrap_or(0),
+                    "RECORDS" => {
+                        records = value.parse().ok()?;
+                    }
                     "DEVICE" => {
                         device = match value {
                             "READER" => Some(SpoolDevice::Reader),

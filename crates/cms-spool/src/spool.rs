@@ -207,6 +207,17 @@ impl<B: SpoolBackend> SpoolManager<B> {
         )
     }
 
+    /// Check if a spool file belongs to this user.
+    /// Mirrors the logic in `receive()`: empty dest_user means
+    /// addressed to origin_user, not "any user".
+    fn is_owned_by_me(&self, sf: &SpoolFile) -> bool {
+        if sf.dest_user.is_empty() {
+            sf.origin_user == self.user_id
+        } else {
+            sf.dest_user == self.user_id || sf.origin_user == self.user_id
+        }
+    }
+
     /// Query files in a device queue, scoped to the current user.
     pub fn query_device(
         &self,
@@ -216,11 +227,7 @@ impl<B: SpoolBackend> SpoolManager<B> {
         let all = self.backend.list_queue(device, class)?;
         Ok(all
             .into_iter()
-            .filter(|sf| {
-                sf.origin_user == self.user_id
-                    || sf.dest_user == self.user_id
-                    || sf.dest_user.is_empty()
-            })
+            .filter(|sf| self.is_owned_by_me(sf))
             .collect())
     }
 
@@ -228,14 +235,10 @@ impl<B: SpoolBackend> SpoolManager<B> {
     ///
     /// Only purges files belonging to the current user.
     pub fn purge_file(&mut self, device: SpoolDevice, spool_id: u64) -> Result<()> {
-        // Verify the file belongs to this user before purging
         let files = self.backend.list_queue(device, None)?;
-        let owned = files.iter().any(|sf| {
-            sf.spool_id == spool_id
-                && (sf.origin_user == self.user_id
-                    || sf.dest_user == self.user_id
-                    || sf.dest_user.is_empty())
-        });
+        let owned = files
+            .iter()
+            .any(|sf| sf.spool_id == spool_id && self.is_owned_by_me(sf));
         if !owned {
             return Err(crate::error::SpoolError::FileNotFound(spool_id));
         }
@@ -244,22 +247,26 @@ impl<B: SpoolBackend> SpoolManager<B> {
 
     /// Purge all files from a device queue, scoped to the current user.
     pub fn purge_all(&mut self, device: SpoolDevice, class: Option<SpoolClass>) -> Result<usize> {
-        // Find this user's files, then purge each individually
         let files = self.backend.list_queue(device, class)?;
         let my_ids: Vec<u64> = files
             .iter()
-            .filter(|sf| {
-                sf.origin_user == self.user_id
-                    || sf.dest_user == self.user_id
-                    || sf.dest_user.is_empty()
-            })
+            .filter(|sf| self.is_owned_by_me(sf))
             .map(|sf| sf.spool_id)
             .collect();
         let mut count = 0;
+        let mut first_err: Option<crate::error::SpoolError> = None;
         for id in my_ids {
-            if self.backend.purge(device, id).is_ok() {
-                count += 1;
+            match self.backend.purge(device, id) {
+                Ok(()) => count += 1,
+                Err(e) => {
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
             }
+        }
+        if let Some(e) = first_err {
+            return Err(e);
         }
         Ok(count)
     }

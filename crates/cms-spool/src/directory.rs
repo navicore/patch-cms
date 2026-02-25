@@ -200,6 +200,7 @@ impl SpoolBackend for DirectoryBackend {
         }
         if filename.is_empty()
             || filetype.is_empty()
+            || origin_user.is_empty()
             || has_newline(filename)
             || has_newline(filetype)
             || has_newline(origin_user)
@@ -207,7 +208,7 @@ impl SpoolBackend for DirectoryBackend {
         {
             return Err(SpoolError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "spool metadata fields must not contain newlines",
+                "spool metadata fields must not be empty or contain newlines",
             )));
         }
 
