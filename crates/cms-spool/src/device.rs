@@ -59,9 +59,11 @@ impl SpoolClass {
     }
 
     /// Returns true if this class matches the given class.
-    /// The wildcard class `*` matches everything.
+    /// Returns true if this class matches the given class.
+    /// Only the filter side (`self`) can be `*`; stored file classes
+    /// are always A-Z (enforced by `for_file`).
     pub fn matches(&self, other: &SpoolClass) -> bool {
-        self.0 == '*' || other.0 == '*' || self.0 == other.0
+        self.0 == '*' || self.0 == other.0
     }
 }
 
@@ -148,8 +150,8 @@ mod tests {
 
         assert!(a.matches(&a));
         assert!(!a.matches(&b));
-        assert!(all.matches(&a));
-        assert!(a.matches(&all));
+        assert!(all.matches(&a)); // wildcard filter matches any file
+        assert!(!a.matches(&all)); // non-wildcard filter doesn't match wildcard file
     }
 
     #[test]

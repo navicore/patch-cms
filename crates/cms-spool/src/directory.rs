@@ -156,6 +156,29 @@ impl DirectoryBackend {
         }
 
         entries.sort_by_key(|(sf, _)| sf.spool_id);
+
+        // Clean up orphaned .data files (no corresponding .meta).
+        // These result from interrupted enqueue (crash after writing .data
+        // but before .meta).
+        let valid_ids: std::collections::HashSet<u64> =
+            entries.iter().map(|(sf, _)| sf.spool_id).collect();
+        if let Ok(dir_iter) = fs::read_dir(&dir) {
+            for entry in dir_iter.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|e| e == "data") {
+                    if let Some(id) = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .and_then(|s| s.parse::<u64>().ok())
+                    {
+                        if !valid_ids.contains(&id) {
+                            let _ = fs::remove_file(&path);
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(entries)
     }
 }

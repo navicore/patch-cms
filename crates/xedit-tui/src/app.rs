@@ -895,11 +895,11 @@ impl App {
                 result.messages.join(" | ")
             };
             self.editor_mut().set_message(msg);
+            true
         } else {
-            self.editor_mut()
-                .set_message("DMSSPL100E Spool not available");
+            // Spool not initialized — let CMS/xedit handlers try it
+            false
         }
-        true
     }
 
     #[cfg(not(feature = "spool"))]
