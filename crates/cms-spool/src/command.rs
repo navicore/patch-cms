@@ -416,7 +416,10 @@ fn parse_query(parts: &[&str]) -> Option<SpoolCommand> {
                 if parts[2].len() != 1 {
                     return None; // class must be exactly one character — RC=24
                 }
-                parts[2].chars().next().and_then(SpoolClass::new)
+                match parts[2].chars().next().and_then(SpoolClass::new) {
+                    Some(c) => Some(c),
+                    None => return None, // invalid class character — RC=24
+                }
             } else {
                 return None; // dangling CLASS without value — RC=24
             }
@@ -963,6 +966,11 @@ mod tests {
     #[test]
     fn query_dangling_class_rejected() {
         assert!(parse_spool_command("Q R CLASS").is_none());
+    }
+
+    #[test]
+    fn query_invalid_class_digit_rejected() {
+        assert!(parse_spool_command("Q R CLASS 1").is_none());
     }
 
     #[test]

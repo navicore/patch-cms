@@ -208,4 +208,19 @@ mod tests {
         // for_file rejects '*', so class stays at default 'A'
         assert_eq!(sf.class, SpoolClass::default());
     }
+
+    #[test]
+    fn spool_file_meta_multi_char_class_uses_first() {
+        let meta = "SPOOL_ID=1\nFILENAME=T\nFILETYPE=D\nORIGIN_USER=U\nCLASS=AB\nDEVICE=READER\n";
+        let sf = SpoolFile::from_meta_string(meta).unwrap();
+        // Only first char is used; 'A' is a valid file class
+        assert_eq!(sf.class.0, 'A');
+    }
+
+    #[test]
+    fn spool_file_meta_empty_class_uses_default() {
+        let meta = "SPOOL_ID=1\nFILENAME=T\nFILETYPE=D\nORIGIN_USER=U\nCLASS=\nDEVICE=READER\n";
+        let sf = SpoolFile::from_meta_string(meta).unwrap();
+        assert_eq!(sf.class, SpoolClass::default());
+    }
 }

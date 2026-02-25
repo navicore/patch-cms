@@ -131,12 +131,19 @@ impl DirectoryBackend {
                                 };
                                 match SpoolFile::from_meta_string(&meta_str) {
                                     Some(sf) if sf.spool_id == file_id && sf.device == device => {
-                                        entries.push((sf, path.clone()));
+                                        // Only include if .data exists; auto-purge
+                                        // orphaned .meta so QUERY count is accurate
+                                        let data_path = self
+                                            .device_dir(device)
+                                            .join(format!("{}.data", file_id));
+                                        if data_path.exists() {
+                                            entries.push((sf, path.clone()));
+                                        } else {
+                                            let _ = fs::remove_file(&path);
+                                        }
                                     }
                                     _ => {
                                         // Skip corrupt or mismatched metadata.
-                                        // The entry is invisible but we don't
-                                        // brick the entire queue.
                                     }
                                 }
                             }
@@ -363,6 +370,9 @@ impl SpoolBackend for DirectoryBackend {
 
         // Remove source after destination is written. Propagate non-NotFound
         // errors on .meta removal to avoid silent duplicate entries.
+        // Note: if this fails, the destination (new_id) exists in the reader
+        // but the caller only knows the source spool_id. A QUERY READER
+        // would reveal the duplicate for manual cleanup.
         match fs::remove_file(&meta_path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -716,25 +726,21 @@ mod tests {
     }
 
     #[test]
-    fn legacy_meta_only_entry_auto_purged_by_dequeue_by_id() {
+    fn orphaned_meta_auto_purged_by_list_queue() {
         let (backend, _dir) = make_backend();
-        // A .meta without .data (from old code or corruption) is visible
-        // but dequeue_by_id auto-purges the orphan and returns FileNotFound.
+        // A .meta without .data is auto-purged during read_entries,
+        // so list_queue never returns phantom entries.
         let meta_content =
             "SPOOL_ID=99\nFILENAME=ORPHAN\nFILETYPE=DATA\nORIGIN_USER=U\nDEVICE=READER\n";
         fs::write(backend.meta_path(SpoolDevice::Reader, 99), meta_content).unwrap();
+        assert!(backend.meta_path(SpoolDevice::Reader, 99).exists());
 
-        let files = backend.list_queue(SpoolDevice::Reader, None).unwrap();
-        assert_eq!(files.len(), 1);
-
-        let mut backend = backend;
-        let result = backend.dequeue_by_id(SpoolDevice::Reader, 99);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().rc(), 28);
-
-        // .meta was auto-purged — queue is now empty
+        // list_queue auto-purges the orphan — returns empty
         let files = backend.list_queue(SpoolDevice::Reader, None).unwrap();
         assert!(files.is_empty());
+
+        // .meta was cleaned up
+        assert!(!backend.meta_path(SpoolDevice::Reader, 99).exists());
     }
 
     #[test]
