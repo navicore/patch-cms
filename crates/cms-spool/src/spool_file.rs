@@ -104,8 +104,18 @@ impl SpoolFile {
             if let Some((key, value)) = line.split_once('=') {
                 match key {
                     "SPOOL_ID" => spool_id = value.parse().ok(),
-                    "FILENAME" => filename = Some(value.to_string()),
-                    "FILETYPE" => filetype = Some(value.to_string()),
+                    "FILENAME" => {
+                        if value.len() > 8 {
+                            return None;
+                        }
+                        filename = Some(value.to_string());
+                    }
+                    "FILETYPE" => {
+                        if value.len() > 8 {
+                            return None;
+                        }
+                        filetype = Some(value.to_string());
+                    }
                     "ORIGIN_USER" => origin_user = Some(value.to_string()),
                     "DEST_USER" => dest_user = value.to_string(),
                     "CLASS" => {
@@ -125,7 +135,13 @@ impl SpoolFile {
                         };
                     }
                     "HOLD" => hold = value == "true",
-                    "COPIES" => copies = value.parse().ok().filter(|&n: &u32| n >= 1).unwrap_or(1),
+                    "COPIES" => {
+                        copies = value
+                            .parse()
+                            .ok()
+                            .filter(|n: &u32| (1..=255).contains(n))
+                            .unwrap_or(1)
+                    }
                     _ => {}
                 }
             }

@@ -235,7 +235,8 @@ impl SpoolBackend for DirectoryBackend {
                     return Ok((sf, data));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // Orphaned .meta — purge it and try next entry
+                    // .data removed between read_entries and here (TOCTOU) —
+                    // purge the now-orphaned .meta and try next entry
                     let _ = fs::remove_file(self.meta_path(device, id));
                 }
                 Err(e) => return Err(SpoolError::Io(e)),
@@ -290,6 +291,10 @@ impl SpoolBackend for DirectoryBackend {
         };
         let sf =
             SpoolFile::from_meta_string(&meta_str).ok_or(SpoolError::FileNotFound(spool_id))?;
+        // Validate parsed metadata matches caller-supplied device and ID
+        if sf.spool_id != spool_id || sf.device != device {
+            return Err(SpoolError::FileNotFound(spool_id));
+        }
         let data = match fs::read_to_string(&data_path) {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

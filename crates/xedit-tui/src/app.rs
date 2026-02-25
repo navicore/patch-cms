@@ -866,6 +866,13 @@ impl App {
             None => return false,
         };
 
+        // If spool is not initialized, all spool commands get a consistent error
+        if self.spool_manager.is_none() {
+            self.editor_mut()
+                .set_message("DMSSPL100E Spool not available");
+            return true;
+        }
+
         // SENDFILE and RECEIVE need CMS filesystem bridging
         match &cmd {
             SpoolCommand::SendFile {
@@ -887,19 +894,15 @@ impl App {
         }
 
         // All other spool commands dispatch directly
-        if let Some(ref mut mgr) = self.spool_manager {
-            let result = execute_spool_command(&cmd, mgr);
-            let msg = if result.messages.is_empty() {
-                format!("RC={}", result.rc)
-            } else {
-                result.messages.join(" | ")
-            };
-            self.editor_mut().set_message(msg);
-            true
+        let mgr = self.spool_manager.as_mut().expect("checked above");
+        let result = execute_spool_command(&cmd, mgr);
+        let msg = if result.messages.is_empty() {
+            format!("RC={}", result.rc)
         } else {
-            // Spool not initialized — let CMS/xedit handlers try it
-            false
-        }
+            result.messages.join(" | ")
+        };
+        self.editor_mut().set_message(msg);
+        true
     }
 
     #[cfg(not(feature = "spool"))]
