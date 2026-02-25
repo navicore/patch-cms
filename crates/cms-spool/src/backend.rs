@@ -123,8 +123,10 @@ impl SpoolBackend for InMemoryBackend {
     }
 
     fn list_queue(&self, device: SpoolDevice, class: Option<SpoolClass>) -> Result<Vec<SpoolFile>> {
-        let empty = std::collections::VecDeque::new();
-        let queue = self.queues.get(&device).unwrap_or(&empty);
+        let queue = match self.queues.get(&device) {
+            Some(q) => q,
+            None => return Ok(Vec::new()),
+        };
         let files: Vec<SpoolFile> = queue
             .iter()
             .filter(|(sf, _)| match class {

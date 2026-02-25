@@ -31,7 +31,7 @@ impl fmt::Display for SpoolDevice {
 
 /// Spool class (A-Z or * for all classes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SpoolClass(pub char);
+pub struct SpoolClass(pub(crate) char);
 
 impl SpoolClass {
     /// The wildcard class that matches all other classes.

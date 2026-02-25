@@ -102,9 +102,9 @@ impl<B: SpoolBackend> SpoolManager<B> {
 
     /// Send a file to a user's reader (SENDFILE).
     ///
-    /// The file content is provided directly. The file is punched through
-    /// the virtual punch device and routed to the recipient's reader.
-    /// The spool class comes from the punch device configuration.
+    /// The file is enqueued directly on the recipient's reader queue
+    /// using the punch device configuration (class, hold). The file
+    /// does not transit the punch queue itself.
     pub fn send_file(
         &mut self,
         filename: &str,

@@ -261,6 +261,9 @@ impl SpoolBackend for DirectoryBackend {
         let data = match fs::read_to_string(&data_path) {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Orphaned .meta (no .data) — auto-purge so it doesn't
+                // permanently block the queue on repeated receive() calls
+                let _ = fs::remove_file(&meta_path);
                 return Err(SpoolError::FileNotFound(spool_id));
             }
             Err(e) => return Err(SpoolError::Io(e)),
@@ -713,10 +716,10 @@ mod tests {
     }
 
     #[test]
-    fn legacy_meta_only_entry_can_be_purged() {
+    fn legacy_meta_only_entry_auto_purged_by_dequeue_by_id() {
         let (backend, _dir) = make_backend();
         // A .meta without .data (from old code or corruption) is visible
-        // but dequeue fails. purge can clean it up.
+        // but dequeue_by_id auto-purges the orphan and returns FileNotFound.
         let meta_content =
             "SPOOL_ID=99\nFILENAME=ORPHAN\nFILETYPE=DATA\nORIGIN_USER=U\nDEVICE=READER\n";
         fs::write(backend.meta_path(SpoolDevice::Reader, 99), meta_content).unwrap();
@@ -727,9 +730,9 @@ mod tests {
         let mut backend = backend;
         let result = backend.dequeue_by_id(SpoolDevice::Reader, 99);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().rc(), 28); // FileNotFound, not Io
+        assert_eq!(result.unwrap_err().rc(), 28);
 
-        backend.purge(SpoolDevice::Reader, 99).unwrap();
+        // .meta was auto-purged — queue is now empty
         let files = backend.list_queue(SpoolDevice::Reader, None).unwrap();
         assert!(files.is_empty());
     }
