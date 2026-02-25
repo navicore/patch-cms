@@ -208,13 +208,13 @@ impl<B: SpoolBackend> SpoolManager<B> {
     }
 
     /// Check if a spool file belongs to this user.
-    /// Mirrors the logic in `receive()`: empty dest_user means
-    /// addressed to origin_user, not "any user".
+    /// Matches the `receive()` predicate: if dest_user is set, the file
+    /// belongs to the recipient; if empty, it belongs to the origin_user.
     fn is_owned_by_me(&self, sf: &SpoolFile) -> bool {
         if sf.dest_user.is_empty() {
             sf.origin_user == self.user_id
         } else {
-            sf.dest_user == self.user_id || sf.origin_user == self.user_id
+            sf.dest_user == self.user_id
         }
     }
 
@@ -258,6 +258,9 @@ impl<B: SpoolBackend> SpoolManager<B> {
         for id in my_ids {
             match self.backend.purge(device, id) {
                 Ok(()) => count += 1,
+                Err(crate::error::SpoolError::FileNotFound(_)) => {
+                    // Already gone (race with concurrent dequeue) — skip
+                }
                 Err(e) => {
                     if first_err.is_none() {
                         first_err = Some(e);
@@ -482,10 +485,14 @@ mod tests {
             .unwrap();
         assert!(id > 0);
 
-        // Verify dest_user is actually set on the queued file
+        // Sender should NOT see the file (it belongs to JONES now)
         let files = mgr.query_device(SpoolDevice::Reader, None).unwrap();
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].dest_user, "JONES");
+        assert!(files.is_empty());
+
+        // But the file exists in the backend with correct dest_user
+        let all = mgr.backend().list_queue(SpoolDevice::Reader, None).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].dest_user, "JONES");
     }
 
     #[test]

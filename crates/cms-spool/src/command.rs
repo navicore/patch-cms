@@ -392,6 +392,9 @@ fn parse_purge(parts: &[&str]) -> Option<SpoolCommand> {
         if word == "ALL" {
             PurgeTarget::All
         } else if let Ok(id) = parts[1].parse::<u64>() {
+            if id == 0 {
+                return None; // spool ID 0 is never valid — RC=24
+            }
             PurgeTarget::SpoolId(id)
         } else {
             return None;

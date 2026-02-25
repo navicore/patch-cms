@@ -108,25 +108,25 @@ impl SpoolFile {
                         if value.is_empty() || value.len() > 8 {
                             return None;
                         }
-                        filename = Some(value.to_string());
+                        filename = Some(value.to_ascii_uppercase());
                     }
                     "FILETYPE" => {
                         if value.is_empty() || value.len() > 8 {
                             return None;
                         }
-                        filetype = Some(value.to_string());
+                        filetype = Some(value.to_ascii_uppercase());
                     }
                     "ORIGIN_USER" => {
                         if value.is_empty() || value.len() > 8 {
                             return None;
                         }
-                        origin_user = Some(value.to_string());
+                        origin_user = Some(value.to_ascii_uppercase());
                     }
                     "DEST_USER" => {
                         if value.len() > 8 {
                             return None;
                         }
-                        dest_user = value.to_string();
+                        dest_user = value.to_ascii_uppercase();
                     }
                     "CLASS" => {
                         if value.len() != 1 {
