@@ -205,7 +205,11 @@ fn parse_spool_device(parts: &[&str]) -> Option<SpoolCommand> {
                 if i >= parts.len() {
                     return None; // dangling DEST — RC=24
                 }
-                dest = Some(parts[i].to_ascii_uppercase());
+                let d = parts[i].to_ascii_uppercase();
+                if d.is_empty() || d.len() > 8 {
+                    return None; // DEST must be 1-8 chars — RC=24
+                }
+                dest = Some(d);
             }
             "HOLD" => hold = Some(true),
             "NOHOLD" => hold = Some(false),
@@ -966,6 +970,11 @@ mod tests {
         assert!(parse_spool_command("SP PRT CLASS").is_none());
         assert!(parse_spool_command("SP PRT DEST").is_none());
         assert!(parse_spool_command("SP PRT COPIES").is_none());
+    }
+
+    #[test]
+    fn spool_dest_overlong_rejected() {
+        assert!(parse_spool_command("SP PRT DEST TOOLONGDESTINATION").is_none());
     }
 
     #[test]

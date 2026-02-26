@@ -1066,6 +1066,10 @@ impl App {
                         ));
                     }
                 }
+            } else {
+                self.editor_mut().set_message(
+                    "DMSSPL100E Data lost - spool manager unavailable during re-enqueue",
+                );
             }
         }
         true
