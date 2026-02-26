@@ -591,7 +591,7 @@ pub fn help_text(topic: &str) -> Option<&'static str> {
             s if ("COLOR".starts_with(s) || "COLOUR".starts_with(s)) && s.len() >= 3 => {
                 Some("SET COLOR|COLOUR area colorname — override display colors")
             }
-            s if "PF".starts_with(s) && s.len() >= 2 => {
+            s if s.starts_with("PF") && s.len() >= 2 => {
                 Some("SET PFn command — assign command to a PF key (1-24)")
             }
             s if "MACRO".starts_with(s) && s.len() >= 3 => {
@@ -2267,6 +2267,14 @@ mod tests {
         // American spelling still works
         assert!(help_text("SET COLOR").is_some());
         assert!(help_text("SET COL").is_some());
+    }
+
+    #[test]
+    fn help_text_set_pf_keys() {
+        assert!(help_text("SET PF").is_some());
+        assert!(help_text("SET PF1").is_some());
+        assert!(help_text("SET PF12").is_some());
+        assert!(help_text("SET PF24").is_some());
     }
 
     #[test]
