@@ -180,7 +180,7 @@ fn parse_spool_device(parts: &[&str]) -> Option<SpoolCommand> {
             "CONT" | "NOCONT" => "CONT",
             "CLASS" => "CLASS",
             "DEST" => "DEST",
-            "COPY" => "COPY",
+            "COPIES" => "COPIES",
             _ => "", // unknown — handled by match below
         };
         if !keyword.is_empty() && !seen.insert(keyword) {
@@ -211,10 +211,10 @@ fn parse_spool_device(parts: &[&str]) -> Option<SpoolCommand> {
             "NOHOLD" => hold = Some(false),
             "CONT" => continuous = Some(true),
             "NOCONT" => continuous = Some(false),
-            "COPY" => {
+            "COPIES" => {
                 i += 1;
                 if i >= parts.len() {
-                    return None; // dangling COPY — RC=24
+                    return None; // dangling COPIES — RC=24
                 }
                 match parts[i].parse::<u32>() {
                     Ok(n) if (1..=255).contains(&n) => copies = Some(n),
@@ -224,6 +224,11 @@ fn parse_spool_device(parts: &[&str]) -> Option<SpoolCommand> {
             _ => return None, // unknown option — RC=24
         }
         i += 1;
+    }
+
+    // CONT/NOCONT is only valid for Printer and Punch
+    if continuous.is_some() && device == SpoolDevice::Reader {
+        return None; // RC=24
     }
 
     Some(SpoolCommand::Spool {
@@ -477,7 +482,7 @@ pub fn execute_spool_command<B: SpoolBackend>(
             );
             let cfg = manager.device_config(*device);
             let mut msg = format!(
-                "{} CLASS {} DEST {} COPY {}",
+                "{} CLASS {} DEST {} COPIES {}",
                 device,
                 cfg.class,
                 if cfg.dest.is_empty() {
@@ -582,11 +587,23 @@ mod tests {
 
     #[test]
     fn parse_spool_copy() {
-        let cmd = parse_spool_command("SP PRT COPY 3").unwrap();
+        let cmd = parse_spool_command("SP PRT COPIES 3").unwrap();
         match cmd {
             SpoolCommand::Spool { copies, .. } => {
                 assert_eq!(copies, Some(3));
             }
+            _ => panic!("Expected Spool command"),
+        }
+        // Boundary: minimum valid
+        let cmd = parse_spool_command("SP PRT COPIES 1").unwrap();
+        match cmd {
+            SpoolCommand::Spool { copies, .. } => assert_eq!(copies, Some(1)),
+            _ => panic!("Expected Spool command"),
+        }
+        // Boundary: maximum valid
+        let cmd = parse_spool_command("SP PRT COPIES 255").unwrap();
+        match cmd {
+            SpoolCommand::Spool { copies, .. } => assert_eq!(copies, Some(255)),
             _ => panic!("Expected Spool command"),
         }
     }
@@ -764,7 +781,7 @@ mod tests {
     #[test]
     fn execute_spool_configure() {
         let mut mgr = make_manager();
-        let cmd = parse_spool_command("SP PRT CLASS B DEST OPERATOR COPY 3").unwrap();
+        let cmd = parse_spool_command("SP PRT CLASS B DEST OPERATOR COPIES 3").unwrap();
         let result = execute_spool_command(&cmd, &mut mgr);
         assert_eq!(result.rc, 0);
         assert!(!result.messages.is_empty());
@@ -919,7 +936,8 @@ mod tests {
     #[test]
     fn spool_unknown_option_rejected() {
         assert!(parse_spool_command("SP PRT BOGUSOPT VALUE").is_none());
-        assert!(parse_spool_command("SP PRT COPIES 3").is_none());
+        // COPY (without S) is not a valid keyword — use COPIES
+        assert!(parse_spool_command("SP PRT COPY 3").is_none());
     }
 
     #[test]
@@ -947,7 +965,7 @@ mod tests {
     fn spool_dangling_keywords_rejected() {
         assert!(parse_spool_command("SP PRT CLASS").is_none());
         assert!(parse_spool_command("SP PRT DEST").is_none());
-        assert!(parse_spool_command("SP PRT COPY").is_none());
+        assert!(parse_spool_command("SP PRT COPIES").is_none());
     }
 
     #[test]
@@ -982,17 +1000,17 @@ mod tests {
 
     #[test]
     fn copy_zero_rejected() {
-        assert!(parse_spool_command("SP PRT COPY 0").is_none());
+        assert!(parse_spool_command("SP PRT COPIES 0").is_none());
     }
 
     #[test]
     fn copy_non_numeric_rejected() {
-        assert!(parse_spool_command("SP PRT COPY abc").is_none());
+        assert!(parse_spool_command("SP PRT COPIES abc").is_none());
     }
 
     #[test]
     fn copy_overflow_rejected() {
-        assert!(parse_spool_command("SP PRT COPY 256").is_none());
+        assert!(parse_spool_command("SP PRT COPIES 256").is_none());
     }
 
     #[test]
@@ -1045,7 +1063,7 @@ mod tests {
 
     #[test]
     fn spool_multiple_options() {
-        let cmd = parse_spool_command("SP PRT CLASS B DEST OPER HOLD CONT COPY 5").unwrap();
+        let cmd = parse_spool_command("SP PRT CLASS B DEST OPER HOLD CONT COPIES 5").unwrap();
         match cmd {
             SpoolCommand::Spool {
                 device,

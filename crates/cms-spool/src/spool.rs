@@ -249,6 +249,12 @@ impl<B: SpoolBackend> SpoolManager<B> {
     /// Purge a specific file from a device queue.
     ///
     /// Only purges files belonging to the current user.
+    ///
+    /// Note: there is a TOCTOU window between the ownership check
+    /// (`list_queue`) and the actual deletion (`backend.purge`). A
+    /// concurrent `dequeue` or `receive` can consume the file in between,
+    /// causing `purge` to return `FileNotFound` even though the ownership
+    /// check passed. Single-user CLI use is unaffected.
     pub fn purge_file(&mut self, device: SpoolDevice, spool_id: u64) -> Result<()> {
         let files = self.backend.list_queue(device, None)?;
         let owned = files

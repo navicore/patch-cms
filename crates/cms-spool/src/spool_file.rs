@@ -27,33 +27,32 @@ pub struct SpoolFile {
 
 /// Validate metadata fields before enqueue.
 ///
-/// Checks that required fields are non-empty, no field contains newlines
-/// (which would corrupt the key=value `.meta` format), and all fields
-/// respect the 8-character CMS maximum that `from_meta_string` enforces.
+/// Checks that required fields are non-empty, respect the 8-character CMS
+/// maximum, contain only CMS-legal characters (`A-Z 0-9 @ # $`), and do
+/// not contain newlines (which would corrupt the key=value `.meta` format).
+/// `dest_user` may be empty (meaning "self").
 pub fn validate_enqueue_fields(
     filename: &str,
     filetype: &str,
     origin_user: &str,
     dest_user: &str,
 ) -> crate::error::Result<()> {
-    fn has_newline(s: &str) -> bool {
-        s.contains('\n') || s.contains('\r')
+    /// CMS filenames/filetypes/userids: uppercase alphanumeric + @#$
+    fn is_cms_legal(s: &str) -> bool {
+        !s.is_empty()
+            && s.len() <= 8
+            && s.bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b"@#$".contains(&b))
     }
-    if filename.is_empty()
-        || filetype.is_empty()
-        || origin_user.is_empty()
-        || has_newline(filename)
-        || has_newline(filetype)
-        || has_newline(origin_user)
-        || has_newline(dest_user)
-        || filename.len() > 8
-        || filetype.len() > 8
-        || origin_user.len() > 8
-        || dest_user.len() > 8
-    {
+    if !is_cms_legal(filename) || !is_cms_legal(filetype) || !is_cms_legal(origin_user) {
         return Err(crate::error::SpoolError::InvalidParameter(
-            "spool metadata fields must not be empty, contain newlines, or exceed 8 characters"
-                .to_string(),
+            "spool metadata fields must be 1-8 CMS-legal characters (A-Z 0-9 @ # $)".to_string(),
+        ));
+    }
+    // dest_user may be empty (meaning "self"), but if set must be valid
+    if !dest_user.is_empty() && !is_cms_legal(dest_user) {
+        return Err(crate::error::SpoolError::InvalidParameter(
+            "dest_user must be 1-8 CMS-legal characters (A-Z 0-9 @ # $)".to_string(),
         ));
     }
     Ok(())
