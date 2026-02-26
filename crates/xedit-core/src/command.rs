@@ -588,8 +588,8 @@ pub fn help_text(topic: &str) -> Option<&'static str> {
             s if "RESERVED".starts_with(s) && s.len() >= 3 => {
                 Some("SET RESERVED row text|OFF — reserve a screen line for text")
             }
-            s if "COLOR".starts_with(s) && s.len() >= 3 => {
-                Some("SET COLOR area colorname — override display colors")
+            s if ("COLOR".starts_with(s) || "COLOUR".starts_with(s)) && s.len() >= 3 => {
+                Some("SET COLOR|COLOUR area colorname — override display colors")
             }
             s if "PF".starts_with(s) && s.len() >= 2 => {
                 Some("SET PFn command — assign command to a PF key (1-24)")
@@ -605,7 +605,7 @@ pub fn help_text(topic: &str) -> Option<&'static str> {
     let resolved = lookup_command(&upper)?;
     match resolved {
         "UP" => Some("UP [n] — move current line up n lines (default 1)"),
-        "DOWN" => Some("DOWN [n] — move current line down n lines (default 1)"),
+        "DOWN" | "NEXT" => Some("DOWN [n] — move current line down n lines (default 1)"),
         "TOP" => Some("TOP — move to top of file (line 0)"),
         "BOTTOM" => Some("BOTTOM — move to bottom of file (last line)"),
         "FORWARD" => Some("FORWARD [n] — scroll forward n pages (default 1)"),
@@ -642,6 +642,7 @@ pub fn help_text(topic: &str) -> Option<&'static str> {
         "UNDO" => Some("UNDO — undo last modification"),
         "REFRESH" => Some("REFRESH — redraw the screen"),
         "HELP" => Some("HELP [command] — show command help; HELP SET <opt> for SET details"),
+        "MACRO" => Some("MACRO name [args] — run a REXX macro by name"),
         _ => None,
     }
 }
@@ -2257,5 +2258,21 @@ mod tests {
     #[test]
     fn help_text_set_unknown_subtopic() {
         assert!(help_text("SET NONEXISTENT").is_none());
+    }
+
+    #[test]
+    fn help_text_set_colour_alias() {
+        assert!(help_text("SET COLOUR").is_some());
+        assert!(help_text("SET COLOU").is_some());
+        // American spelling still works
+        assert!(help_text("SET COLOR").is_some());
+        assert!(help_text("SET COL").is_some());
+    }
+
+    #[test]
+    fn help_text_next_resolves() {
+        assert!(help_text("N").is_some());
+        assert!(help_text("NEXT").is_some());
+        assert!(help_text("NEXT").unwrap().contains("DOWN"));
     }
 }
