@@ -85,6 +85,27 @@ pub fn create_cms_fs(base_path: &str) -> Result<CmsFs, String> {
     Ok(CmsFs::new(fs))
 }
 
+/// Set up the spool subsystem under the CMS base directory.
+///
+/// Creates the spool directory structure:
+/// ```text
+/// <base_path>/spool/
+///   rdr/   # reader queue
+///   prt/   # printer queue
+///   pun/   # punch queue
+/// ```
+#[cfg(feature = "spool")]
+pub fn setup_spool(
+    base_path: &str,
+    user_id: &str,
+) -> Result<cms_spool::SpoolManager<cms_spool::directory::DirectoryBackend>, String> {
+    let spool_dir = std::path::Path::new(base_path).join("spool");
+    std::fs::create_dir_all(&spool_dir).map_err(|e| e.to_string())?;
+    let backend =
+        cms_spool::directory::DirectoryBackend::new(&spool_dir).map_err(|e| e.to_string())?;
+    Ok(cms_spool::SpoolManager::new(backend, user_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,5 +160,33 @@ mod tests {
     fn setup_cms_bad_path() {
         let result = setup_cms("/nonexistent/path/that/does/not/exist");
         assert!(result.is_err());
+    }
+
+    #[cfg(feature = "spool")]
+    #[test]
+    fn setup_spool_creates_directories() {
+        let dir = make_cms_dir();
+        let base = dir.path().to_str().unwrap();
+        let _mgr = super::setup_spool(base, "TESTUSER").unwrap();
+
+        assert!(dir.path().join("spool").is_dir());
+        assert!(dir.path().join("spool/rdr").is_dir());
+        assert!(dir.path().join("spool/prt").is_dir());
+        assert!(dir.path().join("spool/pun").is_dir());
+    }
+
+    #[cfg(feature = "spool")]
+    #[test]
+    fn setup_spool_send_and_receive() {
+        let dir = make_cms_dir();
+        let base = dir.path().to_str().unwrap();
+        let mut mgr = super::setup_spool(base, "TESTUSER").unwrap();
+
+        mgr.send_file("TEST", "DATA", "hello world\n", None)
+            .unwrap();
+        let (sf, content) = mgr.receive().unwrap();
+        assert_eq!(sf.filename, "TEST");
+        assert_eq!(sf.filetype, "DATA");
+        assert_eq!(content, "hello world\n");
     }
 }

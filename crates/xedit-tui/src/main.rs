@@ -21,6 +21,17 @@ fn main() {
             match cms_support::setup_cms(base_path) {
                 Ok((processor, cms_fs)) => {
                     app = app::App::with_cms(processor, cms_fs, base_path.to_string());
+
+                    #[cfg(feature = "spool")]
+                    {
+                        let user_id = std::env::var("USER")
+                            .or_else(|_| std::env::var("LOGNAME"))
+                            .unwrap_or_else(|_| "USER".to_string());
+                        match cms_support::setup_spool(base_path, &user_id) {
+                            Ok(spool_mgr) => app.set_spool_manager(spool_mgr),
+                            Err(e) => eprintln!("Spool setup warning: {}", e),
+                        }
+                    }
                 }
                 Err(e) => {
                     eprintln!("CMS setup error: {}", e);
