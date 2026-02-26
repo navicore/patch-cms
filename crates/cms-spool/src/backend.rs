@@ -99,22 +99,7 @@ impl SpoolBackend for InMemoryBackend {
         hold: bool,
         data: &str,
     ) -> Result<u64> {
-        fn has_newline(s: &str) -> bool {
-            s.contains('\n') || s.contains('\r')
-        }
-        if filename.is_empty()
-            || filetype.is_empty()
-            || origin_user.is_empty()
-            || has_newline(filename)
-            || has_newline(filetype)
-            || has_newline(origin_user)
-            || has_newline(dest_user)
-        {
-            return Err(crate::error::SpoolError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "spool metadata fields must not be empty or contain newlines",
-            )));
-        }
+        crate::spool_file::validate_enqueue_fields(filename, filetype, origin_user, dest_user)?;
 
         let id = self.next_id;
         self.next_id += 1;

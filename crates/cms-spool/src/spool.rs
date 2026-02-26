@@ -254,22 +254,18 @@ impl<B: SpoolBackend> SpoolManager<B> {
             .map(|sf| sf.spool_id)
             .collect();
         let mut count = 0;
-        let mut first_err: Option<crate::error::SpoolError> = None;
         for id in my_ids {
             match self.backend.purge(device, id) {
                 Ok(()) => count += 1,
                 Err(crate::error::SpoolError::FileNotFound(_)) => {
                     // Already gone (race with concurrent dequeue) — skip
                 }
-                Err(e) => {
-                    if first_err.is_none() {
-                        first_err = Some(e);
-                    }
+                Err(_) => {
+                    // Individual purge failed (e.g. I/O error) — skip and
+                    // continue so the caller gets an accurate partial count
+                    // rather than losing it entirely.
                 }
             }
-        }
-        if let Some(e) = first_err {
-            return Err(e);
         }
         Ok(count)
     }

@@ -146,7 +146,14 @@ impl DirectoryBackend {
                                     Some(sf) if sf.spool_id == file_id && sf.device == device => {
                                         entries.push((sf, path.clone()));
                                     }
-                                    _ => {}
+                                    _ => {
+                                        // Invalid/corrupt .meta — remove it so it doesn't
+                                        // accumulate permanently. The corresponding .data
+                                        // (if any) is left alone; it will be cleaned up by
+                                        // the orphaned-.data pass only if no valid .meta
+                                        // references its ID.
+                                        let _ = fs::remove_file(&path);
+                                    }
                                 }
                             }
                         }
@@ -194,23 +201,7 @@ impl SpoolBackend for DirectoryBackend {
         hold: bool,
         data: &str,
     ) -> Result<u64> {
-        // Reject strings that would corrupt the key=value .meta format
-        fn has_newline(s: &str) -> bool {
-            s.contains('\n') || s.contains('\r')
-        }
-        if filename.is_empty()
-            || filetype.is_empty()
-            || origin_user.is_empty()
-            || has_newline(filename)
-            || has_newline(filetype)
-            || has_newline(origin_user)
-            || has_newline(dest_user)
-        {
-            return Err(SpoolError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "spool metadata fields must not be empty or contain newlines",
-            )));
-        }
+        crate::spool_file::validate_enqueue_fields(filename, filetype, origin_user, dest_user)?;
 
         let id = self.allocate_id()?;
 
@@ -797,6 +788,27 @@ mod tests {
 
         // .meta was cleaned up
         assert!(!backend.meta_path(SpoolDevice::Reader, 99).exists());
+    }
+
+    #[test]
+    fn invalid_meta_with_valid_data_cleans_up_meta() {
+        let (backend, _dir) = make_backend();
+        // Write an unparseable .meta (filename exceeds 8 chars) alongside a valid .data
+        let bad_meta =
+            "SPOOL_ID=99\nFILENAME=TOOLONGNAME\nFILETYPE=DATA\nORIGIN_USER=U\nDEVICE=READER\n";
+        fs::write(backend.meta_path(SpoolDevice::Reader, 99), bad_meta).unwrap();
+        fs::write(backend.data_path(SpoolDevice::Reader, 99), "some data").unwrap();
+        assert!(backend.meta_path(SpoolDevice::Reader, 99).exists());
+        assert!(backend.data_path(SpoolDevice::Reader, 99).exists());
+
+        // list_queue triggers read_entries which should clean up the invalid .meta
+        let files = backend.list_queue(SpoolDevice::Reader, None).unwrap();
+        assert!(files.is_empty());
+
+        // Invalid .meta was removed
+        assert!(!backend.meta_path(SpoolDevice::Reader, 99).exists());
+        // Orphaned .data is also cleaned up (no valid .meta references it)
+        assert!(!backend.data_path(SpoolDevice::Reader, 99).exists());
     }
 
     #[test]
