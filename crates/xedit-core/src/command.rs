@@ -591,9 +591,7 @@ pub fn help_text(topic: &str) -> Option<&'static str> {
             s if ("COLOR".starts_with(s) || "COLOUR".starts_with(s)) && s.len() >= 3 => {
                 Some("SET COLOR|COLOUR area colorname — override display colors")
             }
-            s if s.starts_with("PF") && s.len() >= 2 => {
-                Some("SET PFn command — assign command to a PF key (1-24)")
-            }
+            s if s.starts_with("PF") => Some("SET PFn command — assign command to a PF key (1-24)"),
             s if "MACRO".starts_with(s) && s.len() >= 3 => {
                 Some("SET MACRO PATH dir1 dir2 ... — set macro search path")
             }
@@ -620,8 +618,8 @@ pub fn help_text(topic: &str) -> Option<&'static str> {
         "DUPLICAT" => Some("DUPLICAT [n] — duplicate current line n times (default 1)"),
         "COVERWRITE" => Some("COVERWRITE text — overlay text onto current line"),
         "CINSERT" => Some("CINSERT text — insert text at current column"),
-        "COMPRESS" => Some("COMPRESS [col1 col2] — compress tabs to spaces"),
-        "EXPAND" => Some("EXPAND [col1 col2] — expand spaces to tabs"),
+        "COMPRESS" => Some("COMPRESS [col1 col2] — compress spaces to tabs at tab stops"),
+        "EXPAND" => Some("EXPAND [col1 col2] — expand tabs to spaces"),
         "FILE" => Some("FILE — save file and quit"),
         "SAVE" => Some("SAVE — save file without quitting"),
         "QUIT" => Some("QUIT — quit if no unsaved changes"),
@@ -2267,6 +2265,22 @@ mod tests {
         // American spelling still works
         assert!(help_text("SET COLOR").is_some());
         assert!(help_text("SET COL").is_some());
+    }
+
+    #[test]
+    fn help_text_compress_direction() {
+        let t = help_text("COMPRESS").unwrap();
+        // COMPRESS converts spaces → tabs
+        assert!(t.contains("spaces") && t.contains("tabs"));
+        assert!(t.contains("spaces to tabs"));
+    }
+
+    #[test]
+    fn help_text_expand_direction() {
+        let t = help_text("EXPAND").unwrap();
+        // EXPAND converts tabs → spaces
+        assert!(t.contains("tabs") && t.contains("spaces"));
+        assert!(t.contains("tabs to spaces"));
     }
 
     #[test]
