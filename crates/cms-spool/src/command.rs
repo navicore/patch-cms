@@ -991,6 +991,11 @@ mod tests {
     }
 
     #[test]
+    fn copy_overflow_rejected() {
+        assert!(parse_spool_command("SP PRT COPY 256").is_none());
+    }
+
+    #[test]
     fn sendfile_dangling_to_rejected() {
         assert!(parse_spool_command("SE MYFILE DATA TO").is_none());
     }

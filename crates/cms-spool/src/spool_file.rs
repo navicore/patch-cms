@@ -132,7 +132,7 @@ impl SpoolFile {
                         if value.len() != 1 {
                             return None; // CLASS must be exactly one character
                         }
-                        class = SpoolClass::for_file(value.chars().next().unwrap())?;
+                        class = SpoolClass::for_file(value.chars().next()?)?;
                     }
                     "RECORDS" => records = value.parse().unwrap_or(0),
                     "DEVICE" => {

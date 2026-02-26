@@ -425,7 +425,12 @@ impl SpoolBackend for DirectoryBackend {
         match fs::remove_file(&meta_path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(SpoolError::Io(e)),
+            Err(e) => {
+                // Roll back destination to avoid duplicates
+                let _ = fs::remove_file(self.meta_path(SpoolDevice::Reader, new_id));
+                let _ = remove_file_ignore_not_found(&dest_data);
+                return Err(SpoolError::Io(e));
+            }
         }
         // Best-effort .data removal — .meta is already gone so the source
         // entry is invisible; orphaned .data is harmless.
