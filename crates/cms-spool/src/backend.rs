@@ -20,6 +20,7 @@ pub trait SpoolBackend {
         dest_user: &str,
         class: SpoolClass,
         hold: bool,
+        copies: u32,
         data: &str,
     ) -> Result<u64>;
 
@@ -31,7 +32,14 @@ pub trait SpoolBackend {
     fn dequeue(&mut self, device: SpoolDevice) -> Result<(SpoolFile, String)>;
 
     /// List files in a device queue, optionally filtered by class.
-    fn list_queue(&self, device: SpoolDevice, class: Option<SpoolClass>) -> Result<Vec<SpoolFile>>;
+    ///
+    /// Implementations may perform filesystem cleanup (e.g. orphaned entries),
+    /// so this takes `&mut self`.
+    fn list_queue(
+        &mut self,
+        device: SpoolDevice,
+        class: Option<SpoolClass>,
+    ) -> Result<Vec<SpoolFile>>;
 
     /// Remove a specific file from a device queue by spool ID.
     fn purge(&mut self, device: SpoolDevice, spool_id: u64) -> Result<()>;
@@ -97,6 +105,7 @@ impl SpoolBackend for InMemoryBackend {
         dest_user: &str,
         class: SpoolClass,
         hold: bool,
+        copies: u32,
         data: &str,
     ) -> Result<u64> {
         crate::spool_file::validate_enqueue_fields(filename, filetype, origin_user, dest_user)?;
@@ -108,6 +117,7 @@ impl SpoolBackend for InMemoryBackend {
         sf.dest_user = dest_user.to_ascii_uppercase();
         sf.class = class;
         sf.hold = hold;
+        sf.copies = copies;
         sf.records = data.lines().count();
 
         self.queues
@@ -124,7 +134,11 @@ impl SpoolBackend for InMemoryBackend {
             .ok_or(crate::error::SpoolError::QueueEmpty(device))
     }
 
-    fn list_queue(&self, device: SpoolDevice, class: Option<SpoolClass>) -> Result<Vec<SpoolFile>> {
+    fn list_queue(
+        &mut self,
+        device: SpoolDevice,
+        class: Option<SpoolClass>,
+    ) -> Result<Vec<SpoolFile>> {
         let queue = match self.queues.get(&device) {
             Some(q) => q,
             None => return Ok(Vec::new()),
@@ -219,6 +233,7 @@ mod tests {
                 "",
                 SpoolClass::default(),
                 false,
+                1,
                 "line1\nline2\n",
             )
             .unwrap();
@@ -249,6 +264,7 @@ mod tests {
                 "",
                 SpoolClass('A'),
                 false,
+                1,
                 "data1",
             )
             .unwrap();
@@ -261,6 +277,7 @@ mod tests {
                 "",
                 SpoolClass('B'),
                 false,
+                1,
                 "data2",
             )
             .unwrap();
@@ -287,6 +304,7 @@ mod tests {
                 "",
                 SpoolClass::default(),
                 false,
+                1,
                 "data",
             )
             .unwrap();
@@ -315,6 +333,7 @@ mod tests {
                 "",
                 SpoolClass::default(),
                 false,
+                1,
                 "d",
             )
             .unwrap();
@@ -327,6 +346,7 @@ mod tests {
                 "",
                 SpoolClass::default(),
                 false,
+                1,
                 "d",
             )
             .unwrap();
@@ -346,6 +366,7 @@ mod tests {
                 "",
                 SpoolClass::default(),
                 false,
+                1,
                 "content",
             )
             .unwrap();
@@ -373,6 +394,7 @@ mod tests {
                 "",
                 SpoolClass::default(),
                 false,
+                1,
                 "",
             )
             .unwrap();
@@ -385,6 +407,7 @@ mod tests {
                 "",
                 SpoolClass::default(),
                 false,
+                1,
                 "",
             )
             .unwrap();

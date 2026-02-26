@@ -17,6 +17,25 @@ impl SpoolDevice {
             SpoolDevice::Punch => "pun",
         }
     }
+
+    /// Stable string for `.meta` serialization, independent of `Display`.
+    pub fn as_meta_str(&self) -> &'static str {
+        match self {
+            SpoolDevice::Reader => "READER",
+            SpoolDevice::Printer => "PRINTER",
+            SpoolDevice::Punch => "PUNCH",
+        }
+    }
+
+    /// Parse from the stable `.meta` serialization string.
+    pub fn from_meta_str(s: &str) -> Option<Self> {
+        match s {
+            "READER" => Some(SpoolDevice::Reader),
+            "PRINTER" => Some(SpoolDevice::Printer),
+            "PUNCH" => Some(SpoolDevice::Punch),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for SpoolDevice {

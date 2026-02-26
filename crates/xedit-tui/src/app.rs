@@ -1050,6 +1050,7 @@ impl App {
                     dest.unwrap_or(""),
                     spool_file.class,
                     spool_file.hold,
+                    spool_file.copies,
                     &content,
                 ) {
                     Ok(new_id) => {

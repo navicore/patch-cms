@@ -51,10 +51,10 @@ pub fn validate_enqueue_fields(
         || origin_user.len() > 8
         || dest_user.len() > 8
     {
-        return Err(crate::error::SpoolError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "spool metadata fields must not be empty, contain newlines, or exceed 8 characters",
-        )));
+        return Err(crate::error::SpoolError::InvalidParameter(
+            "spool metadata fields must not be empty, contain newlines, or exceed 8 characters"
+                .to_string(),
+        ));
     }
     Ok(())
 }
@@ -111,7 +111,7 @@ impl SpoolFile {
         let _ = writeln!(s, "DEST_USER={}", self.dest_user);
         let _ = writeln!(s, "CLASS={}", self.class);
         let _ = writeln!(s, "RECORDS={}", self.records);
-        let _ = writeln!(s, "DEVICE={}", self.device);
+        let _ = writeln!(s, "DEVICE={}", self.device.as_meta_str());
         let _ = writeln!(s, "HOLD={}", self.hold);
         let _ = writeln!(s, "COPIES={}", self.copies);
         s
@@ -170,12 +170,7 @@ impl SpoolFile {
                     }
                     "RECORDS" => records = value.parse().unwrap_or(0),
                     "DEVICE" => {
-                        device = match value {
-                            "READER" => Some(SpoolDevice::Reader),
-                            "PRINTER" => Some(SpoolDevice::Printer),
-                            "PUNCH" => Some(SpoolDevice::Punch),
-                            _ => None,
-                        };
+                        device = SpoolDevice::from_meta_str(value);
                     }
                     "HOLD" => hold = value == "true",
                     "COPIES" => {

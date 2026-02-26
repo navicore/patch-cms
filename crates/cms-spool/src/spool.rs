@@ -117,6 +117,7 @@ impl<B: SpoolBackend> SpoolManager<B> {
             .unwrap_or_else(|| self.user_id.clone());
         let class = self.punch_config.class;
         let hold = self.punch_config.hold;
+        let copies = self.punch_config.copies;
 
         self.backend.enqueue(
             SpoolDevice::Reader,
@@ -126,6 +127,7 @@ impl<B: SpoolBackend> SpoolManager<B> {
             &dest,
             class,
             hold,
+            copies,
             data,
         )
     }
@@ -178,6 +180,7 @@ impl<B: SpoolBackend> SpoolManager<B> {
         let class = self.printer_config.class;
         let dest = self.printer_config.dest.clone();
         let hold = self.printer_config.hold;
+        let copies = self.printer_config.copies;
         self.backend.enqueue(
             SpoolDevice::Printer,
             filename,
@@ -186,6 +189,7 @@ impl<B: SpoolBackend> SpoolManager<B> {
             &dest,
             class,
             hold,
+            copies,
             data,
         )
     }
@@ -195,6 +199,7 @@ impl<B: SpoolBackend> SpoolManager<B> {
         let class = self.punch_config.class;
         let dest = self.punch_config.dest.clone();
         let hold = self.punch_config.hold;
+        let copies = self.punch_config.copies;
         self.backend.enqueue(
             SpoolDevice::Punch,
             filename,
@@ -203,24 +208,34 @@ impl<B: SpoolBackend> SpoolManager<B> {
             &dest,
             class,
             hold,
+            copies,
             data,
         )
     }
 
     /// Check if a spool file belongs to this user.
-    /// Matches the `receive()` predicate: if dest_user is set, the file
-    /// belongs to the recipient; if empty, it belongs to the origin_user.
+    ///
+    /// For **Reader**, ownership is determined by `dest_user` (the intended
+    /// recipient); if `dest_user` is empty, fall back to `origin_user`.
+    /// For **Printer** and **Punch**, ownership is always by `origin_user`
+    /// — `dest_user` controls physical routing (e.g. `DEST OPERATOR`) but
+    /// the originating user still owns the spool entry.
     fn is_owned_by_me(&self, sf: &SpoolFile) -> bool {
-        if sf.dest_user.is_empty() {
-            sf.origin_user == self.user_id
-        } else {
-            sf.dest_user == self.user_id
+        match sf.device {
+            SpoolDevice::Reader => {
+                if sf.dest_user.is_empty() {
+                    sf.origin_user == self.user_id
+                } else {
+                    sf.dest_user == self.user_id
+                }
+            }
+            SpoolDevice::Printer | SpoolDevice::Punch => sf.origin_user == self.user_id,
         }
     }
 
     /// Query files in a device queue, scoped to the current user.
     pub fn query_device(
-        &self,
+        &mut self,
         device: SpoolDevice,
         class: Option<SpoolClass>,
     ) -> Result<Vec<SpoolFile>> {
@@ -254,18 +269,22 @@ impl<B: SpoolBackend> SpoolManager<B> {
             .map(|sf| sf.spool_id)
             .collect();
         let mut count = 0;
+        let mut first_err: Option<crate::error::SpoolError> = None;
         for id in my_ids {
             match self.backend.purge(device, id) {
                 Ok(()) => count += 1,
                 Err(crate::error::SpoolError::FileNotFound(_)) => {
                     // Already gone (race with concurrent dequeue) — skip
                 }
-                Err(_) => {
-                    // Individual purge failed (e.g. I/O error) — skip and
-                    // continue so the caller gets an accurate partial count
-                    // rather than losing it entirely.
+                Err(e) => {
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
                 }
             }
+        }
+        if let Some(e) = first_err {
+            return Err(e);
         }
         Ok(count)
     }
@@ -486,7 +505,10 @@ mod tests {
         assert!(files.is_empty());
 
         // But the file exists in the backend with correct dest_user
-        let all = mgr.backend().list_queue(SpoolDevice::Reader, None).unwrap();
+        let all = mgr
+            .backend_mut()
+            .list_queue(SpoolDevice::Reader, None)
+            .unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].dest_user, "JONES");
     }
@@ -518,6 +540,7 @@ mod tests {
                 "TESTUSER",
                 SpoolClass::default(),
                 false,
+                1,
                 "data\n",
             )
             .unwrap();
@@ -548,6 +571,7 @@ mod tests {
                 "TESTUSER",
                 SpoolClass::default(),
                 false,
+                1,
                 "held data\n",
             )
             .unwrap();
@@ -560,6 +584,7 @@ mod tests {
                 "TESTUSER",
                 SpoolClass::default(),
                 false,
+                1,
                 "free data\n",
             )
             .unwrap();
@@ -594,6 +619,7 @@ mod tests {
                 "JONES",
                 SpoolClass::default(),
                 false,
+                1,
                 "data\n",
             )
             .unwrap();
@@ -725,5 +751,30 @@ mod tests {
     fn user_id_uppercased() {
         let mgr = SpoolManager::new(InMemoryBackend::new(), "lowercase");
         assert_eq!(mgr.user_id(), "LOWERCASE");
+    }
+
+    #[test]
+    fn printer_with_dest_still_visible_to_originator() {
+        let mut mgr = make_manager();
+        // Set DEST to another user
+        mgr.configure_device(
+            SpoolDevice::Printer,
+            None,
+            Some("OPERATOR"),
+            None,
+            None,
+            None,
+        );
+        mgr.print_file("REPORT", "LIST", "data\n").unwrap();
+
+        // Originating user should still see their printer file
+        let files = mgr.query_device(SpoolDevice::Printer, None).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].filename, "REPORT");
+        assert_eq!(files[0].dest_user, "OPERATOR");
+
+        // And should be able to purge it
+        let count = mgr.purge_all(SpoolDevice::Printer, None).unwrap();
+        assert_eq!(count, 1);
     }
 }

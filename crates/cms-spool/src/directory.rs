@@ -115,7 +115,8 @@ impl DirectoryBackend {
     }
 
     /// Read all spool entries in a device directory, sorted by spool ID.
-    fn read_entries(&self, device: SpoolDevice) -> Result<Vec<(SpoolFile, PathBuf)>> {
+    /// Also cleans up orphaned `.meta` and `.data` files.
+    fn read_entries(&mut self, device: SpoolDevice) -> Result<Vec<(SpoolFile, PathBuf)>> {
         let dir = self.device_dir(device);
         let mut entries = Vec::new();
         let mut data_ids = std::collections::HashSet::new();
@@ -199,6 +200,7 @@ impl SpoolBackend for DirectoryBackend {
         dest_user: &str,
         class: SpoolClass,
         hold: bool,
+        copies: u32,
         data: &str,
     ) -> Result<u64> {
         crate::spool_file::validate_enqueue_fields(filename, filetype, origin_user, dest_user)?;
@@ -209,6 +211,7 @@ impl SpoolBackend for DirectoryBackend {
         sf.dest_user = dest_user.to_ascii_uppercase();
         sf.class = class;
         sf.hold = hold;
+        sf.copies = copies;
         sf.records = data.lines().count();
 
         // Write .data first, then .meta. The create order is opposite to the
@@ -254,7 +257,11 @@ impl SpoolBackend for DirectoryBackend {
         Err(SpoolError::QueueEmpty(device))
     }
 
-    fn list_queue(&self, device: SpoolDevice, class: Option<SpoolClass>) -> Result<Vec<SpoolFile>> {
+    fn list_queue(
+        &mut self,
+        device: SpoolDevice,
+        class: Option<SpoolClass>,
+    ) -> Result<Vec<SpoolFile>> {
         let entries = self.read_entries(device)?;
         let files: Vec<SpoolFile> = entries
             .into_iter()
@@ -464,6 +471,7 @@ mod tests {
                 "",
                 SpoolClass::default(),
                 false,
+                1,
                 "hello\n",
             )
             .unwrap();
@@ -484,6 +492,7 @@ mod tests {
                 "",
                 SpoolClass('B'),
                 false,
+                1,
                 "line1\nline2\n",
             )
             .unwrap();
@@ -514,6 +523,7 @@ mod tests {
                 "",
                 SpoolClass::default(),
                 false,
+                1,
                 "d",
             )
             .unwrap();
@@ -535,6 +545,7 @@ mod tests {
                 "",
                 SpoolClass::default(),
                 false,
+                1,
                 "d1",
             )
             .unwrap();
@@ -547,6 +558,7 @@ mod tests {
                 "",
                 SpoolClass::default(),
                 false,
+                1,
                 "d2",
             )
             .unwrap();
@@ -569,6 +581,7 @@ mod tests {
                 "",
                 SpoolClass('A'),
                 false,
+                1,
                 "d",
             )
             .unwrap();
@@ -581,6 +594,7 @@ mod tests {
                 "",
                 SpoolClass('B'),
                 false,
+                1,
                 "d",
             )
             .unwrap();
@@ -604,6 +618,7 @@ mod tests {
                 "",
                 SpoolClass::default(),
                 false,
+                1,
                 "d",
             )
             .unwrap();
@@ -632,6 +647,7 @@ mod tests {
                 "",
                 SpoolClass::default(),
                 false,
+                1,
                 "d",
             )
             .unwrap();
@@ -644,6 +660,7 @@ mod tests {
                 "",
                 SpoolClass::default(),
                 false,
+                1,
                 "d",
             )
             .unwrap();
@@ -664,6 +681,7 @@ mod tests {
                 "",
                 SpoolClass('A'),
                 false,
+                1,
                 "d",
             )
             .unwrap();
@@ -676,6 +694,7 @@ mod tests {
                 "",
                 SpoolClass('B'),
                 false,
+                1,
                 "d",
             )
             .unwrap();
@@ -702,6 +721,7 @@ mod tests {
                 "",
                 SpoolClass::default(),
                 false,
+                1,
                 "content here\n",
             )
             .unwrap();
@@ -738,6 +758,7 @@ mod tests {
                     "",
                     SpoolClass::default(),
                     false,
+                    1,
                     "d",
                 )
                 .unwrap()
@@ -754,6 +775,7 @@ mod tests {
                 "",
                 SpoolClass::default(),
                 false,
+                1,
                 "d",
             )
             .unwrap();
@@ -763,7 +785,7 @@ mod tests {
 
     #[test]
     fn interrupted_enqueue_data_only_is_invisible() {
-        let (backend, _dir) = make_backend();
+        let (mut backend, _dir) = make_backend();
         // With data-first write order, an interrupted enqueue leaves .data
         // but no .meta — the entry is invisible to the queue.
         fs::write(backend.data_path(SpoolDevice::Reader, 99), "orphan data").unwrap();
@@ -774,7 +796,7 @@ mod tests {
 
     #[test]
     fn orphaned_meta_auto_purged_by_list_queue() {
-        let (backend, _dir) = make_backend();
+        let (mut backend, _dir) = make_backend();
         // A .meta without .data is auto-purged during read_entries,
         // so list_queue never returns phantom entries.
         let meta_content =
@@ -792,7 +814,7 @@ mod tests {
 
     #[test]
     fn invalid_meta_with_valid_data_cleans_up_meta() {
-        let (backend, _dir) = make_backend();
+        let (mut backend, _dir) = make_backend();
         // Write an unparseable .meta (filename exceeds 8 chars) alongside a valid .data
         let bad_meta =
             "SPOOL_ID=99\nFILENAME=TOOLONGNAME\nFILETYPE=DATA\nORIGIN_USER=U\nDEVICE=READER\n";
@@ -826,6 +848,7 @@ mod tests {
                 "USERB",
                 SpoolClass::default(),
                 false,
+                1,
                 "b-data\n",
             )
             .unwrap();
@@ -838,6 +861,7 @@ mod tests {
                 "USERA",
                 SpoolClass::default(),
                 false,
+                1,
                 "a-data\n",
             )
             .unwrap();
@@ -854,7 +878,10 @@ mod tests {
         assert!(remaining.is_empty());
 
         // User B's file is still in the backend
-        let all = mgr.backend().list_queue(SpoolDevice::Reader, None).unwrap();
+        let all = mgr
+            .backend_mut()
+            .list_queue(SpoolDevice::Reader, None)
+            .unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].filename, "FORB");
     }
@@ -862,12 +889,18 @@ mod tests {
     #[test]
     fn dequeue_auto_purges_orphaned_meta() {
         let (mut backend, _dir) = make_backend();
+
+        // Advance the ID counter past the orphan's ID so enqueue won't
+        // clobber it. Without this, allocate_id() returns 1 and overwrites
+        // the orphan's 1.meta — causing the test to pass vacuously.
+        fs::write(backend.next_id_path(), "5").unwrap();
+
         // Create an orphaned .meta (no .data) with spool ID 1
         let meta_content =
             "SPOOL_ID=1\nFILENAME=ORPHAN\nFILETYPE=DATA\nORIGIN_USER=U\nDEVICE=READER\n";
         fs::write(backend.meta_path(SpoolDevice::Reader, 1), meta_content).unwrap();
 
-        // Enqueue a valid file (gets ID from counter, not 1)
+        // Enqueue a valid file — gets ID 5, not 1
         backend
             .enqueue(
                 SpoolDevice::Reader,
@@ -877,6 +910,7 @@ mod tests {
                 "",
                 SpoolClass::default(),
                 false,
+                1,
                 "valid data\n",
             )
             .unwrap();
