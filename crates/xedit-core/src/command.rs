@@ -541,29 +541,30 @@ pub fn help_text(topic: &str) -> Option<&'static str> {
     // Check for SET sub-topics first ("SET NUMBER", "SET TRUNC", etc.)
     if let Some(sub) = upper.strip_prefix("SET ") {
         let sub = sub.trim();
+        // Minimums match parse_set_args matches_abbrev() calls exactly.
         return match sub {
-            s if "NUMBER".starts_with(s) && s.len() >= 3 => {
+            s if "TRUNCATE".starts_with(s) && s.len() >= 2 => {
+                Some("SET TRUNC n — set truncation column for edits")
+            }
+            s if "NUMBER".starts_with(s) && s.len() >= 2 => {
                 Some("SET NUMBER ON|OFF — show line numbers in prefix area")
             }
-            s if "PREFIX".starts_with(s) && s.len() >= 3 => {
+            s if "PREFIX".starts_with(s) && s.len() >= 2 => {
                 Some("SET PREFIX ON|OFF — show prefix area")
             }
-            s if "SCALE".starts_with(s) && s.len() >= 3 => {
+            s if "SCALE".starts_with(s) && s.len() >= 2 => {
                 Some("SET SCALE ON|OFF — show column scale line")
             }
             s if "CURLINE".starts_with(s) && s.len() >= 3 => {
                 Some("SET CURLINE ON M|n — set current-line position on screen")
             }
-            s if "TRUNC".starts_with(s) && s.len() >= 3 => {
-                Some("SET TRUNC n — set truncation column for edits")
-            }
-            s if "CASE".starts_with(s) && s.len() >= 3 => {
+            s if "CASE".starts_with(s) && s.len() >= 2 => {
                 Some("SET CASE MIXED|UPPER|RESPECT|IGNORE — case handling")
             }
-            s if "ZONE".starts_with(s) && s.len() >= 3 => {
+            s if "ZONE".starts_with(s) && s.len() >= 2 => {
                 Some("SET ZONE left right — restrict operations to column range")
             }
-            s if "WRAP".starts_with(s) && s.len() >= 3 => {
+            s if "WRAP".starts_with(s) && s.len() >= 2 => {
                 Some("SET WRAP ON|OFF — wrap long lines on screen")
             }
             s if "HEX".starts_with(s) && s.len() >= 3 => {
@@ -572,10 +573,10 @@ pub fn help_text(topic: &str) -> Option<&'static str> {
             s if "SHADOW".starts_with(s) && s.len() >= 3 => {
                 Some("SET SHADOW ON|OFF — show shadow lines for excluded lines")
             }
-            s if "STAY".starts_with(s) && s.len() >= 3 => {
+            s if "STAY".starts_with(s) && s.len() >= 2 => {
                 Some("SET STAY ON|OFF — keep cursor on current line after LOCATE")
             }
-            s if "VERIFY".starts_with(s) && s.len() >= 3 => {
+            s if "VERIFY".starts_with(s) && s.len() >= 2 => {
                 Some("SET VERIFY start end — set verify columns for display")
             }
             s if "TABLINE".starts_with(s) && s.len() >= 4 => {
@@ -2229,5 +2230,32 @@ mod tests {
     #[test]
     fn help_text_unknown() {
         assert!(help_text("XYZZY").is_none());
+    }
+
+    #[test]
+    fn help_text_set_short_abbreviations() {
+        // Bug 2 regression: 2-char abbreviations must resolve
+        assert!(help_text("SET NU").is_some()); // NUMBER min 2
+        assert!(help_text("SET PR").is_some()); // PREFIX min 2
+        assert!(help_text("SET SC").is_some()); // SCALE min 2
+        assert!(help_text("SET CA").is_some()); // CASE min 2
+        assert!(help_text("SET WR").is_some()); // WRAP min 2
+        assert!(help_text("SET ST").is_some()); // STAY min 2
+        assert!(help_text("SET ZO").is_some()); // ZONE min 2
+        assert!(help_text("SET VE").is_some()); // VERIFY min 2
+        assert!(help_text("SET TR").is_some()); // TRUNCATE min 2
+    }
+
+    #[test]
+    fn help_text_set_truncate_full_name() {
+        // Bug 1 regression: full name "TRUNCATE" must resolve
+        let text = help_text("SET TRUNCATE");
+        assert!(text.is_some());
+        assert!(text.unwrap().contains("TRUNC"));
+    }
+
+    #[test]
+    fn help_text_set_unknown_subtopic() {
+        assert!(help_text("SET NONEXISTENT").is_none());
     }
 }

@@ -1656,7 +1656,7 @@ impl Editor {
     fn cmd_help(&self, topic: Option<&str>) -> Result<CommandResult> {
         match topic {
             None => Ok(CommandResult::with_message(
-                "Commands: UP DOWN TOP BOTTOM FORWARD BACKWARD LOCATE CHANGE INPUT DELETE FILE SAVE QUIT QQUIT SET QUERY | HELP <cmd> for details",
+                "UP DOWN TOP BOTTOM FORWARD BACKWARD LEFT RIGHT LOCATE CHANGE INPUT DELETE REPLACE DUPLICAT COVERWRITE CINSERT COMPRESS EXPAND FILE SAVE QUIT QQUIT GET PUT MERGE TRANSFER SET QUERY ALL SORT STACK QUEUE CURSOR XEDIT RESET UNDO REFRESH HELP | HELP <cmd> for details",
             )),
             Some(t) => match help_text(t) {
                 Some(text) => Ok(CommandResult::with_message(text)),
