@@ -81,7 +81,7 @@ pub enum Command {
 
     // Display
     Refresh,
-    Help,
+    Help(Option<String>),
     Nop,
 }
 
@@ -523,8 +523,125 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
         }
         "RESET" => Ok(Command::Reset),
         "REFRESH" => Ok(Command::Refresh),
-        "HELP" => Ok(Command::Help),
+        "HELP" => {
+            if args.is_empty() {
+                Ok(Command::Help(None))
+            } else {
+                Ok(Command::Help(Some(args.to_uppercase())))
+            }
+        }
         _ => Err(format!("Unknown command: {}", cmd_word)),
+    }
+}
+
+/// Return a one-line help string for a topic, using abbreviation resolution.
+pub fn help_text(topic: &str) -> Option<&'static str> {
+    let upper = topic.to_uppercase();
+
+    // Check for SET sub-topics first ("SET NUMBER", "SET TRUNC", etc.)
+    if let Some(sub) = upper.strip_prefix("SET ") {
+        let sub = sub.trim();
+        // Minimums match parse_set_args matches_abbrev() calls exactly.
+        return match sub {
+            s if "TRUNCATE".starts_with(s) && s.len() >= 2 => {
+                Some("SET TRUNC n — set truncation column for edits")
+            }
+            s if "NUMBER".starts_with(s) && s.len() >= 2 => {
+                Some("SET NUMBER ON|OFF — show line numbers in prefix area")
+            }
+            s if "PREFIX".starts_with(s) && s.len() >= 2 => {
+                Some("SET PREFIX ON|OFF — show prefix area")
+            }
+            s if "SCALE".starts_with(s) && s.len() >= 2 => {
+                Some("SET SCALE ON|OFF — show column scale line")
+            }
+            s if "CURLINE".starts_with(s) && s.len() >= 3 => {
+                Some("SET CURLINE ON M|n — set current-line position on screen")
+            }
+            s if "CASE".starts_with(s) && s.len() >= 2 => {
+                Some("SET CASE MIXED|UPPER|RESPECT|IGNORE — case handling")
+            }
+            s if "ZONE".starts_with(s) && s.len() >= 2 => {
+                Some("SET ZONE left right — restrict operations to column range")
+            }
+            s if "WRAP".starts_with(s) && s.len() >= 2 => {
+                Some("SET WRAP ON|OFF — wrap long lines on screen")
+            }
+            s if "HEX".starts_with(s) && s.len() >= 3 => {
+                Some("SET HEX ON|OFF — show hex display below data lines")
+            }
+            s if "SHADOW".starts_with(s) && s.len() >= 3 => {
+                Some("SET SHADOW ON|OFF — show shadow lines for excluded lines")
+            }
+            s if "STAY".starts_with(s) && s.len() >= 2 => {
+                Some("SET STAY ON|OFF — keep cursor on current line after LOCATE")
+            }
+            s if "VERIFY".starts_with(s) && s.len() >= 2 => {
+                Some("SET VERIFY start end — set verify columns for display")
+            }
+            s if "TABLINE".starts_with(s) && s.len() >= 4 => {
+                Some("SET TABLINE ON|OFF — show tab-stop ruler line")
+            }
+            s if "TABS".starts_with(s) && s.len() >= 2 => {
+                Some("SET TABS col1 col2 ... — set tab stop positions")
+            }
+            s if "RESERVED".starts_with(s) && s.len() >= 3 => {
+                Some("SET RESERVED row text|OFF — reserve a screen line for text")
+            }
+            s if ("COLOR".starts_with(s) || "COLOUR".starts_with(s)) && s.len() >= 3 => {
+                Some("SET COLOR|COLOUR area colorname — override display colors")
+            }
+            s if s.starts_with("PF") => Some("SET PFn command — assign command to a PF key (1-24)"),
+            s if "MACRO".starts_with(s) && s.len() >= 3 => {
+                Some("SET MACRO PATH dir1 dir2 ... — set macro search path")
+            }
+            _ => None,
+        };
+    }
+
+    // Resolve command abbreviation
+    let resolved = lookup_command(&upper)?;
+    match resolved {
+        "UP" => Some("UP [n] — move current line up n lines (default 1)"),
+        "DOWN" | "NEXT" => Some("DOWN [n] — move current line down n lines (default 1)"),
+        "TOP" => Some("TOP — move to top of file (line 0)"),
+        "BOTTOM" => Some("BOTTOM — move to bottom of file (last line)"),
+        "FORWARD" => Some("FORWARD [n] — scroll forward n pages (default 1)"),
+        "BACKWARD" => Some("BACKWARD [n] — scroll backward n pages (default 1)"),
+        "LEFT" => Some("LEFT [n] — shift view left n columns (default 1)"),
+        "RIGHT" => Some("RIGHT [n] — shift view right n columns (default 1)"),
+        "LOCATE" => Some("LOCATE /string/ — search forward for string"),
+        "CHANGE" => Some("CHANGE /old/new/ [target] [n] — replace text occurrences"),
+        "INPUT" => Some("INPUT [text] — insert text below current line"),
+        "DELETE" => Some("DELETE [target|n|*] — delete lines"),
+        "REPLACE" => Some("REPLACE text — replace current line content"),
+        "DUPLICAT" => Some("DUPLICAT [n] — duplicate current line n times (default 1)"),
+        "COVERWRITE" => Some("COVERWRITE text — overlay text onto current line"),
+        "CINSERT" => Some("CINSERT text — insert text at current column"),
+        "COMPRESS" => Some("COMPRESS [col1 col2] — compress spaces to tabs at tab stops"),
+        "EXPAND" => Some("EXPAND [col1 col2] — expand tabs to spaces"),
+        "FILE" => Some("FILE — save file and quit"),
+        "SAVE" => Some("SAVE — save file without quitting"),
+        "QUIT" => Some("QUIT — quit if no unsaved changes"),
+        "QQUIT" => Some("QQUIT — quit without saving (discard changes)"),
+        "GET" => Some("GET filename — insert file contents below current line"),
+        "PUT" => Some("PUT filename [n] — write n lines to file"),
+        "MERGE" => Some("MERGE filename [n] — merge file contents at current line"),
+        "TRANSFER" => Some("TRANSFER fileid n — copy n lines to another file ring entry"),
+        "SET" => Some("SET option value — SET NUMBER|TRUNC|ZONE|CASE|TABS|PF|... (HELP SET <opt>)"),
+        "QUERY" => Some("QUERY option — display current setting value"),
+        "ALL" => Some("ALL [/string/] — show only lines matching string; ALL with no args resets"),
+        "SORT" => Some("SORT [target] [A|D] [col1 col2] — sort lines"),
+        "STACK" => Some("STACK [n] — push n lines onto data stack (LIFO)"),
+        "QUEUE" => Some("QUEUE [n] — queue n lines onto data stack (FIFO)"),
+        "CURSOR" => Some("CURSOR HOME|FILE line col — position cursor"),
+        "XEDIT" => Some("XEDIT fileid — open another file in the ring"),
+        "RESET" => Some("RESET — clear pending prefix commands and selections"),
+        "UNDO" => Some("UNDO — undo last modification"),
+        "REFRESH" => Some("REFRESH — redraw the screen"),
+        "HELP" => Some("HELP [command] — show command help; HELP SET <opt> for SET details"),
+        "MACRO" => Some("MACRO name [args] — run a REXX macro by name"),
+        _ => None,
     }
 }
 
@@ -2060,5 +2177,124 @@ mod tests {
             Command::Set(SetCommand::Tabs(_)) => {}
             other => panic!("Expected Set(Tabs), got {:?}", other),
         }
+    }
+
+    // -- HELP command tests --
+
+    #[test]
+    fn parse_help_no_args() {
+        match parse_command("help").unwrap() {
+            Command::Help(None) => {}
+            other => panic!("Expected Help(None), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_help_with_topic() {
+        match parse_command("help locate").unwrap() {
+            Command::Help(Some(t)) => assert_eq!(t, "LOCATE"),
+            other => panic!("Expected Help(Some(\"LOCATE\")), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_help_abbreviated_topic() {
+        match parse_command("help loc").unwrap() {
+            Command::Help(Some(t)) => assert_eq!(t, "LOC"),
+            other => panic!("Expected Help(Some(\"LOC\")), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn help_text_locate() {
+        let text = help_text("LOC");
+        assert!(text.is_some());
+        assert!(text.unwrap().contains("LOCATE"));
+    }
+
+    #[test]
+    fn help_text_set() {
+        let text = help_text("SET");
+        assert!(text.is_some());
+        assert!(text.unwrap().contains("SET"));
+    }
+
+    #[test]
+    fn help_text_set_number() {
+        let text = help_text("SET NUMBER");
+        assert!(text.is_some());
+        assert!(text.unwrap().contains("NUMBER"));
+    }
+
+    #[test]
+    fn help_text_unknown() {
+        assert!(help_text("XYZZY").is_none());
+    }
+
+    #[test]
+    fn help_text_set_short_abbreviations() {
+        // Bug 2 regression: 2-char abbreviations must resolve
+        assert!(help_text("SET NU").is_some()); // NUMBER min 2
+        assert!(help_text("SET PR").is_some()); // PREFIX min 2
+        assert!(help_text("SET SC").is_some()); // SCALE min 2
+        assert!(help_text("SET CA").is_some()); // CASE min 2
+        assert!(help_text("SET WR").is_some()); // WRAP min 2
+        assert!(help_text("SET ST").is_some()); // STAY min 2
+        assert!(help_text("SET ZO").is_some()); // ZONE min 2
+        assert!(help_text("SET VE").is_some()); // VERIFY min 2
+        assert!(help_text("SET TR").is_some()); // TRUNCATE min 2
+    }
+
+    #[test]
+    fn help_text_set_truncate_full_name() {
+        // Bug 1 regression: full name "TRUNCATE" must resolve
+        let text = help_text("SET TRUNCATE");
+        assert!(text.is_some());
+        assert!(text.unwrap().contains("TRUNC"));
+    }
+
+    #[test]
+    fn help_text_set_unknown_subtopic() {
+        assert!(help_text("SET NONEXISTENT").is_none());
+    }
+
+    #[test]
+    fn help_text_set_colour_alias() {
+        assert!(help_text("SET COLOUR").is_some());
+        assert!(help_text("SET COLOU").is_some());
+        // American spelling still works
+        assert!(help_text("SET COLOR").is_some());
+        assert!(help_text("SET COL").is_some());
+    }
+
+    #[test]
+    fn help_text_compress_direction() {
+        let t = help_text("COMPRESS").unwrap();
+        // COMPRESS converts spaces → tabs
+        assert!(t.contains("spaces") && t.contains("tabs"));
+        assert!(t.contains("spaces to tabs"));
+    }
+
+    #[test]
+    fn help_text_expand_direction() {
+        let t = help_text("EXPAND").unwrap();
+        // EXPAND converts tabs → spaces
+        assert!(t.contains("tabs") && t.contains("spaces"));
+        assert!(t.contains("tabs to spaces"));
+    }
+
+    #[test]
+    fn help_text_set_pf_keys() {
+        assert!(help_text("SET PF").is_some());
+        assert!(help_text("SET PF1").is_some());
+        assert!(help_text("SET PF12").is_some());
+        assert!(help_text("SET PF24").is_some());
+    }
+
+    #[test]
+    fn help_text_next_resolves() {
+        assert!(help_text("N").is_some());
+        assert!(help_text("NEXT").is_some());
+        assert!(help_text("NEXT").unwrap().contains("DOWN"));
     }
 }
