@@ -17,7 +17,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use patch_rexx::env::Environment;
+use patch_rexx::env::{EnvVars, Environment};
 use patch_rexx::eval::Evaluator;
 use patch_rexx::lexer::Lexer;
 use patch_rexx::parser::Parser;
@@ -27,6 +27,24 @@ use crate::buffer::RecordFormat;
 use crate::command::parse_command;
 use crate::editor::Editor;
 use crate::error::{Result, XeditError};
+
+/// Trait for setting compound REXX variables.
+/// Implemented by both `Environment` (initial setup) and `EnvVars` (mid-macro refresh).
+trait SetCompound {
+    fn set_compound(&mut self, stem: &str, tail: &str, value: RexxValue);
+}
+
+impl SetCompound for Environment {
+    fn set_compound(&mut self, stem: &str, tail: &str, value: RexxValue) {
+        Environment::set_compound(self, stem, tail, value);
+    }
+}
+
+impl SetCompound for EnvVars<'_> {
+    fn set_compound(&mut self, stem: &str, tail: &str, value: RexxValue) {
+        EnvVars::set_compound(self, stem, tail, value);
+    }
+}
 
 /// Run a REXX macro against the editor.
 ///
@@ -66,9 +84,10 @@ pub fn run_macro(editor: &mut Editor, source: &str, args: &str) -> Result<()> {
         evaluator.set_main_args(vec![RexxValue::new(args)]);
     }
 
-    // The command handler intercepts ADDRESS XEDIT commands
+    // The command handler intercepts ADDRESS XEDIT commands.
+    // Uses the env-aware variant so EXTRACT can refresh variables mid-macro.
     let editor_handle = Rc::clone(&shared_editor);
-    let handler = move |addr_env: &str, command: &str| -> Option<i32> {
+    let handler = move |addr_env: &str, command: &str, vars: &mut EnvVars<'_>| -> Option<i32> {
         let addr_upper = addr_env.to_uppercase();
         if addr_upper != "XEDIT" && addr_upper != "COMMAND" {
             return None; // fall through to shell for other environments
@@ -87,11 +106,10 @@ pub fn run_macro(editor: &mut Editor, source: &str, args: &str) -> Result<()> {
             return Some(0);
         }
 
-        // Handle EXTRACT specially — all variables are pre-populated before
-        // execution, so EXTRACT commands are acknowledged without re-parsing.
-        // This is a simplification: IBM XEDIT EXTRACT selectively populates
-        // only the requested stems. Here all stems are always available.
+        // Handle EXTRACT: refresh all stem variables from current editor state.
         if cmd_text.to_uppercase().starts_with("EXTRACT ") {
+            let ed = editor_handle.borrow();
+            populate_extract_vars(vars, &ed);
             return Some(0);
         }
 
@@ -116,7 +134,7 @@ pub fn run_macro(editor: &mut Editor, source: &str, args: &str) -> Result<()> {
         }
     };
 
-    evaluator.set_command_handler(Box::new(handler));
+    evaluator.set_command_handler_with_env(Box::new(handler));
 
     // Execute the macro
     let result = evaluator
@@ -138,21 +156,15 @@ pub fn run_macro(editor: &mut Editor, source: &str, args: &str) -> Result<()> {
     Ok(())
 }
 
-/// Pre-populate REXX environment with EXTRACT-style stem variables.
+/// Populate REXX environment with EXTRACT-style stem variables.
 ///
 /// This follows the IBM XEDIT EXTRACT convention where each item
 /// sets stem variables: `item.0` = count, `item.1` = first value, etc.
 ///
-/// **Note:** These variables are a static snapshot taken before macro
-/// execution begins. Changes made by XEDIT commands within the macro
-/// (e.g., moving the cursor, modifying lines) are NOT reflected in the
-/// EXTRACT variables mid-execution. Macros that need fresh state after
-/// a command should use `QUERY` and parse the resulting message.
-// TODO: patch-rexx enhancement for dynamic EXTRACT refresh —
-// the command handler closure cannot access the REXX Environment
-// (it is mutably borrowed by the Evaluator). A post-command callback
-// or extended handler return type in patch-rexx would enable this.
-fn populate_extract_vars(env: &mut Environment, editor: &Editor) {
+/// Called once before macro execution (with `&mut Environment`) and
+/// again each time the macro executes `EXTRACT` (with `&mut EnvVars`),
+/// so variables always reflect current editor state.
+fn populate_extract_vars(env: &mut impl SetCompound, editor: &Editor) {
     // CURLINE: current line number and text
     let curline_num = editor.current_line().to_string();
     let curline_text = editor.current_line_text().to_string();
@@ -567,5 +579,69 @@ mod tests {
         "#;
         run_macro(&mut ed, source, "").unwrap();
         assert_eq!(ed.current_line(), 1);
+    }
+
+    // -- Dynamic EXTRACT refresh tests --
+
+    #[test]
+    fn extract_refreshes_after_down() {
+        let mut ed = editor_with_lines(&["alpha", "beta", "gamma"]);
+        // Start at line 1; curline.1 = 1
+        // DOWN 2 moves to line 3; EXTRACT refreshes curline.1 to 3
+        // The macro checks the refreshed value
+        let source = r#"
+            'DOWN 2'
+            'EXTRACT /CURLINE/'
+            if curline.1 = 3 then
+                'TOP'
+        "#;
+        run_macro(&mut ed, source, "").unwrap();
+        // If EXTRACT refreshed correctly, curline.1 was 3, so TOP executed
+        assert_eq!(ed.current_line(), 0);
+    }
+
+    #[test]
+    fn extract_refreshes_line_text() {
+        let mut ed = editor_with_lines(&["first", "second", "third"]);
+        // Start at line 1 (text "first"); move to line 2 ("second")
+        // EXTRACT should refresh curline.3 to "second"
+        let source = r#"
+            'DOWN 1'
+            'EXTRACT /CURLINE/'
+            if curline.3 = 'second' then
+                'DOWN 1'
+        "#;
+        run_macro(&mut ed, source, "").unwrap();
+        // "second" matched, so DOWN 1 ran → now at line 3
+        assert_eq!(ed.current_line(), 3);
+    }
+
+    #[test]
+    fn extract_refreshes_size_after_delete() {
+        let mut ed = editor_with_lines(&["aaa", "bbb", "ccc"]);
+        // Start with 3 lines; delete one; EXTRACT should show size=2
+        let source = r#"
+            'DELETE 1'
+            'EXTRACT /SIZE/'
+            if size.1 = 2 then
+                'BOTTOM'
+        "#;
+        run_macro(&mut ed, source, "").unwrap();
+        assert_eq!(ed.current_line(), 2); // bottom of 2-line file
+    }
+
+    #[test]
+    fn extract_without_refresh_sees_stale_data() {
+        let mut ed = editor_with_lines(&["alpha", "beta", "gamma"]);
+        // Without calling EXTRACT after DOWN, curline.1 still shows
+        // the initial value (1), not the updated value (3)
+        let source = r#"
+            'DOWN 2'
+            if curline.1 = 1 then
+                'TOP'
+        "#;
+        run_macro(&mut ed, source, "").unwrap();
+        // curline.1 is still 1 (stale), so TOP executed
+        assert_eq!(ed.current_line(), 0);
     }
 }

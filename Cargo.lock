@@ -554,9 +554,9 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "patch-rexx"
-version = "0.9.3"
+version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c4c5d944d0739b279868e32c51355cd9f2ec0ef398670ec7c404e4ba20d8afb"
+checksum = "1747c94e5df5b60da5dad190c0ec4701ab828f2b76046f4a2193af82d18c8795"
 dependencies = [
  "bigdecimal",
  "clap",

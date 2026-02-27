@@ -142,10 +142,10 @@ context-sensitive help deferred to a future enhancement pass.
 
 ### HELP facility
 - [x] HELP command — basic command list
-- [ ] Context-sensitive help (HELP SET, HELP LOCATE, etc.) — deferred
+- [x] Context-sensitive help (HELP SET, HELP LOCATE, etc.)
 
 ### Quality
-- [ ] EXTRACT dynamic refresh (requires patch-rexx callback enhancement)
+- [x] EXTRACT dynamic refresh (patch-rexx 0.9.4 `set_command_handler_with_env`)
 
 ## Phase 8: CMS Spool System — DONE
 
@@ -223,7 +223,7 @@ New crate: `vm-iucv/`
 
 ## Current Status
 
-**681 tests passing, zero clippy warnings.**
+**700 tests passing, zero clippy warnings.**
 
 Phases 1-8 complete. The editor is fully functional with screen editing,
 REXX macros, CMS file system integration, multi-file ring support, and
