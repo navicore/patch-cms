@@ -23,17 +23,22 @@ pub fn execute_pipeline(spec: &PipelineSpec) -> Result<PipelineResult> {
         .map(create_stage)
         .collect::<Result<Vec<_>>>()?;
 
-    // Initialize: call initialize() on each stage in order.
-    // Primary records from stage N flow into stage N+1's process().
+    // Initialize all stages first, collecting any records they emit.
+    // This ensures every stage's initialize() runs before any process() calls.
     let stage_count = stages.len();
-    for i in 0..stage_count {
-        let records = stages[i].initialize()?;
-        let primary: Vec<String> = records
+    let mut pending: Vec<Vec<String>> = Vec::with_capacity(stage_count);
+    for stage in stages.iter_mut() {
+        let records = stage.initialize()?;
+        let primary = records
             .into_iter()
             .filter(|r| r.stream == Stream::Primary)
             .map(|r| r.data)
             .collect();
+        pending.push(primary);
+    }
 
+    // Now feed initialized records through downstream stages' process().
+    for (i, primary) in pending.into_iter().enumerate() {
         feed_records_through(&mut stages, i + 1, primary)?;
     }
 
@@ -174,10 +179,78 @@ mod tests {
         let spec = PipelineSpec {
             stages: vec![StageSpec {
                 name: "bogus".to_string(),
+                raw_name: "BOGUS".to_string(),
                 args: String::new(),
             }],
         };
         let err = execute_pipeline(&spec).unwrap_err();
         assert_eq!(err.rc(), 28);
+    }
+
+    #[test]
+    fn passthrough_stage_forwards_records() {
+        use crate::stage::Stage;
+        use crate::stages::create_stage;
+
+        // Register an inline Echo stage via a custom PipelineSpec + manual execution
+        #[derive(Debug)]
+        struct Echo;
+        impl Stage for Echo {
+            fn name(&self) -> &str {
+                "echo"
+            }
+            // Relies on default pass-through process() and no-op initialize()
+        }
+
+        // Build stages manually: literal -> echo -> console
+        let specs = vec![
+            StageSpec {
+                name: "literal".to_string(),
+                raw_name: "literal".to_string(),
+                args: "hello".to_string(),
+            },
+            StageSpec {
+                name: "console".to_string(),
+                raw_name: "console".to_string(),
+                args: String::new(),
+            },
+        ];
+
+        // Build with echo injected in the middle
+        let mut stages: Vec<Box<dyn Stage>> = Vec::new();
+        stages.push(create_stage(&specs[0]).unwrap()); // literal
+        stages.push(Box::new(Echo)); // echo pass-through
+        stages.push(create_stage(&specs[1]).unwrap()); // console
+
+        // Run the two-pass initialize
+        let stage_count = stages.len();
+        let mut pending: Vec<Vec<String>> = Vec::with_capacity(stage_count);
+        for stage in stages.iter_mut() {
+            let records = stage.initialize().unwrap();
+            let primary = records
+                .into_iter()
+                .filter(|r| r.stream == Stream::Primary)
+                .map(|r| r.data)
+                .collect();
+            pending.push(primary);
+        }
+        for (i, primary) in pending.into_iter().enumerate() {
+            feed_records_through(&mut stages, i + 1, primary).unwrap();
+        }
+
+        // Finish
+        for i in 0..stage_count {
+            let records = stages[i].finish().unwrap();
+            let primary: Vec<String> = records
+                .into_iter()
+                .filter(|r| r.stream == Stream::Primary)
+                .map(|r| r.data)
+                .collect();
+            feed_records_through(&mut stages, i + 1, primary).unwrap();
+        }
+
+        // Terminal console should have the record
+        let messages = stages.last().unwrap().collected_output();
+        assert_eq!(messages, &["hello"]);
     }
 }

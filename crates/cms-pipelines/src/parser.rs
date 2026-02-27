@@ -3,7 +3,10 @@ use crate::error::{PipelineError, Result};
 /// A single stage specification parsed from a pipeline string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StageSpec {
+    /// Lowercased stage name, used for matching in `create_stage()`.
     pub name: String,
+    /// Original-case stage name, used in error messages.
+    pub raw_name: String,
     pub args: String,
 }
 
@@ -34,8 +37,9 @@ pub fn parse_pipeline(input: &str) -> Result<PipelineSpec> {
         return Err(PipelineError::EmptyPipeline);
     }
 
-    // Check for trailing pipe
-    if body.ends_with('|') {
+    // Check for trailing pipe (only when there is content before the final |;
+    // bare "|" falls through to split, producing EmptyStage for the empty segments)
+    if body.ends_with('|') && body.len() > 1 {
         return Err(PipelineError::TrailingPipe);
     }
 
@@ -68,6 +72,7 @@ pub fn parse_pipeline(input: &str) -> Result<PipelineSpec> {
 
         stages.push(StageSpec {
             name: name.to_ascii_lowercase(),
+            raw_name: name.to_string(),
             args: args.to_string(),
         });
     }
@@ -189,5 +194,21 @@ mod tests {
         let input = stages.join(" | ");
         let spec = parse_pipeline(&input).unwrap();
         assert_eq!(spec.stages.len(), 255);
+    }
+
+    #[test]
+    fn parse_bare_pipe_is_empty_stage() {
+        // "|" has empty segments on both sides — EmptyStage, not TrailingPipe
+        let err = parse_pipeline("|").unwrap_err();
+        assert!(matches!(err, PipelineError::EmptyStage));
+    }
+
+    #[test]
+    fn parse_raw_name_preserves_case() {
+        let spec = parse_pipeline("LITERAL Hello | CONSOLE").unwrap();
+        assert_eq!(spec.stages[0].name, "literal");
+        assert_eq!(spec.stages[0].raw_name, "LITERAL");
+        assert_eq!(spec.stages[1].name, "console");
+        assert_eq!(spec.stages[1].raw_name, "CONSOLE");
     }
 }
