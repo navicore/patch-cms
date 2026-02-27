@@ -23,7 +23,7 @@ impl Stage for Locate {
     }
 
     fn process(&mut self, record: &str) -> Result<Vec<OutputRecord>> {
-        if self.pattern.is_empty() || record.contains(&self.pattern) {
+        if record.contains(&self.pattern) {
             Ok(vec![OutputRecord::primary(record.to_string())])
         } else {
             Ok(vec![OutputRecord::secondary(record.to_string())])

@@ -54,6 +54,12 @@ mod tests {
     }
 
     #[test]
+    fn delimiter_in_pattern_body() {
+        let p = parse_delimited_pattern("/foo/bar/", "locate").unwrap();
+        assert_eq!(p.pattern, "foo");
+    }
+
+    #[test]
     fn missing_closing_delimiter() {
         let err = parse_delimited_pattern("/hello", "locate").unwrap_err();
         assert_eq!(err.rc(), 24);

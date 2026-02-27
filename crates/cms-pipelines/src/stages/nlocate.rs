@@ -23,7 +23,7 @@ impl Stage for Nlocate {
     }
 
     fn process(&mut self, record: &str) -> Result<Vec<OutputRecord>> {
-        if self.pattern.is_empty() || record.contains(&self.pattern) {
+        if record.contains(&self.pattern) {
             Ok(vec![OutputRecord::secondary(record.to_string())])
         } else {
             Ok(vec![OutputRecord::primary(record.to_string())])
@@ -65,6 +65,13 @@ mod tests {
         let mut s = Nlocate::new("/Hello/").unwrap();
         let out = s.process("hello").unwrap();
         // "hello" doesn't match "Hello", so it goes to primary
+        assert_eq!(out[0].stream, Stream::Primary);
+    }
+
+    #[test]
+    fn empty_record_no_match() {
+        let mut s = Nlocate::new("/abc/").unwrap();
+        let out = s.process("").unwrap();
         assert_eq!(out[0].stream, Stream::Primary);
     }
 

@@ -182,6 +182,13 @@ mod tests {
     }
 
     #[test]
+    fn locate_non_match_dropped_silently() {
+        let result = run_pipe("literal xyz | locate /abc/ | console").unwrap();
+        assert_eq!(result.rc, 0);
+        assert!(result.messages.is_empty());
+    }
+
+    #[test]
     fn unknown_stage_in_execute_pipeline() {
         let spec = PipelineSpec {
             stages: vec![StageSpec {
