@@ -1,4 +1,4 @@
-use crate::error::Result;
+use crate::error::{PipelineError, Result};
 use crate::parser::{parse_pipeline, PipelineSpec};
 use crate::stage::Stream;
 use crate::stages::create_stage;
@@ -12,6 +12,10 @@ pub struct PipelineResult {
 
 /// Execute a parsed pipeline specification.
 pub fn execute_pipeline(spec: &PipelineSpec) -> Result<PipelineResult> {
+    if spec.stages.is_empty() {
+        return Err(PipelineError::EmptyPipeline);
+    }
+
     // Build all stages
     let mut stages: Vec<_> = spec
         .stages
@@ -23,35 +27,34 @@ pub fn execute_pipeline(spec: &PipelineSpec) -> Result<PipelineResult> {
     // Primary records from stage N flow into stage N+1's process().
     let stage_count = stages.len();
     for i in 0..stage_count {
-        let records = stages[i].initialize();
-        // Feed primary records through remaining stages
+        let records = stages[i].initialize()?;
         let primary: Vec<String> = records
             .into_iter()
             .filter(|r| r.stream == Stream::Primary)
             .map(|r| r.data)
             .collect();
 
-        feed_records_through(&mut stages, i + 1, &primary);
+        feed_records_through(&mut stages, i + 1, primary)?;
     }
 
     // Finish: call finish() on each stage in order.
     // Emitted records propagate through remaining stages' process() methods.
     for i in 0..stage_count {
-        let records = stages[i].finish();
+        let records = stages[i].finish()?;
         let primary: Vec<String> = records
             .into_iter()
             .filter(|r| r.stream == Stream::Primary)
             .map(|r| r.data)
             .collect();
 
-        feed_records_through(&mut stages, i + 1, &primary);
+        feed_records_through(&mut stages, i + 1, primary)?;
     }
 
-    // Collect output from all stages
-    let mut messages = Vec::new();
-    for stage in &stages {
-        messages.extend_from_slice(stage.collected_output());
-    }
+    // Collect output from the terminal stage only
+    let messages = stages
+        .last()
+        .map(|s| s.collected_output().to_vec())
+        .unwrap_or_default();
 
     Ok(PipelineResult { rc: 0, messages })
 }
@@ -60,13 +63,12 @@ pub fn execute_pipeline(spec: &PipelineSpec) -> Result<PipelineResult> {
 fn feed_records_through(
     stages: &mut [Box<dyn crate::stage::Stage>],
     start_index: usize,
-    input: &[String],
-) {
-    let mut current = input.to_vec();
+    mut current: Vec<String>,
+) -> Result<()> {
     for stage in stages.iter_mut().skip(start_index) {
         let mut next = Vec::new();
         for record in &current {
-            let out = stage.process(record);
+            let out = stage.process(record)?;
             for r in out {
                 if r.stream == Stream::Primary {
                     next.push(r.data);
@@ -75,6 +77,7 @@ fn feed_records_through(
         }
         current = next;
     }
+    Ok(())
 }
 
 /// Convenience: parse and execute a pipeline in one call.
@@ -86,6 +89,7 @@ pub fn run_pipe(input: &str) -> Result<PipelineResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::StageSpec;
 
     #[test]
     fn literal_to_console() {
@@ -149,11 +153,31 @@ mod tests {
 
     #[test]
     fn three_stage_pipeline() {
-        // literal -> passthrough (literal as middle ignores input) -> console
-        // Middle literal discards input, emits nothing in process
+        // literal -> console (sink, absorbs) -> console (gets nothing)
         let result = run_pipe("literal hello | console | console").unwrap();
         assert_eq!(result.rc, 0);
-        // First console collects "hello", second console gets nothing
-        assert_eq!(result.messages, vec!["hello"]);
+        // Only terminal stage's collected_output is returned
+        assert!(result.messages.is_empty());
+    }
+
+    #[test]
+    fn empty_spec_bypasses_parser() {
+        // Directly construct an empty PipelineSpec to test executor guard
+        let spec = PipelineSpec { stages: vec![] };
+        let err = execute_pipeline(&spec).unwrap_err();
+        assert!(matches!(err, PipelineError::EmptyPipeline));
+        assert_eq!(err.rc(), 24);
+    }
+
+    #[test]
+    fn unknown_stage_in_execute_pipeline() {
+        let spec = PipelineSpec {
+            stages: vec![StageSpec {
+                name: "bogus".to_string(),
+                args: String::new(),
+            }],
+        };
+        let err = execute_pipeline(&spec).unwrap_err();
+        assert_eq!(err.rc(), 28);
     }
 }

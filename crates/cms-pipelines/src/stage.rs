@@ -1,3 +1,5 @@
+use crate::error::Result;
+
 /// Which output stream a record is routed to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stream {
@@ -36,18 +38,18 @@ pub trait Stage: std::fmt::Debug {
     fn name(&self) -> &str;
 
     /// Called once before any input records. Source stages emit records here.
-    fn initialize(&mut self) -> Vec<OutputRecord> {
-        Vec::new()
+    fn initialize(&mut self) -> Result<Vec<OutputRecord>> {
+        Ok(Vec::new())
     }
 
     /// Called once per input record. Default is pass-through.
-    fn process(&mut self, record: &str) -> Vec<OutputRecord> {
-        vec![OutputRecord::primary(record.to_string())]
+    fn process(&mut self, record: &str) -> Result<Vec<OutputRecord>> {
+        Ok(vec![OutputRecord::primary(record.to_string())])
     }
 
     /// Called once after all input records. Buffering stages flush here.
-    fn finish(&mut self) -> Vec<OutputRecord> {
-        Vec::new()
+    fn finish(&mut self) -> Result<Vec<OutputRecord>> {
+        Ok(Vec::new())
     }
 
     /// Sink stages return accumulated data here.
@@ -59,6 +61,7 @@ pub trait Stage: std::fmt::Debug {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::PipelineError;
 
     #[test]
     fn output_record_primary_constructor() {
@@ -85,12 +88,30 @@ mod tests {
         }
 
         let mut s = PassThrough;
-        assert!(s.initialize().is_empty());
-        let out = s.process("test");
+        assert!(s.initialize().unwrap().is_empty());
+        let out = s.process("test").unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].stream, Stream::Primary);
         assert_eq!(out[0].data, "test");
-        assert!(s.finish().is_empty());
+        assert!(s.finish().unwrap().is_empty());
         assert!(s.collected_output().is_empty());
+    }
+
+    #[test]
+    fn stage_can_return_error() {
+        #[derive(Debug)]
+        struct FailStage;
+        impl Stage for FailStage {
+            fn name(&self) -> &str {
+                "fail"
+            }
+            fn process(&mut self, _record: &str) -> Result<Vec<OutputRecord>> {
+                Err(PipelineError::StageError("test failure".to_string()))
+            }
+        }
+
+        let mut s = FailStage;
+        let err = s.process("input").unwrap_err();
+        assert_eq!(err.rc(), 32);
     }
 }

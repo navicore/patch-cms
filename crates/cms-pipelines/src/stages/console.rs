@@ -1,3 +1,4 @@
+use crate::error::Result;
 use crate::stage::{OutputRecord, Stage};
 
 /// Sink stage that collects records.
@@ -17,10 +18,10 @@ impl Stage for Console {
         "console"
     }
 
-    fn process(&mut self, record: &str) -> Vec<OutputRecord> {
+    fn process(&mut self, record: &str) -> Result<Vec<OutputRecord>> {
         self.records.push(record.to_string());
         // Sink — no downstream output
-        Vec::new()
+        Ok(Vec::new())
     }
 
     fn collected_output(&self) -> &[String] {
@@ -35,15 +36,15 @@ mod tests {
     #[test]
     fn console_collects_records() {
         let mut s = Console::new();
-        s.process("line1");
-        s.process("line2");
+        s.process("line1").unwrap();
+        s.process("line2").unwrap();
         assert_eq!(s.collected_output(), &["line1", "line2"]);
     }
 
     #[test]
     fn console_returns_empty_downstream() {
         let mut s = Console::new();
-        let out = s.process("test");
+        let out = s.process("test").unwrap();
         assert!(out.is_empty());
     }
 
@@ -56,9 +57,9 @@ mod tests {
     #[test]
     fn console_preserves_order() {
         let mut s = Console::new();
-        s.process("c");
-        s.process("a");
-        s.process("b");
+        s.process("c").unwrap();
+        s.process("a").unwrap();
+        s.process("b").unwrap();
         assert_eq!(s.collected_output(), &["c", "a", "b"]);
     }
 }

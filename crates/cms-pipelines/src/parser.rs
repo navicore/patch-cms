@@ -40,6 +40,15 @@ pub fn parse_pipeline(input: &str) -> Result<PipelineSpec> {
     }
 
     let segments: Vec<&str> = body.split('|').collect();
+
+    const MAX_STAGES: usize = 255;
+    if segments.len() > MAX_STAGES {
+        return Err(PipelineError::InvalidArgument(format!(
+            "pipeline exceeds {} stages",
+            MAX_STAGES
+        )));
+    }
+
     let mut stages = Vec::with_capacity(segments.len());
 
     for seg in &segments {
@@ -68,11 +77,11 @@ pub fn parse_pipeline(input: &str) -> Result<PipelineSpec> {
 
 /// Strip a leading `PIPE` keyword (case-insensitive) if present.
 fn strip_pipe_prefix(input: &str) -> &str {
-    let upper = input.to_ascii_uppercase();
-    if upper.starts_with("PIPE ") || upper.starts_with("PIPE\t") {
+    let b = input.as_bytes();
+    if b.len() >= 5 && b[..4].eq_ignore_ascii_case(b"PIPE") && (b[4] == b' ' || b[4] == b'\t') {
         &input[5..]
-    } else if upper == "PIPE" {
-        &input[4..]
+    } else if b.len() == 4 && b.eq_ignore_ascii_case(b"PIPE") {
+        ""
     } else {
         input
     }
@@ -150,5 +159,35 @@ mod tests {
     fn parse_pipe_only_is_empty() {
         let err = parse_pipeline("PIPE").unwrap_err();
         assert!(matches!(err, PipelineError::EmptyPipeline));
+    }
+
+    #[test]
+    fn parse_pipe_in_args_splits_on_pipe() {
+        // Known limitation: pipe characters in stage arguments are treated as
+        // stage separators. Future quoted-string support (`literal 'a|b'`)
+        // will fix this. For now, document the current behavior.
+        let spec = parse_pipeline("literal a|b | console").unwrap();
+        // Parsed as 3 stages: "literal a", "b", "console" — not 2
+        assert_eq!(spec.stages.len(), 3);
+        assert_eq!(spec.stages[0].name, "literal");
+        assert_eq!(spec.stages[0].args, "a");
+        assert_eq!(spec.stages[1].name, "b");
+    }
+
+    #[test]
+    fn parse_too_many_stages_rejected() {
+        let stages: Vec<&str> = (0..256).map(|_| "console").collect();
+        let input = stages.join(" | ");
+        let err = parse_pipeline(&input).unwrap_err();
+        assert!(matches!(err, PipelineError::InvalidArgument(_)));
+        assert_eq!(err.rc(), 24);
+    }
+
+    #[test]
+    fn parse_max_stages_allowed() {
+        let stages: Vec<&str> = (0..255).map(|_| "console").collect();
+        let input = stages.join(" | ");
+        let spec = parse_pipeline(&input).unwrap();
+        assert_eq!(spec.stages.len(), 255);
     }
 }
