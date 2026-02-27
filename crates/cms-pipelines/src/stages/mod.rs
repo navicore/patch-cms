@@ -1,5 +1,8 @@
 pub mod console;
 pub mod literal;
+pub mod locate;
+mod locate_common;
+pub mod nlocate;
 
 use crate::error::{PipelineError, Result};
 use crate::parser::StageSpec;
@@ -10,6 +13,8 @@ pub fn create_stage(spec: &StageSpec) -> Result<Box<dyn Stage>> {
     match spec.name.as_str() {
         "literal" => Ok(Box::new(literal::Literal::new(spec.args.clone()))),
         "console" => Ok(Box::new(console::Console::new())),
+        "locate" => Ok(Box::new(locate::Locate::new(&spec.args)?)),
+        "nlocate" => Ok(Box::new(nlocate::Nlocate::new(&spec.args)?)),
         _ => Err(PipelineError::UnknownStage(spec.raw_name.clone())),
     }
 }
@@ -38,6 +43,28 @@ mod tests {
         };
         let stage = create_stage(&spec).unwrap();
         assert_eq!(stage.name(), "console");
+    }
+
+    #[test]
+    fn factory_creates_locate() {
+        let spec = StageSpec {
+            name: "locate".to_string(),
+            raw_name: "locate".to_string(),
+            args: "/test/".to_string(),
+        };
+        let stage = create_stage(&spec).unwrap();
+        assert_eq!(stage.name(), "locate");
+    }
+
+    #[test]
+    fn factory_creates_nlocate() {
+        let spec = StageSpec {
+            name: "nlocate".to_string(),
+            raw_name: "nlocate".to_string(),
+            args: "/test/".to_string(),
+        };
+        let stage = create_stage(&spec).unwrap();
+        assert_eq!(stage.name(), "nlocate");
     }
 
     #[test]

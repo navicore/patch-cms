@@ -175,6 +175,13 @@ mod tests {
     }
 
     #[test]
+    fn literal_locate_console() {
+        let result = run_pipe("literal abc | locate /abc/ | console").unwrap();
+        assert_eq!(result.rc, 0);
+        assert_eq!(result.messages, vec!["abc"]);
+    }
+
+    #[test]
     fn unknown_stage_in_execute_pipeline() {
         let spec = PipelineSpec {
             stages: vec![StageSpec {
@@ -203,7 +210,7 @@ mod tests {
         }
 
         // Build stages manually: literal -> echo -> console
-        let specs = vec![
+        let specs = [
             StageSpec {
                 name: "literal".to_string(),
                 raw_name: "literal".to_string(),
