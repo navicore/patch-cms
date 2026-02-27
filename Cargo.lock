@@ -168,6 +168,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cms-pipelines"
+version = "0.1.0"
+
+[[package]]
 name = "cms-spool"
 version = "0.1.0"
 dependencies = [
