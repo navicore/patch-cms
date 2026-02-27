@@ -55,13 +55,16 @@ pub fn execute_pipeline(spec: &PipelineSpec) -> Result<PipelineResult> {
         feed_records_through(&mut stages, i + 1, primary)?;
     }
 
+    // Pipeline RC is the maximum stage RC
+    let rc = stages.iter().map(|s| s.stage_rc()).max().unwrap_or(0);
+
     // Collect output from the terminal stage only
     let messages = stages
         .last()
         .map(|s| s.collected_output().to_vec())
         .unwrap_or_default();
 
-    Ok(PipelineResult { rc: 0, messages })
+    Ok(PipelineResult { rc, messages })
 }
 
 /// Feed records through stages starting at `start_index`.
@@ -182,10 +185,21 @@ mod tests {
     }
 
     #[test]
-    fn locate_non_match_dropped_silently() {
+    fn locate_non_match_secondary_unrouted() {
+        // TODO: secondary routing not yet implemented — secondary records are
+        // silently discarded. When multi-stream routing lands, this test should
+        // verify that secondary records reach the connected secondary pipeline.
         let result = run_pipe("literal xyz | locate /abc/ | console").unwrap();
-        assert_eq!(result.rc, 0);
+        assert_eq!(result.rc, 4); // no records reached primary
         assert!(result.messages.is_empty());
+    }
+
+    #[test]
+    fn literal_nlocate_console_pass_through() {
+        // "xyz" does not contain "abc", so nlocate routes it to primary
+        let result = run_pipe("literal xyz | nlocate /abc/ | console").unwrap();
+        assert_eq!(result.rc, 0);
+        assert_eq!(result.messages, vec!["xyz"]);
     }
 
     #[test]

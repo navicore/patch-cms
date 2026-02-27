@@ -52,6 +52,12 @@ pub trait Stage: std::fmt::Debug {
         Ok(Vec::new())
     }
 
+    /// Stage return code after processing completes. Default is 0.
+    /// Stages that filter (e.g. locate) return 4 when no records reach primary.
+    fn stage_rc(&self) -> i32 {
+        0
+    }
+
     /// Sink stages return accumulated data here.
     fn collected_output(&self) -> &[String] {
         &[]
@@ -94,6 +100,7 @@ mod tests {
         assert_eq!(out[0].stream, Stream::Primary);
         assert_eq!(out[0].data, "test");
         assert!(s.finish().unwrap().is_empty());
+        assert_eq!(s.stage_rc(), 0);
         assert!(s.collected_output().is_empty());
     }
 

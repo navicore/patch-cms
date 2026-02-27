@@ -6,6 +6,8 @@ use crate::stages::locate_common::parse_delimited_pattern;
 #[derive(Debug)]
 pub struct Locate {
     pattern: String,
+    processed_any: bool,
+    any_primary: bool,
 }
 
 impl Locate {
@@ -13,6 +15,8 @@ impl Locate {
         let parsed = parse_delimited_pattern(args, "locate")?;
         Ok(Self {
             pattern: parsed.pattern,
+            processed_any: false,
+            any_primary: false,
         })
     }
 }
@@ -23,10 +27,20 @@ impl Stage for Locate {
     }
 
     fn process(&mut self, record: &str) -> Result<Vec<OutputRecord>> {
+        self.processed_any = true;
         if record.contains(&self.pattern) {
+            self.any_primary = true;
             Ok(vec![OutputRecord::primary(record.to_string())])
         } else {
             Ok(vec![OutputRecord::secondary(record.to_string())])
+        }
+    }
+
+    fn stage_rc(&self) -> i32 {
+        if self.processed_any && !self.any_primary {
+            4
+        } else {
+            0
         }
     }
 }
@@ -80,6 +94,26 @@ mod tests {
         let mut s = Locate::new("/abc/").unwrap();
         let out = s.process("").unwrap();
         assert_eq!(out[0].stream, Stream::Secondary);
+    }
+
+    #[test]
+    fn rc_zero_when_match_found() {
+        let mut s = Locate::new("/hello/").unwrap();
+        s.process("hello world").unwrap();
+        assert_eq!(s.stage_rc(), 0);
+    }
+
+    #[test]
+    fn rc_four_when_no_match() {
+        let mut s = Locate::new("/hello/").unwrap();
+        s.process("goodbye").unwrap();
+        assert_eq!(s.stage_rc(), 4);
+    }
+
+    #[test]
+    fn rc_zero_when_no_records_processed() {
+        let s = Locate::new("/hello/").unwrap();
+        assert_eq!(s.stage_rc(), 0);
     }
 
     #[test]

@@ -60,6 +60,12 @@ mod tests {
     }
 
     #[test]
+    fn trailing_content_after_closing_delimiter_is_ignored() {
+        let p = parse_delimited_pattern("/abc/ 10 20", "locate").unwrap();
+        assert_eq!(p.pattern, "abc");
+    }
+
+    #[test]
     fn missing_closing_delimiter() {
         let err = parse_delimited_pattern("/hello", "locate").unwrap_err();
         assert_eq!(err.rc(), 24);
