@@ -49,9 +49,20 @@ impl Drop for Supervisor {
             }
         }
         // 3. Abort all machine tasks so they don't leak.
-        if let Ok(mut machines) = self.machines.try_write() {
-            for (_key, entry) in machines.drain() {
-                entry.task_handle.abort();
+        //    try_write() can fail if the router task (now aborted) held a read
+        //    lock at the instant Drop ran. Call shutdown().await before drop to
+        //    guarantee clean teardown.
+        match self.machines.try_write() {
+            Ok(mut machines) => {
+                for (_key, entry) in machines.drain() {
+                    entry.task_handle.abort();
+                }
+            }
+            Err(_) => {
+                eprintln!(
+                    "DMSIUC032W Supervisor::drop could not acquire write lock; \
+                     machine tasks may leak. Call shutdown().await before drop."
+                );
             }
         }
     }
@@ -146,6 +157,11 @@ impl Supervisor {
     /// authenticity — any caller with a valid registered `MachineId` can
     /// specify it as `from`. Messages sent through [`MachineContext`]
     /// always carry the machine's true identity set at IPL time.
+    ///
+    /// Note: if the target machine logs off between the registry lookup and
+    /// the `try_send`, `DeliveryFailed` (RC=16) is returned rather than
+    /// `MachineNotFound` (RC=12). Callers should treat both as
+    /// "target unavailable."
     pub async fn smsg(&self, from: &MachineId, to: &MachineId, text: &str) -> Result<()> {
         let signal_tx = {
             let machines = self.machines.read().await;
@@ -183,12 +199,14 @@ impl Supervisor {
 
     /// Shut down all machines and the router task.
     ///
-    /// Uses `try_send` to deliver logoff signals non-blockingly so a machine
-    /// with a full channel cannot delay other machines from receiving their
-    /// signal. After signalling, each machine's sender is explicitly dropped
-    /// before awaiting its task handle — this ensures that even if `try_send`
-    /// failed (channel full), the machine will exit via `recv() → None` when
-    /// the sender is dropped (though `on_logoff` will not be called).
+    /// Phase 1: sends logoff signals to all machines concurrently via
+    /// `try_send` — a machine with a full channel cannot delay others.
+    ///
+    /// Phase 2: drops all signal senders and joins all task handles.
+    /// Dropping the sender before awaiting ensures that even if `try_send`
+    /// failed (channel full), the machine exits via `recv() → None` rather
+    /// than deadlocking. If the Logoff signal was not enqueued, `on_logoff`
+    /// will not be called for that machine.
     pub async fn shutdown(&self) {
         // Drain all machine entries.
         let entries: Vec<(MachineId, MachineEntry)> = {
@@ -196,16 +214,19 @@ impl Supervisor {
             machines.drain().collect()
         };
 
-        // Phase 1: non-blocking logoff signals — cannot stall on a full channel.
-        // Phase 2: drop sender and join task. Destructuring ensures signal_tx
-        // is dropped before awaiting task_handle, preventing deadlock when the
-        // Logoff signal was not enqueued (channel full).
+        // Phase 1: non-blocking logoff signals to all machines.
+        for (_key, entry) in &entries {
+            let _ = entry.signal_tx.try_send(MachineSignal::Logoff);
+        }
+
+        // Phase 2: drop senders and join tasks. Destructuring ensures
+        // signal_tx is dropped before awaiting task_handle, preventing
+        // deadlock when the Logoff signal was not enqueued (channel full).
         for (key, entry) in entries {
             let MachineEntry {
                 signal_tx,
                 task_handle,
             } = entry;
-            let _ = signal_tx.try_send(MachineSignal::Logoff);
             drop(signal_tx);
             if let Err(e) = task_handle.await {
                 eprintln!("DMSIUC028W Machine {} panicked during shutdown: {}", key, e);

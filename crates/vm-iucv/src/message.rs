@@ -19,8 +19,14 @@ impl SmsgMessage {
     /// Create a new SMSG message.
     ///
     /// Returns `InvalidParameter` if `text` exceeds 236 bytes (the CP SMSG
-    /// limit).
+    /// limit) or contains non-ASCII characters (CP SMSG text is EBCDIC;
+    /// non-ASCII bytes are unrepresentable).
     pub fn new(from: MachineId, to: MachineId, text: &str) -> Result<Self> {
+        if !text.is_ascii() {
+            return Err(IucvError::InvalidParameter(
+                "SMSG text contains non-ASCII characters".to_string(),
+            ));
+        }
         if text.len() > SMSG_MAX_TEXT_LEN {
             return Err(IucvError::InvalidParameter(format!(
                 "SMSG text exceeds {} bytes",
@@ -99,6 +105,17 @@ mod tests {
             MachineId::new("ALICE").unwrap(),
             MachineId::new("BOB").unwrap(),
             &text,
+        )
+        .unwrap_err();
+        assert_eq!(err.rc(), 24);
+    }
+
+    #[test]
+    fn reject_non_ascii_text() {
+        let err = SmsgMessage::new(
+            MachineId::new("ALICE").unwrap(),
+            MachineId::new("BOB").unwrap(),
+            "Hello 🌍",
         )
         .unwrap_err();
         assert_eq!(err.rc(), 24);
