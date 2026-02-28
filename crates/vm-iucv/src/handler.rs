@@ -40,9 +40,7 @@ impl MachineContext {
             text: text.to_string(),
         };
         self.outbox.try_send(msg).map_err(|e| match e {
-            mpsc::error::TrySendError::Full(_) => {
-                IucvError::DeliveryFailed(to.as_str().to_string())
-            }
+            mpsc::error::TrySendError::Full(_) => IucvError::ChannelBusy(to.as_str().to_string()),
             mpsc::error::TrySendError::Closed(_) => IucvError::SupervisorDown,
         })
     }

@@ -13,6 +13,10 @@ pub enum IucvError {
     AlreadyLoggedOff(String),
     /// Message delivery failed — channel closed (RC=16)
     DeliveryFailed(String),
+    /// Router channel full — transient backpressure (RC=20)
+    ChannelBusy(String),
+    /// Machine task panicked (RC=28)
+    MachinePanicked(String),
     /// Supervisor has shut down (RC=32)
     SupervisorDown,
 }
@@ -35,6 +39,12 @@ impl fmt::Display for IucvError {
             IucvError::DeliveryFailed(s) => {
                 write!(f, "DMSIUC016E Delivery failed - {}", s)
             }
+            IucvError::ChannelBusy(s) => {
+                write!(f, "DMSIUC020W Channel busy - {}", s)
+            }
+            IucvError::MachinePanicked(s) => {
+                write!(f, "DMSIUC028E Machine task panicked - {}", s)
+            }
             IucvError::SupervisorDown => {
                 write!(f, "DMSIUC032E Supervisor has shut down")
             }
@@ -53,6 +63,8 @@ impl IucvError {
             IucvError::MachineNotFound(_) => 12,
             IucvError::AlreadyLoggedOff(_) => 12,
             IucvError::DeliveryFailed(_) => 16,
+            IucvError::ChannelBusy(_) => 20,
+            IucvError::MachinePanicked(_) => 28,
             IucvError::SupervisorDown => 32,
         }
     }
@@ -100,6 +112,20 @@ mod tests {
     }
 
     #[test]
+    fn error_display_channel_busy() {
+        let e = IucvError::ChannelBusy("BUSY".to_string());
+        assert!(e.to_string().contains("BUSY"));
+        assert_eq!(e.rc(), 20);
+    }
+
+    #[test]
+    fn error_display_machine_panicked() {
+        let e = IucvError::MachinePanicked("CRASH".to_string());
+        assert!(e.to_string().contains("CRASH"));
+        assert_eq!(e.rc(), 28);
+    }
+
+    #[test]
     fn error_display_supervisor_down() {
         let e = IucvError::SupervisorDown;
         assert!(e.to_string().contains("shut down"));
@@ -114,6 +140,8 @@ mod tests {
             IucvError::MachineNotFound("X".to_string()),
             IucvError::AlreadyLoggedOff("X".to_string()),
             IucvError::DeliveryFailed("X".to_string()),
+            IucvError::ChannelBusy("X".to_string()),
+            IucvError::MachinePanicked("X".to_string()),
             IucvError::SupervisorDown,
         ];
         for e in &errors {

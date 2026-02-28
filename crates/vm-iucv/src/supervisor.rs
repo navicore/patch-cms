@@ -100,15 +100,25 @@ impl Supervisor {
         // Send logoff signal; ignore error if task already exited.
         let _ = entry.signal_tx.send(MachineSignal::Logoff).await;
         // Wait for the machine task to complete so on_logoff() finishes.
-        let _ = entry.task_handle.await;
+        entry
+            .task_handle
+            .await
+            .map_err(|e| IucvError::MachinePanicked(format!("{e}")))?;
         Ok(())
     }
 
     /// Send an SMSG from one machine to another.
+    ///
+    /// The `from` identity is validated — it must be a currently registered
+    /// (IPL'd) machine.
     pub async fn smsg(&self, from: &MachineId, to: &MachineId, text: &str) -> Result<()> {
         // Clone the sender and drop the read guard before awaiting send.
         let signal_tx = {
             let machines = self.machines.read().await;
+            // Validate sender is registered.
+            if !machines.contains_key(from.as_str()) {
+                return Err(IucvError::MachineNotFound(from.as_str().to_string()));
+            }
             let key = to.as_str().to_string();
             let entry = machines.get(&key).ok_or(IucvError::MachineNotFound(key))?;
             entry.signal_tx.clone()
@@ -139,8 +149,10 @@ impl Supervisor {
 
     /// Shut down all machines and the router task.
     ///
-    /// Sends logoff signals to every running machine, joins all machine tasks
-    /// (ensuring `on_logoff()` completes), then shuts down the router.
+    /// Sends logoff signals to every running machine concurrently, then joins
+    /// all machine tasks (ensuring every `on_logoff()` completes) before
+    /// shutting down the router. A hung `on_logoff` in one machine cannot
+    /// prevent other machines from receiving their logoff signal.
     pub async fn shutdown(&self) {
         // Drain all machine entries.
         let entries: Vec<(String, MachineEntry)> = {
@@ -148,9 +160,13 @@ impl Supervisor {
             machines.drain().collect()
         };
 
-        // Send logoff signals and join all machine tasks.
-        for (_key, entry) in entries {
+        // Phase 1: send all logoff signals so every machine can begin cleanup.
+        for (_key, entry) in &entries {
             let _ = entry.signal_tx.send(MachineSignal::Logoff).await;
+        }
+
+        // Phase 2: join all machine tasks.
+        for (_key, entry) in entries {
             let _ = entry.task_handle.await;
         }
 
@@ -322,6 +338,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn smsg_unregistered_sender_error() {
+        let sup = Supervisor::new();
+        let alice = MachineId::new("ALICE").unwrap();
+        let bob = MachineId::new("BOB").unwrap();
+        let ghost = MachineId::new("GHOST").unwrap();
+
+        let (h_alice, _) = collector();
+        let (h_bob, _) = collector();
+        sup.ipl(&alice, h_alice).await.unwrap();
+        sup.ipl(&bob, h_bob).await.unwrap();
+
+        // GHOST is not registered — smsg should reject the forged sender.
+        let err = sup.smsg(&ghost, &bob, "Forged").await.unwrap_err();
+        assert_eq!(err.rc(), 12);
+
+        sup.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn machine_to_machine_smsg_via_context() {
         // A handler that auto-replies to any SMSG using try_send_smsg.
         struct EchoHandler;
@@ -349,6 +384,60 @@ mod tests {
         let msgs = alice_handle.messages();
         assert_eq!(msgs[0].from.as_str(), "BOB");
         assert!(msgs[0].text.contains("ECHO: Ping"));
+
+        sup.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn smsg_during_on_ipl() {
+        // A handler that sends an SMSG to a peer during on_ipl.
+        struct GreeterHandler {
+            target: MachineId,
+        }
+        impl MachineHandler for GreeterHandler {
+            fn on_ipl(&mut self, ctx: &MachineContext) {
+                let _ = ctx.try_send_smsg(&self.target, "Booted!");
+            }
+            fn on_smsg(&mut self, _ctx: &MachineContext, _msg: SmsgMessage) {}
+        }
+
+        let sup = Supervisor::new();
+        let alice = MachineId::new("ALICE").unwrap();
+        let bob = MachineId::new("BOB").unwrap();
+
+        // IPL Alice first (collector), then Bob who greets Alice on boot.
+        let (h_alice, alice_handle) = collector();
+        sup.ipl(&alice, h_alice).await.unwrap();
+
+        let greeter = GreeterHandler {
+            target: alice.clone(),
+        };
+        sup.ipl(&bob, greeter).await.unwrap();
+
+        wait_for(2000, || alice_handle.count() >= 1).await;
+        let msgs = alice_handle.messages();
+        assert_eq!(msgs[0].from.as_str(), "BOB");
+        assert_eq!(msgs[0].text, "Booted!");
+
+        sup.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn logoff_surfaces_handler_panic() {
+        struct PanicOnLogoff;
+        impl MachineHandler for PanicOnLogoff {
+            fn on_smsg(&mut self, _ctx: &MachineContext, _msg: SmsgMessage) {}
+            fn on_logoff(&mut self, _ctx: &MachineContext) {
+                panic!("intentional test panic");
+            }
+        }
+
+        let sup = Supervisor::new();
+        let id = MachineId::new("CRASHER").unwrap();
+        sup.ipl(&id, PanicOnLogoff).await.unwrap();
+
+        let err = sup.logoff(&id).await.unwrap_err();
+        assert_eq!(err.rc(), 28);
 
         sup.shutdown().await;
     }
