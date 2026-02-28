@@ -149,10 +149,11 @@ impl Supervisor {
 
     /// Shut down all machines and the router task.
     ///
-    /// Sends logoff signals to every running machine concurrently, then joins
-    /// all machine tasks (ensuring every `on_logoff()` completes) before
-    /// shutting down the router. A hung `on_logoff` in one machine cannot
-    /// prevent other machines from receiving their logoff signal.
+    /// Uses `try_send` to deliver logoff signals non-blockingly so a machine
+    /// with a full channel cannot delay other machines from receiving their
+    /// signal. If `try_send` fails (channel full), the machine will still
+    /// exit when its signal sender is dropped at the end of Phase 2, but
+    /// `on_logoff` will not be called for that machine.
     pub async fn shutdown(&self) {
         // Drain all machine entries.
         let entries: Vec<(String, MachineEntry)> = {
@@ -160,14 +161,17 @@ impl Supervisor {
             machines.drain().collect()
         };
 
-        // Phase 1: send all logoff signals so every machine can begin cleanup.
+        // Phase 1: non-blocking logoff signals — cannot stall on a full channel.
         for (_key, entry) in &entries {
-            let _ = entry.signal_tx.send(MachineSignal::Logoff).await;
+            let _ = entry.signal_tx.try_send(MachineSignal::Logoff);
         }
 
-        // Phase 2: join all machine tasks.
-        for (_key, entry) in entries {
-            let _ = entry.task_handle.await;
+        // Phase 2: join all machine tasks. Panics are collected but not
+        // propagated — shutdown is best-effort, matching CP SHUTDOWN semantics.
+        for (key, entry) in entries {
+            if let Err(e) = entry.task_handle.await {
+                eprintln!("DMSIUC028W Machine {} panicked during shutdown: {}", key, e);
+            }
         }
 
         // Drop the router sender so the router loop exits.

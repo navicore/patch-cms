@@ -20,6 +20,10 @@ impl MachineContext {
     }
 
     /// Send an SMSG to another machine via the supervisor router.
+    ///
+    /// The message is enqueued in the router's input channel. Delivery is
+    /// best-effort: if the target machine logs off between enqueue and
+    /// dispatch, the message is silently dropped by the router.
     pub async fn send_smsg(&self, to: &MachineId, text: &str) -> Result<()> {
         let msg = SmsgMessage {
             from: self.machine_id.clone(),
@@ -33,6 +37,10 @@ impl MachineContext {
     }
 
     /// Try to send an SMSG without awaiting (for use in sync handler callbacks).
+    ///
+    /// The message is enqueued in the router's input channel. Delivery is
+    /// best-effort: if the target machine logs off between enqueue and
+    /// dispatch, the message is silently dropped by the router.
     pub fn try_send_smsg(&self, to: &MachineId, text: &str) -> Result<()> {
         let msg = SmsgMessage {
             from: self.machine_id.clone(),
@@ -40,7 +48,7 @@ impl MachineContext {
             text: text.to_string(),
         };
         self.outbox.try_send(msg).map_err(|e| match e {
-            mpsc::error::TrySendError::Full(_) => IucvError::ChannelBusy(to.as_str().to_string()),
+            mpsc::error::TrySendError::Full(_) => IucvError::ChannelBusy("ROUTER".to_string()),
             mpsc::error::TrySendError::Closed(_) => IucvError::SupervisorDown,
         })
     }
