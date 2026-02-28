@@ -36,21 +36,22 @@ pub struct Supervisor {
 
 impl Drop for Supervisor {
     fn drop(&mut self) {
-        // Drop the router sender so the router loop exits naturally.
-        // Use try_lock to avoid panicking if already locked (e.g. during shutdown).
+        // 1. Drop the router sender so the router loop exits naturally.
+        //    Use try_lock to avoid panicking if already locked (e.g. during shutdown).
         if let Ok(mut guard) = self.router_tx.try_lock() {
             guard.take();
         }
-        // Abort all machine tasks so they don't leak.
-        if let Ok(mut machines) = self.machines.try_write() {
-            for (_key, entry) in machines.drain() {
-                entry.task_handle.abort();
-            }
-        }
-        // Abort the router task.
+        // 2. Abort the router task first — this releases any read lock it may
+        //    hold on `machines`, ensuring try_write() below can succeed.
         if let Ok(mut guard) = self.router_task.try_lock() {
             if let Some(handle) = guard.take() {
                 handle.abort();
+            }
+        }
+        // 3. Abort all machine tasks so they don't leak.
+        if let Ok(mut machines) = self.machines.try_write() {
+            for (_key, entry) in machines.drain() {
+                entry.task_handle.abort();
             }
         }
     }
@@ -136,12 +137,16 @@ impl Supervisor {
 
     /// Send an SMSG from one machine to another.
     ///
+    /// Uses non-blocking `try_send` for consistent fire-and-forget semantics
+    /// with the router path (via [`MachineContext::try_send_smsg`]). Returns
+    /// [`IucvError::ChannelBusy`] if the target machine's signal channel is
+    /// at capacity — the caller may retry.
+    ///
     /// The `from` identity is checked for registration but not for caller
     /// authenticity — any caller with a valid registered `MachineId` can
     /// specify it as `from`. Messages sent through [`MachineContext`]
     /// always carry the machine's true identity set at IPL time.
     pub async fn smsg(&self, from: &MachineId, to: &MachineId, text: &str) -> Result<()> {
-        // Clone the sender and drop the read guard before awaiting send.
         let signal_tx = {
             let machines = self.machines.read().await;
             // Validate sender is registered.
@@ -152,14 +157,20 @@ impl Supervisor {
                 .get(to)
                 .ok_or_else(|| IucvError::MachineNotFound(to.as_str().to_string()))?;
             entry.signal_tx.clone()
-        };
+        }; // read guard dropped
 
         let msg = SmsgMessage::new(from.clone(), to.clone(), text)?;
 
         signal_tx
-            .send(MachineSignal::Smsg(msg))
-            .await
-            .map_err(|_| IucvError::DeliveryFailed(to.as_str().to_string()))
+            .try_send(MachineSignal::Smsg(msg))
+            .map_err(|e| match e {
+                mpsc::error::TrySendError::Full(_) => {
+                    IucvError::ChannelBusy(to.as_str().to_string())
+                }
+                mpsc::error::TrySendError::Closed(_) => {
+                    IucvError::DeliveryFailed(to.as_str().to_string())
+                }
+            })
     }
 
     /// Return a sorted list of all running machine ids (CP QUERY NAMES).
@@ -174,9 +185,10 @@ impl Supervisor {
     ///
     /// Uses `try_send` to deliver logoff signals non-blockingly so a machine
     /// with a full channel cannot delay other machines from receiving their
-    /// signal. If `try_send` fails (channel full), the machine will still
-    /// exit when its signal sender is dropped at the end of Phase 2, but
-    /// `on_logoff` will not be called for that machine.
+    /// signal. After signalling, each machine's sender is explicitly dropped
+    /// before awaiting its task handle — this ensures that even if `try_send`
+    /// failed (channel full), the machine will exit via `recv() → None` when
+    /// the sender is dropped (though `on_logoff` will not be called).
     pub async fn shutdown(&self) {
         // Drain all machine entries.
         let entries: Vec<(MachineId, MachineEntry)> = {
@@ -185,14 +197,17 @@ impl Supervisor {
         };
 
         // Phase 1: non-blocking logoff signals — cannot stall on a full channel.
-        for (_key, entry) in &entries {
-            let _ = entry.signal_tx.try_send(MachineSignal::Logoff);
-        }
-
-        // Phase 2: join all machine tasks. Panics are collected but not
-        // propagated — shutdown is best-effort, matching CP SHUTDOWN semantics.
+        // Phase 2: drop sender and join task. Destructuring ensures signal_tx
+        // is dropped before awaiting task_handle, preventing deadlock when the
+        // Logoff signal was not enqueued (channel full).
         for (key, entry) in entries {
-            if let Err(e) = entry.task_handle.await {
+            let MachineEntry {
+                signal_tx,
+                task_handle,
+            } = entry;
+            let _ = signal_tx.try_send(MachineSignal::Logoff);
+            drop(signal_tx);
+            if let Err(e) = task_handle.await {
                 eprintln!("DMSIUC028W Machine {} panicked during shutdown: {}", key, e);
             }
         }
