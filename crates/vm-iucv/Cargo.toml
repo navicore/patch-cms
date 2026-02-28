@@ -1,0 +1,12 @@
+[package]
+name = "vm-iucv"
+description = "VM/CMS IUCV inter-machine messaging — actor framework"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { version = "1", features = ["sync", "rt"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
