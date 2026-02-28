@@ -11,6 +11,9 @@ pub struct MachineId(String);
 impl MachineId {
     /// Create a new `MachineId`, uppercasing the input and validating format.
     pub fn new(id: &str) -> Result<Self> {
+        if !id.is_ascii() {
+            return Err(IucvError::InvalidMachineId(id.to_string()));
+        }
         let upper = id.to_uppercase();
         if upper.is_empty() || upper.len() > 8 {
             return Err(IucvError::InvalidMachineId(id.to_string()));
@@ -84,5 +87,12 @@ mod tests {
     fn reject_illegal_chars() {
         assert!(MachineId::new("BAD!").is_err());
         assert!(MachineId::new("SP ACE").is_err());
+    }
+
+    #[test]
+    fn reject_non_ascii() {
+        // "ß" uppercases to "SS" in Unicode — must be rejected before uppercasing
+        assert!(MachineId::new("ß").is_err());
+        assert!(MachineId::new("café").is_err());
     }
 }
