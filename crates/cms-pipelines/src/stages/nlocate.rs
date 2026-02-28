@@ -26,7 +26,8 @@ impl Stage for Nlocate {
 
     fn process(&mut self, record: &str) -> Result<Vec<OutputRecord>> {
         if record.contains(&self.pattern) {
-            Ok(vec![OutputRecord::secondary(record.to_string())])
+            // TODO: emit OutputRecord::secondary once multi-stream routing is implemented
+            Ok(vec![])
         } else {
             self.any_primary = true;
             Ok(vec![OutputRecord::primary(record.to_string())])
@@ -48,11 +49,10 @@ mod tests {
     use crate::stage::Stream;
 
     #[test]
-    fn match_goes_to_secondary() {
+    fn match_emits_nothing() {
         let mut s = Nlocate::new("/hello/").unwrap();
         let out = s.process("hello world").unwrap();
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].stream, Stream::Secondary);
+        assert!(out.is_empty());
     }
 
     #[test]
@@ -65,10 +65,10 @@ mod tests {
     }
 
     #[test]
-    fn empty_pattern_matches_all_to_secondary() {
+    fn empty_pattern_matches_all_emits_nothing() {
         let mut s = Nlocate::new("//").unwrap();
         let out = s.process("anything").unwrap();
-        assert_eq!(out[0].stream, Stream::Secondary);
+        assert!(out.is_empty());
     }
 
     #[test]

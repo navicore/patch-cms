@@ -29,7 +29,8 @@ impl Stage for Locate {
             self.any_primary = true;
             Ok(vec![OutputRecord::primary(record.to_string())])
         } else {
-            Ok(vec![OutputRecord::secondary(record.to_string())])
+            // TODO: emit OutputRecord::secondary once multi-stream routing is implemented
+            Ok(vec![])
         }
     }
 
@@ -57,12 +58,10 @@ mod tests {
     }
 
     #[test]
-    fn no_match_goes_to_secondary() {
+    fn no_match_emits_nothing() {
         let mut s = Locate::new("/hello/").unwrap();
         let out = s.process("goodbye world").unwrap();
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].stream, Stream::Secondary);
-        assert_eq!(out[0].data, "goodbye world");
+        assert!(out.is_empty());
     }
 
     #[test]
@@ -73,10 +72,18 @@ mod tests {
     }
 
     #[test]
+    fn empty_pattern_matches_empty_record() {
+        let mut s = Locate::new("//").unwrap();
+        let out = s.process("").unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].stream, Stream::Primary);
+    }
+
+    #[test]
     fn case_sensitive() {
         let mut s = Locate::new("/Hello/").unwrap();
         let out = s.process("hello").unwrap();
-        assert_eq!(out[0].stream, Stream::Secondary);
+        assert!(out.is_empty());
     }
 
     #[test]
@@ -90,7 +97,7 @@ mod tests {
     fn empty_record_no_match() {
         let mut s = Locate::new("/abc/").unwrap();
         let out = s.process("").unwrap();
-        assert_eq!(out[0].stream, Stream::Secondary);
+        assert!(out.is_empty());
     }
 
     #[test]

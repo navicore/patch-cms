@@ -53,7 +53,8 @@ pub trait Stage: std::fmt::Debug {
     }
 
     /// Stage return code after processing completes. Default is 0.
-    /// Stages that filter (e.g. locate) return 4 when no records reach primary.
+    /// Filter stages that route records to secondary **must** override this
+    /// method to return 4 when no records reached the primary stream.
     fn stage_rc(&self) -> i32 {
         0
     }

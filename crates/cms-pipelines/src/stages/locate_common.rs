@@ -19,7 +19,7 @@ pub(crate) fn parse_delimited_pattern(args: &str, stage_name: &str) -> Result<De
     }
 
     let delim = args.chars().next().expect("args non-empty: checked above");
-    if delim.is_ascii_whitespace() {
+    if delim.is_whitespace() {
         return Err(PipelineError::InvalidArgument(format!(
             "{stage_name}: delimiter must not be whitespace"
         )));
@@ -27,9 +27,17 @@ pub(crate) fn parse_delimited_pattern(args: &str, stage_name: &str) -> Result<De
     let rest = &args[delim.len_utf8()..];
 
     match rest.find(delim) {
-        Some(pos) => Ok(DelimitedPattern {
-            pattern: rest[..pos].to_string(),
-        }),
+        Some(pos) => {
+            let trailing = &rest[pos + delim.len_utf8()..];
+            if !trailing.trim().is_empty() {
+                return Err(PipelineError::InvalidArgument(format!(
+                    "{stage_name}: unsupported options after closing delimiter"
+                )));
+            }
+            Ok(DelimitedPattern {
+                pattern: rest[..pos].to_string(),
+            })
+        }
         None => Err(PipelineError::InvalidArgument(format!(
             "missing closing delimiter '{delim}'"
         ))),
@@ -59,14 +67,24 @@ mod tests {
     }
 
     #[test]
-    fn delimiter_in_pattern_body() {
-        let p = parse_delimited_pattern("/foo/bar/", "locate").unwrap();
-        assert_eq!(p.pattern, "foo");
+    fn trailing_non_whitespace_after_delimiter_rejected() {
+        // /foo/bar/ → pattern "foo", trailing "bar/" is non-whitespace → error
+        let err = parse_delimited_pattern("/foo/bar/", "locate").unwrap_err();
+        assert_eq!(err.rc(), 24);
+        assert!(err.to_string().contains("unsupported options"));
     }
 
     #[test]
-    fn trailing_content_after_closing_delimiter_is_ignored() {
-        let p = parse_delimited_pattern("/abc/ 10 20", "locate").unwrap();
+    fn trailing_column_range_rejected() {
+        // Column ranges are not yet supported — reject rather than silently ignore
+        let err = parse_delimited_pattern("/abc/ 10 20", "locate").unwrap_err();
+        assert_eq!(err.rc(), 24);
+        assert!(err.to_string().contains("unsupported options"));
+    }
+
+    #[test]
+    fn trailing_whitespace_after_delimiter_ok() {
+        let p = parse_delimited_pattern("/abc/   ", "locate").unwrap();
         assert_eq!(p.pattern, "abc");
     }
 
