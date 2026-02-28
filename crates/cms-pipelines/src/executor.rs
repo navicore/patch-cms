@@ -55,13 +55,20 @@ pub fn execute_pipeline(spec: &PipelineSpec) -> Result<PipelineResult> {
         feed_records_through(&mut stages, i + 1, primary)?;
     }
 
+    // Pipeline RC is the maximum stage RC
+    let rc = stages
+        .iter()
+        .map(|s| s.stage_rc())
+        .max()
+        .expect("stages non-empty: checked above");
+
     // Collect output from the terminal stage only
     let messages = stages
         .last()
         .map(|s| s.collected_output().to_vec())
         .unwrap_or_default();
 
-    Ok(PipelineResult { rc: 0, messages })
+    Ok(PipelineResult { rc, messages })
 }
 
 /// Feed records through stages starting at `start_index`.
@@ -175,6 +182,39 @@ mod tests {
     }
 
     #[test]
+    fn literal_locate_console() {
+        let result = run_pipe("literal abc | locate /abc/ | console").unwrap();
+        assert_eq!(result.rc, 0);
+        assert_eq!(result.messages, vec!["abc"]);
+    }
+
+    #[test]
+    fn locate_non_match_secondary_unrouted() {
+        // TODO: secondary routing not yet implemented — secondary records are
+        // silently discarded. When multi-stream routing lands, this test should
+        // verify that secondary records reach the connected secondary pipeline.
+        let result = run_pipe("literal xyz | locate /abc/ | console").unwrap();
+        assert_eq!(result.rc, 4); // no records reached primary
+        assert!(result.messages.is_empty());
+    }
+
+    #[test]
+    fn locate_rc4_when_zero_upstream_records() {
+        // console emits nothing, so locate receives zero records → RC=4
+        let result = run_pipe("console | locate /abc/ | console").unwrap();
+        assert_eq!(result.rc, 4);
+        assert!(result.messages.is_empty());
+    }
+
+    #[test]
+    fn literal_nlocate_console_pass_through() {
+        // "xyz" does not contain "abc", so nlocate routes it to primary
+        let result = run_pipe("literal xyz | nlocate /abc/ | console").unwrap();
+        assert_eq!(result.rc, 0);
+        assert_eq!(result.messages, vec!["xyz"]);
+    }
+
+    #[test]
     fn unknown_stage_in_execute_pipeline() {
         let spec = PipelineSpec {
             stages: vec![StageSpec {
@@ -203,7 +243,7 @@ mod tests {
         }
 
         // Build stages manually: literal -> echo -> console
-        let specs = vec![
+        let specs = [
             StageSpec {
                 name: "literal".to_string(),
                 raw_name: "literal".to_string(),
