@@ -56,7 +56,11 @@ pub fn execute_pipeline(spec: &PipelineSpec) -> Result<PipelineResult> {
     }
 
     // Pipeline RC is the maximum stage RC
-    let rc = stages.iter().map(|s| s.stage_rc()).max().unwrap_or(0);
+    let rc = stages
+        .iter()
+        .map(|s| s.stage_rc())
+        .max()
+        .expect("stages non-empty: checked above");
 
     // Collect output from the terminal stage only
     let messages = stages
@@ -191,6 +195,14 @@ mod tests {
         // verify that secondary records reach the connected secondary pipeline.
         let result = run_pipe("literal xyz | locate /abc/ | console").unwrap();
         assert_eq!(result.rc, 4); // no records reached primary
+        assert!(result.messages.is_empty());
+    }
+
+    #[test]
+    fn locate_rc4_when_zero_upstream_records() {
+        // console emits nothing, so locate receives zero records → RC=4
+        let result = run_pipe("console | locate /abc/ | console").unwrap();
+        assert_eq!(result.rc, 4);
         assert!(result.messages.is_empty());
     }
 

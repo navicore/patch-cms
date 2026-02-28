@@ -101,6 +101,12 @@ mod tests {
     }
 
     #[test]
+    fn rc_four_when_no_records_processed() {
+        let s = Nlocate::new("/hello/").unwrap();
+        assert_eq!(s.stage_rc(), 4);
+    }
+
+    #[test]
     fn rc_zero_when_mixed_matches() {
         let mut s = Nlocate::new("/hello/").unwrap();
         s.process("hello world").unwrap(); // match → secondary

@@ -79,6 +79,8 @@ mod tests {
 
     #[test]
     fn whitespace_delimiter_rejected() {
+        // Defence-in-depth: the pipeline parser trims args before they reach
+        // here, so this path is only reachable via direct constructor calls.
         let err = parse_delimited_pattern("  /abc/", "locate").unwrap_err();
         assert_eq!(err.rc(), 24);
         assert!(err.to_string().contains("delimiter must not be whitespace"));
