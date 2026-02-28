@@ -24,6 +24,11 @@ impl MachineContext {
     /// The message is enqueued in the router's input channel. Delivery is
     /// best-effort: if the target machine logs off between enqueue and
     /// dispatch, the message is silently dropped by the router.
+    ///
+    /// This is an async method and cannot be called directly from
+    /// `MachineHandler` callbacks (`on_ipl`, `on_smsg`, `on_logoff`),
+    /// which are synchronous. Use [`try_send_smsg`](Self::try_send_smsg)
+    /// from within callbacks instead.
     pub async fn send_smsg(&self, to: &MachineId, text: &str) -> Result<()> {
         let msg = SmsgMessage {
             from: self.machine_id.clone(),
@@ -58,8 +63,18 @@ impl MachineContext {
 ///
 /// Analogous to the `Stage` trait in cms-pipelines — each machine is an
 /// actor that reacts to lifecycle events and incoming messages.
+///
+/// All callbacks are synchronous and run on the machine's Tokio task.
+/// A blocking callback prevents the machine from processing further signals
+/// (including `Logoff`) until it returns. Implementations should avoid
+/// long-running or blocking operations; use `try_send_smsg` (not the async
+/// `send_smsg`) to send messages from within callbacks.
 pub trait MachineHandler: Send + 'static {
     /// Called once after the machine is IPL'd (booted).
+    ///
+    /// Runs before the machine begins processing signals. A blocking
+    /// `on_ipl` delays signal processing (including `Logoff`) until it
+    /// returns.
     fn on_ipl(&mut self, _ctx: &MachineContext) {}
 
     /// Called for each incoming SMSG. Every handler must implement this.

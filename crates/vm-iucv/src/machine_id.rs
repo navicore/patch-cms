@@ -16,13 +16,13 @@ impl MachineId {
         }
         let upper = id.to_uppercase();
         if upper.is_empty() || upper.len() > 8 {
-            return Err(IucvError::InvalidMachineId(id.to_string()));
+            return Err(IucvError::InvalidMachineId(upper));
         }
         if !upper
             .bytes()
             .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b"@#$".contains(&b))
         {
-            return Err(IucvError::InvalidMachineId(id.to_string()));
+            return Err(IucvError::InvalidMachineId(upper));
         }
         Ok(MachineId(upper))
     }

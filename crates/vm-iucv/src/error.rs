@@ -7,9 +7,13 @@ pub enum IucvError {
     InvalidMachineId(String),
     /// Machine already running (RC=8)
     AlreadyRunning(String),
-    /// Target machine not logged on (RC=12)
+    /// Target machine not logged on (RC=12).
+    /// Shares RC=12 with `AlreadyLoggedOff` — matches CP convention where
+    /// "not found" and "already logged off" are the same return code.
+    /// Callers can distinguish via variant matching or Display text.
     MachineNotFound(String),
-    /// Machine already logged off (RC=12)
+    /// Machine already logged off (RC=12).
+    /// Shares RC=12 with `MachineNotFound` — see above.
     AlreadyLoggedOff(String),
     /// Message delivery failed — channel closed (RC=16)
     DeliveryFailed(String),

@@ -1,3 +1,4 @@
+#[cfg(any(test, feature = "test-util"))]
 pub mod collector;
 pub mod error;
 pub mod handler;

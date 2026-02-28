@@ -34,6 +34,28 @@ pub struct Supervisor {
     router_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
+impl Drop for Supervisor {
+    fn drop(&mut self) {
+        // Drop the router sender so the router loop exits naturally.
+        // Use try_lock to avoid panicking if already locked (e.g. during shutdown).
+        if let Ok(mut guard) = self.router_tx.try_lock() {
+            guard.take();
+        }
+        // Abort all machine tasks so they don't leak.
+        if let Ok(mut machines) = self.machines.try_write() {
+            for (_key, entry) in machines.drain() {
+                entry.task_handle.abort();
+            }
+        }
+        // Abort the router task.
+        if let Ok(mut guard) = self.router_task.try_lock() {
+            if let Some(handle) = guard.take() {
+                handle.abort();
+            }
+        }
+    }
+}
+
 impl Default for Supervisor {
     fn default() -> Self {
         Self::new()
@@ -88,6 +110,11 @@ impl Supervisor {
     }
 
     /// Log off (shut down) a running machine.
+    ///
+    /// Uses non-blocking `try_send` so a machine with a full signal channel
+    /// cannot deadlock the caller. If the channel is full, `on_logoff` will
+    /// not be called but the machine task will still exit when its sender
+    /// is dropped.
     pub async fn logoff(&self, id: &MachineId) -> Result<()> {
         let entry = {
             let mut machines = self.machines.write().await;
@@ -97,8 +124,10 @@ impl Supervisor {
                 .ok_or(IucvError::AlreadyLoggedOff(key))?
         };
 
-        // Send logoff signal; ignore error if task already exited.
-        let _ = entry.signal_tx.send(MachineSignal::Logoff).await;
+        // Non-blocking logoff signal — avoids deadlock if channel is full.
+        let _ = entry.signal_tx.try_send(MachineSignal::Logoff);
+        // Drop the sender so the machine task exits even if try_send failed.
+        drop(entry.signal_tx);
         // Wait for the machine task to complete so on_logoff() finishes.
         entry
             .task_handle
