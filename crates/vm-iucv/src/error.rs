@@ -3,6 +3,8 @@ use std::fmt;
 /// Errors from the VM/CMS IUCV subsystem.
 #[derive(Debug)]
 pub enum IucvError {
+    /// Invalid parameter or option (RC=24)
+    InvalidParameter(String),
     /// Invalid machine id format (RC=24)
     InvalidMachineId(String),
     /// Machine already running (RC=8)
@@ -28,6 +30,9 @@ pub enum IucvError {
 impl fmt::Display for IucvError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            IucvError::InvalidParameter(s) => {
+                write!(f, "DMSIUC024E Invalid parameter - {}", s)
+            }
             IucvError::InvalidMachineId(s) => {
                 write!(f, "DMSIUC024E Invalid machine id - {}", s)
             }
@@ -62,6 +67,7 @@ impl IucvError {
     /// Return the CMS-style return code for this error.
     pub fn rc(&self) -> i32 {
         match self {
+            IucvError::InvalidParameter(_) => 24,
             IucvError::InvalidMachineId(_) => 24,
             IucvError::AlreadyRunning(_) => 8,
             IucvError::MachineNotFound(_) => 12,
@@ -79,6 +85,13 @@ pub type Result<T> = std::result::Result<T, IucvError>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn error_display_invalid_parameter() {
+        let e = IucvError::InvalidParameter("too long".to_string());
+        assert!(e.to_string().contains("too long"));
+        assert_eq!(e.rc(), 24);
+    }
 
     #[test]
     fn error_display_invalid_machine_id() {
@@ -139,6 +152,7 @@ mod tests {
     #[test]
     fn error_messages_have_ibm_prefix() {
         let errors: Vec<IucvError> = vec![
+            IucvError::InvalidParameter("X".to_string()),
             IucvError::InvalidMachineId("X".to_string()),
             IucvError::AlreadyRunning("X".to_string()),
             IucvError::MachineNotFound("X".to_string()),

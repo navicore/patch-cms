@@ -29,7 +29,7 @@ struct MachineEntry {
 /// `Supervisor::new()` and `Supervisor::default()` call `tokio::spawn` and
 /// will panic if invoked outside a Tokio runtime.
 pub struct Supervisor {
-    machines: Arc<RwLock<HashMap<String, MachineEntry>>>,
+    machines: Arc<RwLock<HashMap<MachineId, MachineEntry>>>,
     router_tx: Mutex<Option<mpsc::Sender<SmsgMessage>>>,
     router_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -90,16 +90,15 @@ impl Supervisor {
         };
 
         let mut machines = self.machines.write().await;
-        let key = id.as_str().to_string();
-        if machines.contains_key(&key) {
-            return Err(IucvError::AlreadyRunning(key));
+        if machines.contains_key(id) {
+            return Err(IucvError::AlreadyRunning(id.as_str().to_string()));
         }
 
         let (signal_tx, signal_rx) = mpsc::channel::<MachineSignal>(64);
         let ctx = MachineContext::new(id.clone(), router_tx);
         let task_handle = tokio::spawn(run_machine(handler, ctx, signal_rx));
         machines.insert(
-            key,
+            id.clone(),
             MachineEntry {
                 signal_tx,
                 task_handle,
@@ -111,23 +110,22 @@ impl Supervisor {
 
     /// Log off (shut down) a running machine.
     ///
-    /// Uses non-blocking `try_send` so a machine with a full signal channel
-    /// cannot deadlock the caller. If the channel is full, `on_logoff` will
-    /// not be called but the machine task will still exit when its sender
-    /// is dropped.
+    /// The machine is first removed from the registry (preventing new messages
+    /// from being routed to it), then the `Logoff` signal is sent. Since no
+    /// new messages can arrive after removal, `send().await` is safe — the
+    /// channel can only drain, so it cannot deadlock.
     pub async fn logoff(&self, id: &MachineId) -> Result<()> {
         let entry = {
             let mut machines = self.machines.write().await;
-            let key = id.as_str().to_string();
             machines
-                .remove(&key)
-                .ok_or(IucvError::AlreadyLoggedOff(key))?
+                .remove(id)
+                .ok_or_else(|| IucvError::AlreadyLoggedOff(id.as_str().to_string()))?
         };
 
-        // Non-blocking logoff signal — avoids deadlock if channel is full.
-        let _ = entry.signal_tx.try_send(MachineSignal::Logoff);
-        // Drop the sender so the machine task exits even if try_send failed.
-        drop(entry.signal_tx);
+        // Machine is removed from the registry; the router will no longer
+        // route messages to its channel. send().await is safe — the channel
+        // can only drain from here.
+        let _ = entry.signal_tx.send(MachineSignal::Logoff).await;
         // Wait for the machine task to complete so on_logoff() finishes.
         entry
             .task_handle
@@ -138,26 +136,25 @@ impl Supervisor {
 
     /// Send an SMSG from one machine to another.
     ///
-    /// The `from` identity is validated — it must be a currently registered
-    /// (IPL'd) machine.
+    /// The `from` identity is checked for registration but not for caller
+    /// authenticity — any caller with a valid registered `MachineId` can
+    /// specify it as `from`. Messages sent through [`MachineContext`]
+    /// always carry the machine's true identity set at IPL time.
     pub async fn smsg(&self, from: &MachineId, to: &MachineId, text: &str) -> Result<()> {
         // Clone the sender and drop the read guard before awaiting send.
         let signal_tx = {
             let machines = self.machines.read().await;
             // Validate sender is registered.
-            if !machines.contains_key(from.as_str()) {
+            if !machines.contains_key(from) {
                 return Err(IucvError::MachineNotFound(from.as_str().to_string()));
             }
-            let key = to.as_str().to_string();
-            let entry = machines.get(&key).ok_or(IucvError::MachineNotFound(key))?;
+            let entry = machines
+                .get(to)
+                .ok_or_else(|| IucvError::MachineNotFound(to.as_str().to_string()))?;
             entry.signal_tx.clone()
         };
 
-        let msg = SmsgMessage {
-            from: from.clone(),
-            to: to.clone(),
-            text: text.to_string(),
-        };
+        let msg = SmsgMessage::new(from.clone(), to.clone(), text)?;
 
         signal_tx
             .send(MachineSignal::Smsg(msg))
@@ -168,10 +165,7 @@ impl Supervisor {
     /// Return a sorted list of all running machine ids (CP QUERY NAMES).
     pub async fn query_names(&self) -> Vec<MachineId> {
         let machines = self.machines.read().await;
-        let mut names: Vec<MachineId> = machines
-            .keys()
-            .map(|k| MachineId::new(k).expect("supervisor key is always a valid MachineId"))
-            .collect();
+        let mut names: Vec<MachineId> = machines.keys().cloned().collect();
         names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         names
     }
@@ -185,7 +179,7 @@ impl Supervisor {
     /// `on_logoff` will not be called for that machine.
     pub async fn shutdown(&self) {
         // Drain all machine entries.
-        let entries: Vec<(String, MachineEntry)> = {
+        let entries: Vec<(MachineId, MachineEntry)> = {
             let mut machines = self.machines.write().await;
             machines.drain().collect()
         };
@@ -221,6 +215,10 @@ impl Supervisor {
 }
 
 /// The machine task loop: calls lifecycle hooks and processes signals.
+///
+/// Note: `Smsg` signals that were in-flight in the router when `Logoff` is
+/// enqueued may or may not be delivered, depending on channel ordering.
+/// The `MachineHandler` trait documents this race.
 async fn run_machine(
     mut handler: impl MachineHandler,
     ctx: MachineContext,
@@ -241,20 +239,21 @@ async fn run_machine(
 
 /// The router task: receives outbound messages from machine contexts and
 /// dispatches them to the target machine's signal channel.
+///
+/// Uses `try_send` so a single machine with a full signal channel cannot
+/// stall delivery to all other machines (head-of-line blocking). Messages
+/// to a machine with a full inbox are silently dropped — consistent with
+/// fire-and-forget SMSG semantics.
 async fn router_loop(
     mut rx: mpsc::Receiver<SmsgMessage>,
-    machines: Arc<RwLock<HashMap<String, MachineEntry>>>,
+    machines: Arc<RwLock<HashMap<MachineId, MachineEntry>>>,
 ) {
     while let Some(msg) = rx.recv().await {
-        // Clone the sender and drop the read guard before awaiting send,
-        // so a slow consumer cannot block the entire router.
-        let signal_tx = {
-            let machines = machines.read().await;
-            let key = msg.to.as_str().to_string();
-            machines.get(&key).map(|e| e.signal_tx.clone())
-        };
-        if let Some(tx) = signal_tx {
-            let _ = tx.send(MachineSignal::Smsg(msg)).await;
+        let machines = machines.read().await;
+        if let Some(entry) = machines.get(msg.to()) {
+            // Non-blocking: a full target channel drops the message rather
+            // than stalling the router for every other machine.
+            let _ = entry.signal_tx.try_send(MachineSignal::Smsg(msg));
         }
     }
 }
@@ -349,8 +348,8 @@ mod tests {
 
         assert_eq!(bob_handle.count(), 1);
         let msgs = bob_handle.messages();
-        assert_eq!(msgs[0].from.as_str(), "ALICE");
-        assert_eq!(msgs[0].text, "Hello Bob");
+        assert_eq!(msgs[0].from().as_str(), "ALICE");
+        assert_eq!(msgs[0].text(), "Hello Bob");
 
         sup.shutdown().await;
     }
@@ -395,8 +394,8 @@ mod tests {
         struct EchoHandler;
         impl MachineHandler for EchoHandler {
             fn on_smsg(&mut self, ctx: &MachineContext, msg: SmsgMessage) {
-                let text = format!("ECHO: {}", msg.text);
-                let _ = ctx.try_send_smsg(&msg.from, &text);
+                let text = format!("ECHO: {}", msg.text());
+                let _ = ctx.try_send_smsg(msg.from(), &text);
             }
         }
 
@@ -415,8 +414,8 @@ mod tests {
         // Alice should have received the echo.
         assert_eq!(alice_handle.count(), 1);
         let msgs = alice_handle.messages();
-        assert_eq!(msgs[0].from.as_str(), "BOB");
-        assert!(msgs[0].text.contains("ECHO: Ping"));
+        assert_eq!(msgs[0].from().as_str(), "BOB");
+        assert!(msgs[0].text().contains("ECHO: Ping"));
 
         sup.shutdown().await;
     }
@@ -449,8 +448,8 @@ mod tests {
 
         wait_for(2000, || alice_handle.count() >= 1).await;
         let msgs = alice_handle.messages();
-        assert_eq!(msgs[0].from.as_str(), "BOB");
-        assert_eq!(msgs[0].text, "Booted!");
+        assert_eq!(msgs[0].from().as_str(), "BOB");
+        assert_eq!(msgs[0].text(), "Booted!");
 
         sup.shutdown().await;
     }
@@ -487,5 +486,23 @@ mod tests {
 
         sup.shutdown().await;
         assert!(sup.query_names().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn smsg_text_too_long() {
+        let sup = Supervisor::new();
+        let alice = MachineId::new("ALICE").unwrap();
+        let bob = MachineId::new("BOB").unwrap();
+
+        let (h_alice, _) = collector();
+        let (h_bob, _) = collector();
+        sup.ipl(&alice, h_alice).await.unwrap();
+        sup.ipl(&bob, h_bob).await.unwrap();
+
+        let long_text = "x".repeat(237);
+        let err = sup.smsg(&alice, &bob, &long_text).await.unwrap_err();
+        assert_eq!(err.rc(), 24);
+
+        sup.shutdown().await;
     }
 }

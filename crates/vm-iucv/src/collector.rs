@@ -62,14 +62,15 @@ mod tests {
         let (mut handler, handle) = collector();
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let ctx = MachineContext::new(MachineId::new("TEST").unwrap(), tx);
-        let msg = SmsgMessage {
-            from: MachineId::new("ALICE").unwrap(),
-            to: MachineId::new("TEST").unwrap(),
-            text: "Hello".to_string(),
-        };
+        let msg = SmsgMessage::new(
+            MachineId::new("ALICE").unwrap(),
+            MachineId::new("TEST").unwrap(),
+            "Hello",
+        )
+        .unwrap();
         handler.on_smsg(&ctx, msg);
         assert_eq!(handle.count(), 1);
-        assert_eq!(handle.messages()[0].text, "Hello");
+        assert_eq!(handle.messages()[0].text(), "Hello");
     }
 
     #[test]
@@ -78,11 +79,12 @@ mod tests {
         let handle2 = handle.clone();
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let ctx = MachineContext::new(MachineId::new("TEST").unwrap(), tx);
-        let msg = SmsgMessage {
-            from: MachineId::new("ALICE").unwrap(),
-            to: MachineId::new("TEST").unwrap(),
-            text: "Shared".to_string(),
-        };
+        let msg = SmsgMessage::new(
+            MachineId::new("ALICE").unwrap(),
+            MachineId::new("TEST").unwrap(),
+            "Shared",
+        )
+        .unwrap();
         handler.on_smsg(&ctx, msg);
         assert_eq!(handle.count(), 1);
         assert_eq!(handle2.count(), 1);

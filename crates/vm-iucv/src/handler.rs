@@ -30,11 +30,7 @@ impl MachineContext {
     /// which are synchronous. Use [`try_send_smsg`](Self::try_send_smsg)
     /// from within callbacks instead.
     pub async fn send_smsg(&self, to: &MachineId, text: &str) -> Result<()> {
-        let msg = SmsgMessage {
-            from: self.machine_id.clone(),
-            to: to.clone(),
-            text: text.to_string(),
-        };
+        let msg = SmsgMessage::new(self.machine_id.clone(), to.clone(), text)?;
         self.outbox
             .send(msg)
             .await
@@ -47,11 +43,7 @@ impl MachineContext {
     /// best-effort: if the target machine logs off between enqueue and
     /// dispatch, the message is silently dropped by the router.
     pub fn try_send_smsg(&self, to: &MachineId, text: &str) -> Result<()> {
-        let msg = SmsgMessage {
-            from: self.machine_id.clone(),
-            to: to.clone(),
-            text: text.to_string(),
-        };
+        let msg = SmsgMessage::new(self.machine_id.clone(), to.clone(), text)?;
         self.outbox.try_send(msg).map_err(|e| match e {
             mpsc::error::TrySendError::Full(_) => IucvError::ChannelBusy("ROUTER".to_string()),
             mpsc::error::TrySendError::Closed(_) => IucvError::SupervisorDown,
@@ -81,5 +73,9 @@ pub trait MachineHandler: Send + 'static {
     fn on_smsg(&mut self, ctx: &MachineContext, msg: SmsgMessage);
 
     /// Called once when the machine is being logged off.
+    ///
+    /// `Smsg` signals that were in-flight in the router when `Logoff` was
+    /// enqueued may or may not be delivered before `on_logoff` is called,
+    /// depending on channel ordering.
     fn on_logoff(&mut self, _ctx: &MachineContext) {}
 }
