@@ -18,7 +18,12 @@ pub(crate) fn parse_delimited_pattern(args: &str, stage_name: &str) -> Result<De
         )));
     }
 
-    let delim = args.chars().next().unwrap();
+    let delim = args.chars().next().expect("args non-empty: checked above");
+    if delim.is_ascii_whitespace() {
+        return Err(PipelineError::InvalidArgument(format!(
+            "{stage_name}: delimiter must not be whitespace"
+        )));
+    }
     let rest = &args[delim.len_utf8()..];
 
     match rest.find(delim) {
@@ -70,6 +75,13 @@ mod tests {
         let err = parse_delimited_pattern("/hello", "locate").unwrap_err();
         assert_eq!(err.rc(), 24);
         assert!(err.to_string().contains("missing closing delimiter"));
+    }
+
+    #[test]
+    fn whitespace_delimiter_rejected() {
+        let err = parse_delimited_pattern("  /abc/", "locate").unwrap_err();
+        assert_eq!(err.rc(), 24);
+        assert!(err.to_string().contains("delimiter must not be whitespace"));
     }
 
     #[test]
