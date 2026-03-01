@@ -41,8 +41,8 @@ impl MachineContext {
 /// All callbacks are synchronous and run on the machine's Tokio task.
 /// A blocking callback prevents the machine from processing further signals
 /// (including `Logoff`) until it returns. Implementations should avoid
-/// long-running or blocking operations; use `try_send_smsg` (not the async
-/// `send_smsg`) to send messages from within callbacks.
+/// long-running or blocking operations; use
+/// [`MachineContext::try_send_smsg`] to send messages from within callbacks.
 pub trait MachineHandler: Send + 'static {
     /// Called once after the machine is IPL'd (booted).
     ///

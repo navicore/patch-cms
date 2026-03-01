@@ -5,6 +5,7 @@ use crate::message::SmsgMessage;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::task::JoinSet;
 
 /// Signal sent to a running machine task.
 enum MachineSignal {
@@ -35,23 +36,29 @@ pub struct Supervisor {
 }
 
 impl Drop for Supervisor {
+    /// Best-effort cleanup. `abort()` only schedules cancellation — it does
+    /// not synchronously release locks held by aborted tasks. If the router
+    /// task holds a read lock on `machines` at the instant `Drop` runs,
+    /// `try_write()` will fail and machine tasks will leak.
+    ///
+    /// **Always call [`shutdown().await`](Supervisor::shutdown) before dropping
+    /// the `Supervisor`** to guarantee clean teardown.
     fn drop(&mut self) {
         // 1. Drop the router sender so the router loop exits naturally.
-        //    Use try_lock to avoid panicking if already locked (e.g. during shutdown).
         if let Ok(mut guard) = self.router_tx.try_lock() {
             guard.take();
         }
-        // 2. Abort the router task first — this releases any read lock it may
-        //    hold on `machines`, ensuring try_write() below can succeed.
+        // 2. Abort the router task. Note: abort() is non-blocking — the task's
+        //    lock guard is released only after the scheduler polls and drops
+        //    the future, which may not happen before step 3.
         if let Ok(mut guard) = self.router_task.try_lock() {
             if let Some(handle) = guard.take() {
                 handle.abort();
             }
         }
-        // 3. Abort all machine tasks so they don't leak.
-        //    try_write() can fail if the router task (now aborted) held a read
-        //    lock at the instant Drop ran. Call shutdown().await before drop to
-        //    guarantee clean teardown.
+        // 3. Abort all machine tasks. try_write() may fail if the router task
+        //    still holds a read lock (abort is async). This is inherently
+        //    best-effort — use shutdown().await for guaranteed cleanup.
         match self.machines.try_write() {
             Ok(mut machines) => {
                 for (_key, entry) in machines.drain() {
@@ -69,6 +76,11 @@ impl Drop for Supervisor {
 }
 
 impl Default for Supervisor {
+    /// Creates a new `Supervisor` via [`Supervisor::new`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if called outside a Tokio runtime.
     fn default() -> Self {
         Self::new()
     }
@@ -96,10 +108,11 @@ impl Supervisor {
 
     /// IPL (boot) a machine with the given handler.
     pub async fn ipl(&self, id: &MachineId, handler: impl MachineHandler) -> Result<()> {
-        let router_tx = {
-            let guard = self.router_tx.lock().await;
-            guard.clone().ok_or(IucvError::SupervisorDown)?
-        };
+        // Hold router_tx lock across the entire operation so a concurrent
+        // shutdown() cannot complete between the router check and the machine
+        // insertion (which would create a zombie machine with a stale sender).
+        let guard = self.router_tx.lock().await;
+        let router_tx = guard.as_ref().ok_or(IucvError::SupervisorDown)?.clone();
 
         let mut machines = self.machines.write().await;
         if machines.contains_key(id) {
@@ -200,14 +213,13 @@ impl Supervisor {
 
     /// Shut down all machines and the router task.
     ///
-    /// Phase 1: sends logoff signals to all machines concurrently via
-    /// `try_send` — a machine with a full channel cannot delay others.
+    /// Phase 1: sends logoff signals to all machines via `try_send` and drops
+    /// all signal senders — a machine with a full channel cannot delay others.
+    /// Dropping the sender ensures the machine task exits via `recv() → None`
+    /// even if `try_send` failed (channel full).
     ///
-    /// Phase 2: drops all signal senders and joins all task handles.
-    /// Dropping the sender before awaiting ensures that even if `try_send`
-    /// failed (channel full), the machine exits via `recv() → None` rather
-    /// than deadlocking. If the Logoff signal was not enqueued, `on_logoff`
-    /// will not be called for that machine.
+    /// Phase 2: joins all task handles concurrently via `JoinSet` so that
+    /// shutdown latency is `O(max on_logoff time)` rather than `O(sum)`.
     pub async fn shutdown(&self) {
         // Drain all machine entries.
         let entries: Vec<(MachineId, MachineEntry)> = {
@@ -215,21 +227,21 @@ impl Supervisor {
             machines.drain().collect()
         };
 
-        // Phase 1: non-blocking logoff signals to all machines.
-        for (_key, entry) in &entries {
-            let _ = entry.signal_tx.try_send(MachineSignal::Logoff);
-        }
-
-        // Phase 2: drop senders and join tasks. Destructuring ensures
-        // signal_tx is dropped before awaiting task_handle, preventing
-        // deadlock when the Logoff signal was not enqueued (channel full).
+        // Phase 1: non-blocking logoff signals, then drop all senders.
+        let mut join_set = JoinSet::new();
         for (key, entry) in entries {
             let MachineEntry {
                 signal_tx,
                 task_handle,
             } = entry;
+            let _ = signal_tx.try_send(MachineSignal::Logoff);
             drop(signal_tx);
-            if let Err(e) = task_handle.await {
+            join_set.spawn(async move { (key, task_handle.await) });
+        }
+
+        // Phase 2: join all machine tasks concurrently.
+        while let Some(result) = join_set.join_next().await {
+            if let Ok((key, Err(e))) = result {
                 eprintln!("DMSIUC028W Machine {} panicked during shutdown: {}", key, e);
             }
         }
@@ -556,6 +568,101 @@ mod tests {
             called.load(Ordering::SeqCst),
             "on_logoff must be called during shutdown"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn smsg_channel_busy() {
+        // A handler that blocks in on_ipl, preventing the signal channel
+        // from draining. Uses std::sync::mpsc for cooperative release.
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+
+        struct IplBlocker(std::sync::mpsc::Receiver<()>);
+        impl MachineHandler for IplBlocker {
+            fn on_ipl(&mut self, _ctx: &MachineContext) {
+                let _ = self.0.recv(); // blocks until released
+            }
+            fn on_smsg(&mut self, _ctx: &MachineContext, _msg: SmsgMessage) {}
+        }
+
+        let sup = Supervisor::new();
+        let alice = MachineId::new("ALICE").unwrap();
+        let bob = MachineId::new("BOB").unwrap();
+
+        let (h_alice, _) = collector();
+        sup.ipl(&alice, h_alice).await.unwrap();
+        sup.ipl(&bob, IplBlocker(release_rx)).await.unwrap();
+
+        // Give bob's task time to reach on_ipl and block.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Fill all 64 slots in bob's signal channel.
+        for i in 0..64 {
+            sup.smsg(&alice, &bob, &format!("fill-{i}")).await.unwrap();
+        }
+
+        // The 65th message should get ChannelBusy (RC=20).
+        let err = sup.smsg(&alice, &bob, "overflow").await.unwrap_err();
+        assert_eq!(err.rc(), 20);
+
+        // Release on_ipl so shutdown can complete cleanly.
+        drop(release_tx);
+        sup.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn router_drops_to_full_channel() {
+        // Bob blocks in on_ipl so his signal channel fills up.
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+
+        struct IplBlocker(std::sync::mpsc::Receiver<()>);
+        impl MachineHandler for IplBlocker {
+            fn on_ipl(&mut self, _ctx: &MachineContext) {
+                let _ = self.0.recv();
+            }
+            fn on_smsg(&mut self, _ctx: &MachineContext, _msg: SmsgMessage) {}
+        }
+
+        // Alice sends messages to bob via the router during on_ipl.
+        struct Sender {
+            target: MachineId,
+        }
+        impl MachineHandler for Sender {
+            fn on_ipl(&mut self, ctx: &MachineContext) {
+                for i in 0..10 {
+                    let _ = ctx.try_send_smsg(&self.target, &format!("msg-{i}"));
+                }
+            }
+            fn on_smsg(&mut self, _ctx: &MachineContext, _msg: SmsgMessage) {}
+        }
+
+        let sup = Supervisor::new();
+        let alice = MachineId::new("ALICE").unwrap();
+        let bob = MachineId::new("BOB").unwrap();
+
+        sup.ipl(&bob, IplBlocker(release_rx)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Fill bob's 64-slot channel via the supervisor.
+        for i in 0..64 {
+            sup.smsg(&bob, &bob, &format!("fill-{i}")).await.unwrap();
+        }
+
+        // Alice sends via router — the router silently drops these since
+        // bob's channel is full. No panic or hang should occur.
+        sup.ipl(
+            &alice,
+            Sender {
+                target: bob.clone(),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Give the router time to attempt delivery.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        drop(release_tx);
+        sup.shutdown().await;
     }
 
     #[tokio::test]
