@@ -59,5 +59,8 @@ pub trait MachineHandler: Send + 'static {
     /// `Smsg` signals that were in-flight in the router when `Logoff` was
     /// enqueued may or may not be delivered before `on_logoff` is called,
     /// depending on channel ordering.
+    ///
+    /// **Not called if `on_ipl` or `on_smsg` panics** — the task unwinds
+    /// past this hook. Use RAII guards for guaranteed cleanup.
     fn on_logoff(&mut self, _ctx: &MachineContext) {}
 }

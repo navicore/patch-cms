@@ -127,10 +127,14 @@ impl Supervisor {
 
     /// Log off (shut down) a running machine.
     ///
-    /// The machine is first removed from the registry (preventing new messages
-    /// from being routed to it), then the `Logoff` signal is sent. Since no
-    /// new messages can arrive after removal, `send().await` is safe — the
-    /// channel can only drain, so it cannot deadlock.
+    /// The machine is removed from the registry, then the `Logoff` signal is
+    /// delivered via `try_send`. The signal sender is dropped immediately
+    /// after, ensuring the machine task exits even if the signal channel was
+    /// full (via `recv() → None`).
+    ///
+    /// **Note:** `task_handle.await` blocks until the machine task completes.
+    /// If a handler callback (`on_smsg`, `on_ipl`) blocks indefinitely, this
+    /// method will also block. Handlers must return promptly from callbacks.
     pub async fn logoff(&self, id: &MachineId) -> Result<()> {
         let entry = {
             let mut machines = self.machines.write().await;
@@ -139,13 +143,18 @@ impl Supervisor {
                 .ok_or_else(|| IucvError::AlreadyLoggedOff(id.as_str().to_string()))?
         };
 
-        // Machine is removed from the registry; the router will no longer
-        // route messages to its channel. send().await is safe — the channel
-        // can only drain from here.
-        let _ = entry.signal_tx.send(MachineSignal::Logoff).await;
-        // Wait for the machine task to complete so on_logoff() finishes.
-        entry
-            .task_handle
+        let MachineEntry {
+            signal_tx,
+            task_handle,
+        } = entry;
+
+        // try_send + drop: matching shutdown()'s pattern. The drop closes the
+        // channel, guaranteeing the task exits via recv() → None if the Logoff
+        // signal could not be enqueued.
+        let _ = signal_tx.try_send(MachineSignal::Logoff);
+        drop(signal_tx);
+
+        task_handle
             .await
             .map_err(|e| IucvError::MachinePanicked(format!("{e}")))?;
         Ok(())
@@ -242,7 +251,7 @@ impl Supervisor {
         // Phase 2: join all machine tasks concurrently.
         while let Some(result) = join_set.join_next().await {
             if let Ok((key, Err(e))) = result {
-                eprintln!("DMSIUC028W Machine {} panicked during shutdown: {}", key, e);
+                eprintln!("DMSIUC028E Machine {} panicked during shutdown: {}", key, e);
             }
         }
 
@@ -259,9 +268,12 @@ impl Supervisor {
 
 /// The machine task loop: calls lifecycle hooks and processes signals.
 ///
-/// `on_logoff` is always called before the task exits — whether the machine
-/// received an explicit `Logoff` signal or the channel closed (e.g. during
-/// `shutdown()` when `try_send` failed and the sender was dropped).
+/// `on_logoff` is called when the machine receives an explicit `Logoff`
+/// signal or the channel closes (e.g. during `shutdown()` when `try_send`
+/// failed and the sender was dropped). **However, if `on_ipl` or `on_smsg`
+/// panics, the task unwinds and `on_logoff` is NOT called.** Handlers that
+/// require guaranteed cleanup should use RAII guards rather than relying
+/// on `on_logoff`.
 ///
 /// Note: `Smsg` signals that were in-flight in the router when `Logoff` is
 /// enqueued may or may not be delivered, depending on channel ordering.
@@ -280,7 +292,8 @@ async fn run_machine(
         }
     }
 
-    // Always called: explicit Logoff signal or channel close.
+    // Called on normal exit (Logoff signal or channel close).
+    // NOT called if on_ipl or on_smsg panicked — the task unwinds past this point.
     handler.on_logoff(&ctx);
 }
 
@@ -291,6 +304,12 @@ async fn run_machine(
 /// stall delivery to all other machines (head-of-line blocking). Messages
 /// to a machine with a full inbox are silently dropped — consistent with
 /// fire-and-forget SMSG semantics.
+///
+/// **Performance note:** acquires a read lock on `machines` per message.
+/// Under high throughput this creates read-side contention that may delay
+/// `ipl()`/`logoff()` write-lock acquisitions (Tokio's `RwLock` is fair).
+/// Acceptable for moderate machine counts; a lock-free routing table could
+/// replace this if high message rates are needed.
 async fn router_loop(
     mut rx: mpsc::Receiver<SmsgMessage>,
     machines: Arc<RwLock<HashMap<MachineId, MachineEntry>>>,
@@ -517,6 +536,33 @@ mod tests {
 
         // The task panicked in on_ipl, so logoff should surface MachinePanicked.
         let err = sup.logoff(&id).await.unwrap_err();
+        assert_eq!(err.rc(), 28);
+
+        sup.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn smsg_panic_surfaces_on_logoff() {
+        struct PanicOnSmsg;
+        impl MachineHandler for PanicOnSmsg {
+            fn on_smsg(&mut self, _ctx: &MachineContext, _msg: SmsgMessage) {
+                panic!("intentional on_smsg panic");
+            }
+        }
+
+        let sup = Supervisor::new();
+        let alice = MachineId::new("ALICE").unwrap();
+        let bob = MachineId::new("BOB").unwrap();
+
+        let (h_alice, _) = collector();
+        sup.ipl(&alice, h_alice).await.unwrap();
+        sup.ipl(&bob, PanicOnSmsg).await.unwrap();
+
+        // Send a message to trigger the panic in on_smsg.
+        sup.smsg(&alice, &bob, "trigger panic").await.unwrap();
+
+        // logoff() joins the task handle — the panic surfaces as MachinePanicked.
+        let err = sup.logoff(&bob).await.unwrap_err();
         assert_eq!(err.rc(), 28);
 
         sup.shutdown().await;

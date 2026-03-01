@@ -29,19 +29,28 @@ pub fn collector() -> (CollectorHandler, CollectorHandle) {
 
 impl MachineHandler for CollectorHandler {
     fn on_smsg(&mut self, _ctx: &MachineContext, msg: SmsgMessage) {
-        self.messages.lock().unwrap().push(msg);
+        self.messages
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(msg);
     }
 }
 
 impl CollectorHandle {
     /// Return a snapshot of all collected messages.
     pub fn messages(&self) -> Vec<SmsgMessage> {
-        self.messages.lock().unwrap().clone()
+        self.messages
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Return the number of collected messages.
     pub fn count(&self) -> usize {
-        self.messages.lock().unwrap().len()
+        self.messages
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
     }
 }
 
