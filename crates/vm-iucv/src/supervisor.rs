@@ -112,6 +112,32 @@ impl Drop for Supervisor {
     }
 }
 
+/// Drop guard that removes a pending path entry if the `connect()` future is
+/// cancelled (dropped at an `.await` point). Call `defuse()` on the normal path
+/// to prevent cleanup.
+struct PendingPathGuard {
+    paths: Option<Arc<RwLock<HashMap<PathId, PathEntry>>>>,
+    path_id: PathId,
+}
+
+impl PendingPathGuard {
+    fn defuse(mut self) {
+        self.paths.take();
+    }
+}
+
+impl Drop for PendingPathGuard {
+    fn drop(&mut self) {
+        if let Some(paths) = self.paths.take() {
+            // Best-effort: try_write may fail if another task holds the lock,
+            // but that task will eventually clean up or the entry is inert.
+            if let Ok(mut guard) = paths.try_write() {
+                guard.remove(&self.path_id);
+            }
+        }
+    }
+}
+
 impl Default for Supervisor {
     /// Creates a new `Supervisor` via [`Supervisor::new`].
     ///
@@ -310,6 +336,14 @@ impl Supervisor {
             );
         }
 
+        // Drop guard: if this future is cancelled at any `.await` below,
+        // remove the pending path entry so it doesn't leak.
+        let paths_ref = Arc::clone(&self.paths);
+        let cancel_guard = PendingPathGuard {
+            paths: Some(paths_ref),
+            path_id,
+        };
+
         // Send ConnectionPending to the target with a oneshot for the response.
         let (accept_tx, accept_rx) = oneshot::channel();
         let signal = MachineSignal::ConnectionPending {
@@ -318,6 +352,7 @@ impl Supervisor {
             accept_tx,
         };
         if let Err(e) = target_tx.try_send(signal) {
+            cancel_guard.defuse();
             self.paths.write().await.remove(&path_id);
             return Err(match e {
                 mpsc::error::TrySendError::Full(_) => {
@@ -332,16 +367,33 @@ impl Supervisor {
         // Wait for the target's accept/refuse decision.
         let accepted = accept_rx.await.unwrap_or(false);
 
+        // Disarm the guard — we handle cleanup explicitly from here.
+        cancel_guard.defuse();
+
         if accepted {
-            // Transition to Established.
-            {
+            // Transition to Established, but only if the path wasn't
+            // severed by a concurrent logoff while we were waiting.
+            let established = {
                 let mut paths = self.paths.write().await;
                 if let Some(entry) = paths.get_mut(&path_id) {
-                    entry.state = PathState::Established;
+                    if entry.state == PathState::Severed {
+                        false
+                    } else {
+                        entry.state = PathState::Established;
+                        true
+                    }
+                } else {
+                    false
                 }
+            };
+
+            if !established {
+                // Peer logged off during negotiation.
+                self.paths.write().await.remove(&path_id);
+                return Err(IucvError::MachineNotFound(to.as_str().to_string()));
             }
 
-            // Notify both sides.
+            // Notify both sides (best-effort: may be dropped if channel full).
             let machines = self.machines.read().await;
             if let Some(entry) = machines.get(from) {
                 let _ = entry.signal_tx.try_send(MachineSignal::ConnectionComplete {
