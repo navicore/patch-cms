@@ -416,20 +416,26 @@ impl Supervisor {
     }
 
     /// Sever an existing path. Delivers `ConnectionSevered` to both sides.
+    ///
+    /// The path entry is removed after notifying both sides, so a subsequent
+    /// `sever()` on the same path returns `PathNotFound`.
     pub async fn sever(&self, path: PathId) -> Result<()> {
         let (machine_a, machine_b) = {
             let mut paths = self.paths.write().await;
             let entry = paths
-                .get_mut(&path)
+                .get(&path)
                 .ok_or(IucvError::PathNotFound(path.as_u32()))?;
             if entry.state == PathState::Severed {
+                // Remove stale entry and report it.
+                paths.remove(&path);
                 return Err(IucvError::PathAlreadySevered(path.as_u32()));
             }
-            entry.state = PathState::Severed;
-            (entry.machine_a.clone(), entry.machine_b.clone())
+            let ids = (entry.machine_a.clone(), entry.machine_b.clone());
+            paths.remove(&path);
+            ids
         };
 
-        // Notify both sides.
+        // Notify both sides (best-effort).
         let machines = self.machines.read().await;
         if let Some(entry) = machines.get(&machine_a) {
             let _ = entry.signal_tx.try_send(MachineSignal::ConnectionSevered {
@@ -458,28 +464,34 @@ impl Supervisor {
     }
 
     /// Sever all paths involving a machine (called during logoff).
+    ///
+    /// Removes path entries after notifying peers to prevent leaks.
     async fn sever_paths_for_machine(&self, id: &MachineId) {
         let to_sever: Vec<(PathId, MachineId)> = {
             let mut paths = self.paths.write().await;
-            let severed: Vec<(PathId, MachineId)> = paths
-                .iter_mut()
+            let involved: Vec<PathId> = paths
+                .iter()
                 .filter(|(_, e)| {
                     (e.machine_a == *id || e.machine_b == *id) && e.state != PathState::Severed
                 })
-                .map(|(pid, e)| {
-                    let peer = if e.machine_a == *id {
-                        e.machine_b.clone()
-                    } else {
-                        e.machine_a.clone()
-                    };
-                    e.state = PathState::Severed;
-                    (*pid, peer)
-                })
+                .map(|(pid, _)| *pid)
                 .collect();
+
+            let mut severed = Vec::with_capacity(involved.len());
+            for pid in involved {
+                if let Some(entry) = paths.remove(&pid) {
+                    let peer = if entry.machine_a == *id {
+                        entry.machine_b
+                    } else {
+                        entry.machine_a
+                    };
+                    severed.push((pid, peer));
+                }
+            }
             severed
         };
 
-        // Notify peers.
+        // Notify peers (best-effort).
         if !to_sever.is_empty() {
             let machines = self.machines.read().await;
             for (pid, peer) in &to_sever {
@@ -648,8 +660,9 @@ async fn path_cmd_loop(
             PathCommand::Sever { path, from } => {
                 let notify = {
                     let mut paths = paths.write().await;
-                    if let Some(entry) = paths.get_mut(&path) {
+                    if let Some(entry) = paths.get(&path) {
                         if entry.state == PathState::Severed {
+                            paths.remove(&path);
                             continue;
                         }
                         let peer = if entry.machine_a == from {
@@ -659,7 +672,7 @@ async fn path_cmd_loop(
                         } else {
                             continue;
                         };
-                        entry.state = PathState::Severed;
+                        paths.remove(&path);
                         Some((from, peer))
                     } else {
                         None
@@ -1428,9 +1441,9 @@ mod tests {
         let path = sup.connect(&alice, &bob).await.unwrap();
         sup.sever(path).await.unwrap();
 
-        // Second sever should fail.
+        // Second sever should fail — entry was removed on first sever.
         let err = sup.sever(path).await.unwrap_err();
-        assert_eq!(err.rc(), 44); // PathAlreadySevered
+        assert_eq!(err.rc(), 36); // PathNotFound (entry removed)
 
         sup.shutdown().await;
     }
@@ -1582,10 +1595,11 @@ mod tests {
         sup.smsg(&bob, &alice, &pending_path.as_u32().to_string())
             .await
             .unwrap();
-        // Give the path_cmd_loop time to process (and silently drop).
-        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Release Bob's acceptor so connect completes.
+        // The connect_task.await below provides synchronization — by the time
+        // it returns, Alice's SMSG handler has fired and the path_cmd_loop has
+        // had the opportunity to process (and silently drop) the send.
         drop(release_tx);
         let _path = connect_task.await.unwrap().unwrap();
 
@@ -1641,8 +1655,12 @@ mod tests {
         sup.smsg(&bob, &alice, &path.as_u32().to_string())
             .await
             .unwrap();
-        // Give the path_cmd_loop time to process (and silently drop).
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Send a "fence" SMSG to Bob (not a path ID, so no side effects).
+        // When Bob receives it, we know the runtime has processed all prior
+        // messages including Alice's SMSG and the resulting path_cmd_loop work.
+        let msg_count_before = bob_handle.count();
+        sup.smsg(&alice, &bob, "FENCE").await.unwrap();
+        wait_for(2000, || bob_handle.count() > msg_count_before).await;
 
         // Bob should NOT have received any new Data events.
         let count_after = bob_handle

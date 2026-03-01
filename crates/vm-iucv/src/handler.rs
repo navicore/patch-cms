@@ -120,9 +120,19 @@ pub trait MachineHandler: Send + 'static {
     }
 
     /// Called when a connection is fully established (both sides accepted).
+    ///
+    /// Delivery is best-effort via `try_send`: if the machine's signal channel
+    /// is full, this callback may be silently skipped. Handlers should not
+    /// assume that every `connect()` that succeeds will produce a matching
+    /// `on_connection_complete` callback.
     fn on_connection_complete(&mut self, _ctx: &MachineContext, _path: PathId, _peer: &MachineId) {}
 
     /// Called when a path is severed (by either side or by logoff).
+    ///
+    /// Delivery is best-effort via `try_send`: if the machine's signal channel
+    /// is full, this callback may be silently skipped. Handlers requiring
+    /// guaranteed cleanup should use RAII guards rather than relying on this
+    /// callback.
     fn on_connection_severed(&mut self, _ctx: &MachineContext, _path: PathId, _peer: &MachineId) {}
 
     /// Called when data arrives on an established path.
