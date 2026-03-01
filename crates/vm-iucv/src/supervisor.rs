@@ -163,7 +163,9 @@ impl Supervisor {
     /// `MachineNotFound` (RC=12). Callers should treat both as
     /// "target unavailable."
     pub async fn smsg(&self, from: &MachineId, to: &MachineId, text: &str) -> Result<()> {
-        let signal_tx = {
+        // Build the message and clone the sender under the read lock so
+        // the sender identity is validated while we know it is registered.
+        let (signal_tx, msg) = {
             let machines = self.machines.read().await;
             // Validate sender is registered.
             if !machines.contains_key(from) {
@@ -172,10 +174,9 @@ impl Supervisor {
             let entry = machines
                 .get(to)
                 .ok_or_else(|| IucvError::MachineNotFound(to.as_str().to_string()))?;
-            entry.signal_tx.clone()
+            let msg = SmsgMessage::new(from.clone(), to.clone(), text)?;
+            (entry.signal_tx.clone(), msg)
         }; // read guard dropped
-
-        let msg = SmsgMessage::new(from.clone(), to.clone(), text)?;
 
         signal_tx
             .try_send(MachineSignal::Smsg(msg))
@@ -252,6 +253,10 @@ impl Supervisor {
 
 /// The machine task loop: calls lifecycle hooks and processes signals.
 ///
+/// `on_logoff` is always called before the task exits — whether the machine
+/// received an explicit `Logoff` signal or the channel closed (e.g. during
+/// `shutdown()` when `try_send` failed and the sender was dropped).
+///
 /// Note: `Smsg` signals that were in-flight in the router when `Logoff` is
 /// enqueued may or may not be delivered, depending on channel ordering.
 /// The `MachineHandler` trait documents this race.
@@ -265,12 +270,12 @@ async fn run_machine(
     while let Some(signal) = signal_rx.recv().await {
         match signal {
             MachineSignal::Smsg(msg) => handler.on_smsg(&ctx, msg),
-            MachineSignal::Logoff => {
-                handler.on_logoff(&ctx);
-                break;
-            }
+            MachineSignal::Logoff => break,
         }
     }
+
+    // Always called: explicit Logoff signal or channel close.
+    handler.on_logoff(&ctx);
 }
 
 /// The router task: receives outbound messages from machine contexts and
@@ -522,6 +527,35 @@ mod tests {
 
         sup.shutdown().await;
         assert!(sup.query_names().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn shutdown_calls_on_logoff() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let called = Arc::new(AtomicBool::new(false));
+
+        struct TrackLogoff(Arc<AtomicBool>);
+        impl MachineHandler for TrackLogoff {
+            fn on_smsg(&mut self, _ctx: &MachineContext, _msg: SmsgMessage) {}
+            fn on_logoff(&mut self, _ctx: &MachineContext) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let sup = Supervisor::new();
+        sup.ipl(
+            &MachineId::new("A").unwrap(),
+            TrackLogoff(Arc::clone(&called)),
+        )
+        .await
+        .unwrap();
+
+        sup.shutdown().await;
+        assert!(
+            called.load(Ordering::SeqCst),
+            "on_logoff must be called during shutdown"
+        );
     }
 
     #[tokio::test]
