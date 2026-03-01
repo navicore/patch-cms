@@ -6,6 +6,7 @@ members = [
     "crates/cms-core",
     "crates/cms-spool",
     "crates/cms-pipelines",
+    "crates/vm-iucv",
 ]
 
 [workspace.package]
