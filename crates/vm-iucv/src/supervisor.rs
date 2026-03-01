@@ -37,7 +37,6 @@ enum MachineSignal {
 enum PathState {
     Pending,
     Established,
-    Severed,
 }
 
 /// Registry entry for an IUCV path.
@@ -129,10 +128,22 @@ impl PendingPathGuard {
 impl Drop for PendingPathGuard {
     fn drop(&mut self) {
         if let Some(paths) = self.paths.take() {
-            // Best-effort: try_write may fail if another task holds the lock,
-            // but that task will eventually clean up or the entry is inert.
-            if let Ok(mut guard) = paths.try_write() {
-                guard.remove(&self.path_id);
+            // Scope the try_write borrow so it's dropped before the else branch.
+            let removed = {
+                if let Ok(mut guard) = paths.try_write() {
+                    guard.remove(&self.path_id);
+                    true
+                } else {
+                    false
+                }
+            };
+            if !removed {
+                // Lock is contended — spawn a background task to clean up
+                // once the lock becomes available.
+                let id = self.path_id;
+                tokio::spawn(async move {
+                    paths.write().await.remove(&id);
+                });
             }
         }
     }
@@ -352,8 +363,7 @@ impl Supervisor {
             accept_tx,
         };
         if let Err(e) = target_tx.try_send(signal) {
-            cancel_guard.defuse();
-            self.paths.write().await.remove(&path_id);
+            // Guard drops here and cleans up the pending entry.
             return Err(match e {
                 mpsc::error::TrySendError::Full(_) => {
                     IucvError::ChannelBusy(to.as_str().to_string())
@@ -367,52 +377,55 @@ impl Supervisor {
         // Wait for the target's accept/refuse decision.
         let accepted = accept_rx.await.unwrap_or(false);
 
-        // Disarm the guard — we handle cleanup explicitly from here.
+        if !accepted {
+            // Guard drops here and cleans up the pending entry.
+            return Err(IucvError::ConnectionRefused(to.as_str().to_string()));
+        }
+
+        // Transition to Established. Re-check machine existence in the same
+        // critical section to close the TOCTOU window where logoff(to) could
+        // run between the initial existence check and this transition.
+        let established = {
+            let machines = self.machines.read().await;
+            let mut paths = self.paths.write().await;
+            if !machines.contains_key(to) {
+                // Target logged off during negotiation.
+                false
+            } else if let Some(entry) = paths.get_mut(&path_id) {
+                entry.state = PathState::Established;
+                true
+            } else {
+                // Entry removed by concurrent sever_paths_for_machine.
+                false
+            }
+        };
+
+        if !established {
+            // Guard drops here and cleans up any remaining entry.
+            return Err(IucvError::MachineNotFound(to.as_str().to_string()));
+        }
+
+        // Success — defuse the guard so the Established entry persists.
         cancel_guard.defuse();
 
-        if accepted {
-            // Transition to Established, but only if the path wasn't
-            // severed by a concurrent logoff while we were waiting.
-            let established = {
-                let mut paths = self.paths.write().await;
-                if let Some(entry) = paths.get_mut(&path_id) {
-                    if entry.state == PathState::Severed {
-                        false
-                    } else {
-                        entry.state = PathState::Established;
-                        true
-                    }
-                } else {
-                    false
-                }
-            };
-
-            if !established {
-                // Peer logged off during negotiation.
-                self.paths.write().await.remove(&path_id);
-                return Err(IucvError::MachineNotFound(to.as_str().to_string()));
-            }
-
-            // Notify both sides (best-effort: may be dropped if channel full).
-            let machines = self.machines.read().await;
-            if let Some(entry) = machines.get(from) {
-                let _ = entry.signal_tx.try_send(MachineSignal::ConnectionComplete {
-                    path: path_id,
-                    peer: to.clone(),
-                });
-            }
+        // Notify both sides (best-effort: may be dropped if channel full).
+        let machines = self.machines.read().await;
+        if let Some(entry) = machines.get(from) {
+            let _ = entry.signal_tx.try_send(MachineSignal::ConnectionComplete {
+                path: path_id,
+                peer: to.clone(),
+            });
+        }
+        if from != to {
             if let Some(entry) = machines.get(to) {
                 let _ = entry.signal_tx.try_send(MachineSignal::ConnectionComplete {
                     path: path_id,
                     peer: from.clone(),
                 });
             }
-
-            Ok(path_id)
-        } else {
-            self.paths.write().await.remove(&path_id);
-            Err(IucvError::ConnectionRefused(to.as_str().to_string()))
         }
+
+        Ok(path_id)
     }
 
     /// Sever an existing path. Delivers `ConnectionSevered` to both sides.
@@ -423,19 +436,12 @@ impl Supervisor {
         let (machine_a, machine_b) = {
             let mut paths = self.paths.write().await;
             let entry = paths
-                .get(&path)
+                .remove(&path)
                 .ok_or(IucvError::PathNotFound(path.as_u32()))?;
-            if entry.state == PathState::Severed {
-                // Remove stale entry and report it.
-                paths.remove(&path);
-                return Err(IucvError::PathAlreadySevered(path.as_u32()));
-            }
-            let ids = (entry.machine_a.clone(), entry.machine_b.clone());
-            paths.remove(&path);
-            ids
+            (entry.machine_a, entry.machine_b)
         };
 
-        // Notify both sides (best-effort).
+        // Notify both sides (best-effort). Skip duplicate for self-connections.
         let machines = self.machines.read().await;
         if let Some(entry) = machines.get(&machine_a) {
             let _ = entry.signal_tx.try_send(MachineSignal::ConnectionSevered {
@@ -443,11 +449,13 @@ impl Supervisor {
                 peer: machine_b.clone(),
             });
         }
-        if let Some(entry) = machines.get(&machine_b) {
-            let _ = entry.signal_tx.try_send(MachineSignal::ConnectionSevered {
-                path,
-                peer: machine_a.clone(),
-            });
+        if machine_a != machine_b {
+            if let Some(entry) = machines.get(&machine_b) {
+                let _ = entry.signal_tx.try_send(MachineSignal::ConnectionSevered {
+                    path,
+                    peer: machine_a.clone(),
+                });
+            }
         }
 
         Ok(())
@@ -456,11 +464,7 @@ impl Supervisor {
     /// Return all active paths (Pending or Established).
     pub async fn query_paths(&self) -> Vec<PathId> {
         let paths = self.paths.read().await;
-        paths
-            .values()
-            .filter(|e| e.state != PathState::Severed)
-            .map(|e| e.id)
-            .collect()
+        paths.keys().copied().collect()
     }
 
     /// Sever all paths involving a machine (called during logoff).
@@ -471,9 +475,7 @@ impl Supervisor {
             let mut paths = self.paths.write().await;
             let involved: Vec<PathId> = paths
                 .iter()
-                .filter(|(_, e)| {
-                    (e.machine_a == *id || e.machine_b == *id) && e.state != PathState::Severed
-                })
+                .filter(|(_, e)| e.machine_a == *id || e.machine_b == *id)
                 .map(|(pid, _)| *pid)
                 .collect();
 
@@ -519,6 +521,32 @@ impl Supervisor {
     /// Phase 2: joins all task handles concurrently via `JoinSet` so that
     /// shutdown latency is `O(max on_logoff time)` rather than `O(sum)`.
     pub async fn shutdown(&self) {
+        // Sever all paths before draining machines so that running machine
+        // tasks receive ConnectionSevered signals (consistent with logoff).
+        {
+            let machines = self.machines.read().await;
+            let mut paths = self.paths.write().await;
+            for entry in paths.values() {
+                // Notify machine_a.
+                if let Some(m) = machines.get(&entry.machine_a) {
+                    let _ = m.signal_tx.try_send(MachineSignal::ConnectionSevered {
+                        path: entry.id,
+                        peer: entry.machine_b.clone(),
+                    });
+                }
+                // Notify machine_b (skip duplicate for self-connections).
+                if entry.machine_a != entry.machine_b {
+                    if let Some(m) = machines.get(&entry.machine_b) {
+                        let _ = m.signal_tx.try_send(MachineSignal::ConnectionSevered {
+                            path: entry.id,
+                            peer: entry.machine_a.clone(),
+                        });
+                    }
+                }
+            }
+            paths.clear();
+        }
+
         // Acquire router_tx first (matching ipl() lock order), then machines.
         // Taking router_tx atomically with the drain prevents ipl() from
         // cloning a live sender while we are shutting down.
@@ -530,12 +558,6 @@ impl Supervisor {
             pcmd_guard.take();
             machines.drain().collect()
         };
-
-        // Sever all paths.
-        {
-            let mut paths = self.paths.write().await;
-            paths.clear();
-        }
 
         // Phase 1: non-blocking logoff signals, then drop all senders.
         let mut join_set = JoinSet::new();
@@ -660,19 +682,14 @@ async fn path_cmd_loop(
             PathCommand::Sever { path, from } => {
                 let notify = {
                     let mut paths = paths.write().await;
-                    if let Some(entry) = paths.get(&path) {
-                        if entry.state == PathState::Severed {
-                            paths.remove(&path);
-                            continue;
-                        }
+                    if let Some(entry) = paths.remove(&path) {
                         let peer = if entry.machine_a == from {
-                            entry.machine_b.clone()
+                            entry.machine_b
                         } else if entry.machine_b == from {
-                            entry.machine_a.clone()
+                            entry.machine_a
                         } else {
                             continue;
                         };
-                        paths.remove(&path);
                         Some((from, peer))
                     } else {
                         None
@@ -687,11 +704,14 @@ async fn path_cmd_loop(
                             peer: severer.clone(),
                         });
                     }
-                    if let Some(entry) = machines.get(&severer) {
-                        let _ = entry.signal_tx.try_send(MachineSignal::ConnectionSevered {
-                            path,
-                            peer: peer.clone(),
-                        });
+                    // Skip duplicate for self-connections.
+                    if severer != peer {
+                        if let Some(entry) = machines.get(&severer) {
+                            let _ = entry.signal_tx.try_send(MachineSignal::ConnectionSevered {
+                                path,
+                                peer: peer.clone(),
+                            });
+                        }
                     }
                 }
             }
@@ -1256,8 +1276,9 @@ mod tests {
         sup.ipl(&alice, h_alice).await.unwrap();
 
         let _path = sup.connect(&alice, &alice).await.unwrap();
-        // Alice should get Pending (as target) and Complete (as both sides).
+        // Alice should get Pending (as target) and one Complete (deduped).
         wait_for(2000, || alice_handle.path_event_count() >= 2).await;
+        assert_eq!(alice_handle.path_event_count(), 2);
 
         let paths = sup.query_paths().await;
         assert_eq!(paths.len(), 1);
@@ -1450,33 +1471,6 @@ mod tests {
 
     #[tokio::test]
     async fn send_data_both_directions() {
-        // A handler that echoes received IUCV data back to sender.
-        struct IucvEcho;
-        impl MachineHandler for IucvEcho {
-            fn on_smsg(&mut self, _ctx: &MachineContext, _msg: SmsgMessage) {}
-            fn on_iucv_data(&mut self, ctx: &MachineContext, path: PathId, data: IucvBuffer) {
-                let mut reply = b"ECHO:".to_vec();
-                reply.extend_from_slice(data.as_bytes());
-                let buf = IucvBuffer::new(reply).unwrap();
-                let _ = ctx.iucv_send(path, buf);
-            }
-        }
-
-        let sup = Supervisor::new();
-        let alice = MachineId::new("ALICE").unwrap();
-        let bob = MachineId::new("BOB").unwrap();
-
-        let (h_alice, alice_handle) = collector();
-        sup.ipl(&alice, h_alice).await.unwrap();
-        sup.ipl(&bob, IucvEcho).await.unwrap();
-
-        let _path = sup.connect(&alice, &bob).await.unwrap();
-        // Wait for establishment.
-        wait_for(2000, || alice_handle.path_event_count() >= 1).await;
-
-        sup.shutdown().await;
-
-        // Restart with purpose-built handlers for bidirectional test.
         let sup = Supervisor::new();
         struct SendOnConnect {
             data: Vec<u8>,

@@ -30,12 +30,7 @@ pub enum IucvError {
     /// Target refused the connection (RC=40)
     ConnectionRefused(String),
     /// Path exists but not yet accepted (RC=44).
-    /// Shares RC=44 with `PathAlreadySevered` — matches CP convention where
-    /// multiple distinct conditions share a return code.
     PathNotEstablished(u32),
-    /// Path was already torn down (RC=44).
-    /// Shares RC=44 with `PathNotEstablished` — see above.
-    PathAlreadySevered(u32),
 }
 
 impl fmt::Display for IucvError {
@@ -77,9 +72,6 @@ impl fmt::Display for IucvError {
             IucvError::PathNotEstablished(id) => {
                 write!(f, "DMSIUC044E Path not established - {}", id)
             }
-            IucvError::PathAlreadySevered(id) => {
-                write!(f, "DMSIUC044E Path already severed - {}", id)
-            }
         }
     }
 }
@@ -102,7 +94,6 @@ impl IucvError {
             IucvError::PathNotFound(_) => 36,
             IucvError::ConnectionRefused(_) => 40,
             IucvError::PathNotEstablished(_) => 44,
-            IucvError::PathAlreadySevered(_) => 44,
         }
     }
 }
@@ -198,13 +189,6 @@ mod tests {
     }
 
     #[test]
-    fn error_display_path_already_severed() {
-        let e = IucvError::PathAlreadySevered(7);
-        assert!(e.to_string().contains("7"));
-        assert_eq!(e.rc(), 44);
-    }
-
-    #[test]
     fn error_messages_have_ibm_prefix() {
         let errors: Vec<IucvError> = vec![
             IucvError::InvalidParameter("X".to_string()),
@@ -219,7 +203,6 @@ mod tests {
             IucvError::PathNotFound(1),
             IucvError::ConnectionRefused("X".to_string()),
             IucvError::PathNotEstablished(1),
-            IucvError::PathAlreadySevered(1),
         ];
         for e in &errors {
             let msg = e.to_string();
