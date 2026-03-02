@@ -354,7 +354,7 @@ impl Supervisor {
             let mut paths = self.paths.write().await;
             if paths.contains_key(&path_id) {
                 return Err(IucvError::InvalidParameter(
-                    "PathId space exhausted".to_string(),
+                    "PathId u32 counter wrapped; collision detected".to_string(),
                 ));
             }
             paths.insert(
@@ -571,29 +571,14 @@ impl Supervisor {
     /// shutdown latency is `O(max on_logoff time)` rather than `O(sum)`.
     pub async fn shutdown(&self) {
         self.drain_orphaned_paths().await;
-        // Sever all paths before draining machines so that running machine
-        // tasks receive ConnectionSevered signals (consistent with logoff).
+        // Clear all paths without sending ConnectionSevered. Since shutdown
+        // logs off every machine, the on_connection_severed contract says
+        // "not called on the machine that is logging off" — all machines are
+        // logging off, so none should receive ConnectionSevered. Handlers
+        // that need path-level cleanup should enumerate known paths in
+        // on_logoff (per the documented contract).
         {
-            let machines = self.machines.read().await;
             let mut paths = self.paths.write().await;
-            for (&pid, entry) in paths.iter() {
-                // Notify machine_a.
-                if let Some(m) = machines.get(&entry.machine_a) {
-                    let _ = m.signal_tx.try_send(MachineSignal::ConnectionSevered {
-                        path: pid,
-                        peer: entry.machine_b.clone(),
-                    });
-                }
-                // Notify machine_b (skip duplicate for self-connections).
-                if entry.machine_a != entry.machine_b {
-                    if let Some(m) = machines.get(&entry.machine_b) {
-                        let _ = m.signal_tx.try_send(MachineSignal::ConnectionSevered {
-                            path: pid,
-                            peer: entry.machine_a.clone(),
-                        });
-                    }
-                }
-            }
             paths.clear();
         }
 
@@ -1609,6 +1594,10 @@ mod tests {
         sup.shutdown().await;
     }
 
+    // multi_thread required: BlockingAcceptor::on_connection_pending blocks
+    // via std::sync::mpsc::recv. On the default single-threaded runtime this
+    // would deadlock because connect() awaits the oneshot on the same worker
+    // thread that the Bob task is blocking.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn send_on_pending_path() {
         // Bob blocks in on_connection_pending, keeping the path Pending,
@@ -1924,9 +1913,9 @@ mod tests {
         let bob = MachineId::new("BOB").unwrap();
         let carol = MachineId::new("CAROL").unwrap();
 
-        let (h_alice, _) = collector();
-        let (h_bob, _) = collector();
-        let (h_carol, _) = collector();
+        let (h_alice, alice_handle) = collector();
+        let (h_bob, bob_handle) = collector();
+        let (h_carol, carol_handle) = collector();
         sup.ipl(&alice, h_alice).await.unwrap();
         sup.ipl(&bob, h_bob).await.unwrap();
         sup.ipl(&carol, h_carol).await.unwrap();
@@ -1939,6 +1928,24 @@ mod tests {
         sup.shutdown().await;
 
         assert!(sup.query_paths().await.is_empty());
+
+        // No machine should have received ConnectionSevered from shutdown.
+        // The documented contract says on_connection_severed is "not called
+        // on the machine that is logging off" — and shutdown logs off all.
+        for (name, handle) in [
+            ("ALICE", &alice_handle),
+            ("BOB", &bob_handle),
+            ("CAROL", &carol_handle),
+        ] {
+            assert!(
+                !handle
+                    .path_events()
+                    .iter()
+                    .any(|e| matches!(e, crate::collector::PathEvent::Severed { .. })),
+                "{} should not receive ConnectionSevered during shutdown",
+                name
+            );
+        }
     }
 
     #[tokio::test]

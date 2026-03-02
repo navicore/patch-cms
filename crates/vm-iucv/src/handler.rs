@@ -119,6 +119,13 @@ pub trait MachineHandler: Send + 'static {
 
     /// Called when another machine requests a connection.
     /// Return true to accept, false to refuse.
+    ///
+    /// **Warning:** This callback runs synchronously on the machine's Tokio
+    /// task. Blocking here (e.g., `std::sync::mpsc::Receiver::recv`,
+    /// `thread::sleep`, synchronous I/O) stalls the entire machine — no
+    /// further signals are processed until it returns. On a single-threaded
+    /// runtime, blocking will also deadlock the `connect()` caller since both
+    /// share the same worker thread.
     fn on_connection_pending(
         &mut self,
         _ctx: &MachineContext,
