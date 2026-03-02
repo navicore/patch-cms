@@ -385,24 +385,27 @@ impl Supervisor {
         // Transition to Established. Re-check machine existence in the same
         // critical section to close the TOCTOU window where logoff(to) could
         // run between the initial existence check and this transition.
-        let established = {
+        let establish_err = {
             let machines = self.machines.read().await;
             let mut paths = self.paths.write().await;
             if !machines.contains_key(to) {
                 // Target logged off during negotiation.
-                false
+                Some(IucvError::MachineNotFound(to.as_str().to_string()))
             } else if let Some(entry) = paths.get_mut(&path_id) {
                 entry.state = PathState::Established;
-                true
+                None // success
+            } else if !machines.contains_key(from) {
+                // Initiator logged off — sever_paths_for_machine(from) removed the entry.
+                Some(IucvError::MachineNotFound(from.as_str().to_string()))
             } else {
-                // Entry removed by concurrent sever_paths_for_machine.
-                false
+                // Entry removed by some other concurrent operation.
+                Some(IucvError::PathNotFound(path_id.as_u32()))
             }
         };
 
-        if !established {
+        if let Some(err) = establish_err {
             // Guard drops here and cleans up any remaining entry.
-            return Err(IucvError::MachineNotFound(to.as_str().to_string()));
+            return Err(err);
         }
 
         // Success — defuse the guard so the Established entry persists.
@@ -682,14 +685,15 @@ async fn path_cmd_loop(
             PathCommand::Sever { path, from } => {
                 let notify = {
                     let mut paths = paths.write().await;
-                    if let Some(entry) = paths.remove(&path) {
+                    if let Some(entry) = paths.get(&path) {
                         let peer = if entry.machine_a == from {
-                            entry.machine_b
+                            entry.machine_b.clone()
                         } else if entry.machine_b == from {
-                            entry.machine_a
+                            entry.machine_a.clone()
                         } else {
-                            continue;
+                            continue; // not a party — entry stays in map
                         };
+                        paths.remove(&path);
                         Some((from, peer))
                     } else {
                         None
@@ -1471,11 +1475,12 @@ mod tests {
 
     #[tokio::test]
     async fn send_data_both_directions() {
-        let sup = Supervisor::new();
-        struct SendOnConnect {
-            data: Vec<u8>,
+        // Handler that sends a payload on connect and records received data.
+        struct SendAndCollect {
+            outgoing: Vec<u8>,
+            received: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
         }
-        impl MachineHandler for SendOnConnect {
+        impl MachineHandler for SendAndCollect {
             fn on_smsg(&mut self, _ctx: &MachineContext, _msg: SmsgMessage) {}
             fn on_connection_complete(
                 &mut self,
@@ -1483,44 +1488,67 @@ mod tests {
                 path: PathId,
                 _peer: &MachineId,
             ) {
-                let buf = IucvBuffer::new(self.data.clone()).unwrap();
+                let buf = IucvBuffer::new(self.outgoing.clone()).unwrap();
                 let _ = ctx.iucv_send(path, buf);
+            }
+            fn on_iucv_data(&mut self, _ctx: &MachineContext, _path: PathId, data: IucvBuffer) {
+                self.received
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(data.as_bytes().to_vec());
             }
         }
 
+        let alice_received: Arc<std::sync::Mutex<Vec<Vec<u8>>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let bob_received: Arc<std::sync::Mutex<Vec<Vec<u8>>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let sup = Supervisor::new();
         let alice = MachineId::new("ALICE").unwrap();
         let bob = MachineId::new("BOB").unwrap();
 
-        // Alice sends "HELLO" on connect, Bob echoes it back.
         sup.ipl(
             &alice,
-            SendOnConnect {
-                data: b"HELLO".to_vec(),
+            SendAndCollect {
+                outgoing: b"FROM_A".to_vec(),
+                received: Arc::clone(&alice_received),
             },
         )
         .await
         .unwrap();
-        let (h_bob, bob_handle) = collector();
-        sup.ipl(&bob, h_bob).await.unwrap();
+        sup.ipl(
+            &bob,
+            SendAndCollect {
+                outgoing: b"FROM_B".to_vec(),
+                received: Arc::clone(&bob_received),
+            },
+        )
+        .await
+        .unwrap();
 
         let _path = sup.connect(&alice, &bob).await.unwrap();
 
-        // Bob should receive IUCV data from Alice.
+        // Both sides should receive data from the other.
         wait_for(2000, || {
-            bob_handle
-                .path_events()
-                .iter()
-                .any(|e| matches!(e, crate::collector::PathEvent::Data { .. }))
+            !alice_received
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty()
+                && !bob_received
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_empty()
         })
         .await;
 
-        let bob_events = bob_handle.path_events();
-        let data_event = bob_events
-            .iter()
-            .find(|e| matches!(e, crate::collector::PathEvent::Data { .. }));
-        assert!(data_event.is_some());
-        if let Some(crate::collector::PathEvent::Data { data, .. }) = data_event {
-            assert_eq!(data.as_bytes(), b"HELLO");
+        {
+            let a_data = alice_received.lock().unwrap_or_else(|e| e.into_inner());
+            assert_eq!(a_data[0], b"FROM_B");
+        }
+        {
+            let b_data = bob_received.lock().unwrap_or_else(|e| e.into_inner());
+            assert_eq!(b_data[0], b"FROM_A");
         }
 
         sup.shutdown().await;

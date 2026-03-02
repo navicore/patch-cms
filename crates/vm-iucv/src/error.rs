@@ -29,8 +29,6 @@ pub enum IucvError {
     PathNotFound(u32),
     /// Target refused the connection (RC=40)
     ConnectionRefused(String),
-    /// Path exists but not yet accepted (RC=44).
-    PathNotEstablished(u32),
 }
 
 impl fmt::Display for IucvError {
@@ -69,9 +67,6 @@ impl fmt::Display for IucvError {
             IucvError::ConnectionRefused(s) => {
                 write!(f, "DMSIUC040E Connection refused - {}", s)
             }
-            IucvError::PathNotEstablished(id) => {
-                write!(f, "DMSIUC044E Path not established - {}", id)
-            }
         }
     }
 }
@@ -93,7 +88,6 @@ impl IucvError {
             IucvError::SupervisorDown => 32,
             IucvError::PathNotFound(_) => 36,
             IucvError::ConnectionRefused(_) => 40,
-            IucvError::PathNotEstablished(_) => 44,
         }
     }
 }
@@ -182,13 +176,6 @@ mod tests {
     }
 
     #[test]
-    fn error_display_path_not_established() {
-        let e = IucvError::PathNotEstablished(7);
-        assert!(e.to_string().contains("7"));
-        assert_eq!(e.rc(), 44);
-    }
-
-    #[test]
     fn error_messages_have_ibm_prefix() {
         let errors: Vec<IucvError> = vec![
             IucvError::InvalidParameter("X".to_string()),
@@ -202,7 +189,6 @@ mod tests {
             IucvError::SupervisorDown,
             IucvError::PathNotFound(1),
             IucvError::ConnectionRefused("X".to_string()),
-            IucvError::PathNotEstablished(1),
         ];
         for e in &errors {
             let msg = e.to_string();
