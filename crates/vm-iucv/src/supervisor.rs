@@ -136,9 +136,10 @@ impl Drop for PendingPathGuard {
             } else {
                 // Lock is contended — enqueue for deferred cleanup.
                 // Drained at the next sever/query_paths/shutdown call.
-                if let Ok(mut orphaned) = self.orphaned.lock() {
-                    orphaned.push(self.path_id);
-                }
+                self.orphaned
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(self.path_id);
             }
         }
     }
@@ -347,9 +348,15 @@ impl Supervisor {
         };
 
         // Generate a new PathId and create the pending entry.
+        // Check for collision in case the u32 counter has wrapped.
         let path_id = PathId(self.next_path_id.fetch_add(1, Ordering::Relaxed));
         {
             let mut paths = self.paths.write().await;
+            if paths.contains_key(&path_id) {
+                return Err(IucvError::InvalidParameter(
+                    "PathId space exhausted".to_string(),
+                ));
+            }
             paths.insert(
                 path_id,
                 PathEntry {
@@ -389,7 +396,11 @@ impl Supervisor {
         }
 
         // Wait for the target's accept/refuse decision.
-        let accepted = accept_rx.await.unwrap_or(false);
+        // If the oneshot is dropped (target logged off or panicked), treat
+        // as delivery failure rather than masking it as ConnectionRefused.
+        let accepted = accept_rx
+            .await
+            .map_err(|_| IucvError::DeliveryFailed(to.as_str().to_string()))?;
 
         if !accepted {
             // Guard drops here and cleans up the pending entry.
@@ -452,37 +463,45 @@ impl Supervisor {
         Ok(path_id)
     }
 
-    /// Sever an existing path. Delivers `ConnectionSevered` to both sides.
+    /// Sever an existing path. Delivers `ConnectionSevered` to the peer.
     ///
-    /// The path entry is removed after notifying both sides, so a subsequent
-    /// `sever()` on the same path returns `PathNotFound`.
+    /// Only the passive side receives `on_connection_severed`; the severing
+    /// machine (`from`) gets `Ok(())` with no callback, matching real IUCV
+    /// SEVER semantics. For self-connections (`from` is both sides), no
+    /// callback is delivered.
+    ///
+    /// The path entry is removed, so a subsequent `sever()` on the same path
+    /// returns `PathNotFound`.
     ///
     /// **Note:** This method returns `PathNotFound` (RC=36) for both paths that
     /// never existed and paths that were already severed. Callers that need to
     /// distinguish these cases must track path lifecycle externally.
-    pub async fn sever(&self, path: PathId) -> Result<()> {
+    pub async fn sever(&self, path: PathId, from: &MachineId) -> Result<()> {
         self.drain_orphaned_paths().await;
-        let (machine_a, machine_b) = {
+        let peer = {
             let mut paths = self.paths.write().await;
             let entry = paths
-                .remove(&path)
+                .get(&path)
                 .ok_or(IucvError::PathNotFound(path.as_u32()))?;
-            (entry.machine_a, entry.machine_b)
+            let peer = if entry.machine_a == *from {
+                entry.machine_b.clone()
+            } else if entry.machine_b == *from {
+                entry.machine_a.clone()
+            } else {
+                return Err(IucvError::PathNotFound(path.as_u32()));
+            };
+            paths.remove(&path);
+            peer
         };
 
-        // Notify both sides (best-effort). Skip duplicate for self-connections.
-        let machines = self.machines.read().await;
-        if let Some(entry) = machines.get(&machine_a) {
-            let _ = entry.signal_tx.try_send(MachineSignal::ConnectionSevered {
-                path,
-                peer: machine_b.clone(),
-            });
-        }
-        if machine_a != machine_b {
-            if let Some(entry) = machines.get(&machine_b) {
+        // Notify only the peer (severing machine gets Ok, no callback).
+        // For self-connections (from == peer), no notification is sent.
+        if *from != peer {
+            let machines = self.machines.read().await;
+            if let Some(entry) = machines.get(&peer) {
                 let _ = entry.signal_tx.try_send(MachineSignal::ConnectionSevered {
                     path,
-                    peer: machine_a.clone(),
+                    peer: from.clone(),
                 });
             }
         }
@@ -729,19 +748,15 @@ async fn path_cmd_loop(
                 };
 
                 if let Some((severer, peer)) = notify {
-                    let machines = machines.read().await;
-                    if let Some(entry) = machines.get(&peer) {
-                        let _ = entry.signal_tx.try_send(MachineSignal::ConnectionSevered {
-                            path,
-                            peer: severer.clone(),
-                        });
-                    }
-                    // Skip duplicate for self-connections.
+                    // Only notify the peer — the severing machine gets no
+                    // callback, matching IUCV SEVER semantics and logoff.
+                    // For self-connections (severer == peer), no notification.
                     if severer != peer {
-                        if let Some(entry) = machines.get(&severer) {
+                        let machines = machines.read().await;
+                        if let Some(entry) = machines.get(&peer) {
                             let _ = entry.signal_tx.try_send(MachineSignal::ConnectionSevered {
                                 path,
-                                peer: peer.clone(),
+                                peer: severer.clone(),
                             });
                         }
                     }
@@ -1424,20 +1439,26 @@ mod tests {
         })
         .await;
 
-        sup.sever(path).await.unwrap();
+        sup.sever(path, &alice).await.unwrap();
 
-        // Both sides should receive ConnectionSevered.
+        // Only the peer (Bob) should receive ConnectionSevered — Alice
+        // (the severer) gets Ok with no callback, matching IUCV SEVER semantics.
         wait_for(2000, || {
-            alice_handle
+            bob_handle
                 .path_events()
                 .iter()
                 .any(|e| matches!(e, crate::collector::PathEvent::Severed { .. }))
-                && bob_handle
-                    .path_events()
-                    .iter()
-                    .any(|e| matches!(e, crate::collector::PathEvent::Severed { .. }))
         })
         .await;
+
+        // Alice should NOT have received a Severed event.
+        assert!(
+            !alice_handle
+                .path_events()
+                .iter()
+                .any(|e| matches!(e, crate::collector::PathEvent::Severed { .. })),
+            "Severing machine should not receive ConnectionSevered"
+        );
 
         sup.shutdown().await;
     }
@@ -1456,8 +1477,8 @@ mod tests {
         let path = sup.connect(&alice, &bob).await.unwrap();
         wait_for(2000, || bob_handle.path_event_count() >= 2).await;
 
-        // Target severs.
-        sup.sever(path).await.unwrap();
+        // Target severs — only Alice (the peer) should get notified.
+        sup.sever(path, &bob).await.unwrap();
 
         wait_for(2000, || {
             alice_handle
@@ -1474,7 +1495,8 @@ mod tests {
     async fn sever_unknown_path() {
         let sup = Supervisor::new();
 
-        let err = sup.sever(PathId(999)).await.unwrap_err();
+        let nobody = MachineId::new("NOBODY").unwrap();
+        let err = sup.sever(PathId(999), &nobody).await.unwrap_err();
         assert_eq!(err.rc(), 36); // PathNotFound
 
         sup.shutdown().await;
@@ -1492,10 +1514,10 @@ mod tests {
         sup.ipl(&bob, h_bob).await.unwrap();
 
         let path = sup.connect(&alice, &bob).await.unwrap();
-        sup.sever(path).await.unwrap();
+        sup.sever(path, &alice).await.unwrap();
 
         // Second sever should fail — entry was removed on first sever.
-        let err = sup.sever(path).await.unwrap_err();
+        let err = sup.sever(path, &alice).await.unwrap_err();
         assert_eq!(err.rc(), 36); // PathNotFound (entry removed)
 
         sup.shutdown().await;
@@ -1721,8 +1743,8 @@ mod tests {
         let path = sup.connect(&alice, &bob).await.unwrap();
         wait_for(2000, || bob_handle.path_event_count() >= 2).await;
 
-        // Sever the path.
-        sup.sever(path).await.unwrap();
+        // Sever the path (Alice severs; Bob gets notified).
+        sup.sever(path, &alice).await.unwrap();
         wait_for(2000, || {
             bob_handle
                 .path_events()
@@ -2013,7 +2035,7 @@ mod tests {
         assert_eq!(sup.query_paths().await.len(), 2);
 
         // Sever one path.
-        sup.sever(p1).await.unwrap();
+        sup.sever(p1, &alice).await.unwrap();
 
         let paths = sup.query_paths().await;
         assert_eq!(paths.len(), 1);

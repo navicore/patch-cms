@@ -137,8 +137,8 @@ mod tests {
     use crate::handler::PathCommand;
 
     fn test_ctx(name: &str) -> MachineContext {
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        let (pcmd_tx, _pcmd_rx) = tokio::sync::mpsc::channel::<PathCommand>(1);
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let (pcmd_tx, _pcmd_rx) = tokio::sync::mpsc::channel::<PathCommand>(16);
         MachineContext::new(MachineId::new(name).unwrap(), tx, pcmd_tx)
     }
 
