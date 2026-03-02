@@ -133,6 +133,11 @@ pub trait MachineHandler: Send + 'static {
     /// is full, this callback may be silently skipped. Handlers requiring
     /// guaranteed cleanup should use RAII guards rather than relying on this
     /// callback.
+    ///
+    /// **Not called on the machine that is logging off.** When a machine logs
+    /// off, only its peers receive `on_connection_severed`; the logging-off
+    /// machine receives `on_logoff` instead. Handlers that perform path-level
+    /// cleanup should enumerate known paths in `on_logoff`.
     fn on_connection_severed(&mut self, _ctx: &MachineContext, _path: PathId, _peer: &MachineId) {}
 
     /// Called when data arrives on an established path.

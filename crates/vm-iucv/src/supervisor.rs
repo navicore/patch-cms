@@ -41,7 +41,6 @@ enum PathState {
 
 /// Registry entry for an IUCV path.
 struct PathEntry {
-    id: PathId,
     machine_a: MachineId,
     machine_b: MachineId,
     state: PathState,
@@ -67,6 +66,9 @@ pub struct Supervisor {
     machines: Arc<RwLock<HashMap<MachineId, MachineEntry>>>,
     paths: Arc<RwLock<HashMap<PathId, PathEntry>>>,
     next_path_id: Arc<AtomicU32>,
+    /// Path IDs orphaned by cancelled `connect()` futures when the paths lock
+    /// was contended. Drained at the next `sever()`/`query_paths()`/`shutdown()`.
+    orphaned_paths: Arc<std::sync::Mutex<Vec<PathId>>>,
     router_tx: Mutex<Option<mpsc::Sender<SmsgMessage>>>,
     path_cmd_tx: Mutex<Option<mpsc::Sender<PathCommand>>>,
     router_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -116,6 +118,7 @@ impl Drop for Supervisor {
 /// to prevent cleanup.
 struct PendingPathGuard {
     paths: Option<Arc<RwLock<HashMap<PathId, PathEntry>>>>,
+    orphaned: Arc<std::sync::Mutex<Vec<PathId>>>,
     path_id: PathId,
 }
 
@@ -128,22 +131,14 @@ impl PendingPathGuard {
 impl Drop for PendingPathGuard {
     fn drop(&mut self) {
         if let Some(paths) = self.paths.take() {
-            // Scope the try_write borrow so it's dropped before the else branch.
-            let removed = {
-                if let Ok(mut guard) = paths.try_write() {
-                    guard.remove(&self.path_id);
-                    true
-                } else {
-                    false
+            if let Ok(mut guard) = paths.try_write() {
+                guard.remove(&self.path_id);
+            } else {
+                // Lock is contended — enqueue for deferred cleanup.
+                // Drained at the next sever/query_paths/shutdown call.
+                if let Ok(mut orphaned) = self.orphaned.lock() {
+                    orphaned.push(self.path_id);
                 }
-            };
-            if !removed {
-                // Lock is contended — spawn a background task to clean up
-                // once the lock becomes available.
-                let id = self.path_id;
-                tokio::spawn(async move {
-                    paths.write().await.remove(&id);
-                });
             }
         }
     }
@@ -184,10 +179,28 @@ impl Supervisor {
             machines,
             paths,
             next_path_id,
+            orphaned_paths: Arc::new(std::sync::Mutex::new(Vec::new())),
             router_tx: Mutex::new(Some(router_tx)),
             path_cmd_tx: Mutex::new(Some(path_cmd_tx)),
             router_task: Mutex::new(Some(router_handle)),
             path_cmd_task: Mutex::new(Some(path_cmd_handle)),
+        }
+    }
+
+    /// Remove any path entries orphaned by cancelled `connect()` futures.
+    async fn drain_orphaned_paths(&self) {
+        let orphaned: Vec<PathId> = {
+            let mut guard = self
+                .orphaned_paths
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut *guard)
+        };
+        if !orphaned.is_empty() {
+            let mut paths = self.paths.write().await;
+            for id in orphaned {
+                paths.remove(&id);
+            }
         }
     }
 
@@ -320,6 +333,7 @@ impl Supervisor {
     /// If accepted, both sides receive `on_connection_complete`. If refused,
     /// returns `ConnectionRefused`.
     pub async fn connect(&self, from: &MachineId, to: &MachineId) -> Result<PathId> {
+        self.drain_orphaned_paths().await;
         // Validate both machines exist and get target's signal sender.
         let target_tx = {
             let machines = self.machines.read().await;
@@ -339,7 +353,6 @@ impl Supervisor {
             paths.insert(
                 path_id,
                 PathEntry {
-                    id: path_id,
                     machine_a: from.clone(),
                     machine_b: to.clone(),
                     state: PathState::Pending,
@@ -352,6 +365,7 @@ impl Supervisor {
         let paths_ref = Arc::clone(&self.paths);
         let cancel_guard = PendingPathGuard {
             paths: Some(paths_ref),
+            orphaned: Arc::clone(&self.orphaned_paths),
             path_id,
         };
 
@@ -392,8 +406,14 @@ impl Supervisor {
                 // Target logged off during negotiation.
                 Some(IucvError::MachineNotFound(to.as_str().to_string()))
             } else if let Some(entry) = paths.get_mut(&path_id) {
-                entry.state = PathState::Established;
-                None // success
+                if !machines.contains_key(from) {
+                    // Initiator logged off; sever_paths_for_machine(from) is
+                    // blocked behind our paths.write() — don't establish.
+                    Some(IucvError::MachineNotFound(from.as_str().to_string()))
+                } else {
+                    entry.state = PathState::Established;
+                    None // success
+                }
             } else if !machines.contains_key(from) {
                 // Initiator logged off — sever_paths_for_machine(from) removed the entry.
                 Some(IucvError::MachineNotFound(from.as_str().to_string()))
@@ -436,6 +456,7 @@ impl Supervisor {
     /// The path entry is removed after notifying both sides, so a subsequent
     /// `sever()` on the same path returns `PathNotFound`.
     pub async fn sever(&self, path: PathId) -> Result<()> {
+        self.drain_orphaned_paths().await;
         let (machine_a, machine_b) = {
             let mut paths = self.paths.write().await;
             let entry = paths
@@ -466,6 +487,7 @@ impl Supervisor {
 
     /// Return all active paths (Pending or Established).
     pub async fn query_paths(&self) -> Vec<PathId> {
+        self.drain_orphaned_paths().await;
         let paths = self.paths.read().await;
         paths.keys().copied().collect()
     }
@@ -524,16 +546,17 @@ impl Supervisor {
     /// Phase 2: joins all task handles concurrently via `JoinSet` so that
     /// shutdown latency is `O(max on_logoff time)` rather than `O(sum)`.
     pub async fn shutdown(&self) {
+        self.drain_orphaned_paths().await;
         // Sever all paths before draining machines so that running machine
         // tasks receive ConnectionSevered signals (consistent with logoff).
         {
             let machines = self.machines.read().await;
             let mut paths = self.paths.write().await;
-            for entry in paths.values() {
+            for (&pid, entry) in paths.iter() {
                 // Notify machine_a.
                 if let Some(m) = machines.get(&entry.machine_a) {
                     let _ = m.signal_tx.try_send(MachineSignal::ConnectionSevered {
-                        path: entry.id,
+                        path: pid,
                         peer: entry.machine_b.clone(),
                     });
                 }
@@ -541,7 +564,7 @@ impl Supervisor {
                 if entry.machine_a != entry.machine_b {
                     if let Some(m) = machines.get(&entry.machine_b) {
                         let _ = m.signal_tx.try_send(MachineSignal::ConnectionSevered {
-                            path: entry.id,
+                            path: pid,
                             peer: entry.machine_a.clone(),
                         });
                     }
@@ -1556,13 +1579,17 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn send_on_pending_path() {
-        // Bob blocks in on_connection_pending, keeping the path Pending.
+        // Bob blocks in on_connection_pending, keeping the path Pending,
+        // and records all IUCV data events for later assertion.
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<PathId>();
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let bob_data_count: Arc<std::sync::atomic::AtomicUsize> =
+            Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         struct BlockingAcceptor {
             ready: std::sync::mpsc::Sender<PathId>,
             release: std::sync::mpsc::Receiver<()>,
+            data_count: Arc<std::sync::atomic::AtomicUsize>,
         }
         impl MachineHandler for BlockingAcceptor {
             fn on_smsg(&mut self, _ctx: &MachineContext, _msg: SmsgMessage) {}
@@ -1575,6 +1602,10 @@ mod tests {
                 let _ = self.ready.send(path);
                 let _ = self.release.recv();
                 true
+            }
+            fn on_iucv_data(&mut self, _ctx: &MachineContext, _path: PathId, _data: IucvBuffer) {
+                self.data_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
 
@@ -1593,12 +1624,14 @@ mod tests {
         let alice = MachineId::new("ALICE").unwrap();
         let bob = MachineId::new("BOB").unwrap();
 
+        let bob_data = Arc::clone(&bob_data_count);
         sup.ipl(&alice, SmsgTriggeredSend).await.unwrap();
         sup.ipl(
             &bob,
             BlockingAcceptor {
                 ready: ready_tx,
                 release: release_rx,
+                data_count: bob_data,
             },
         )
         .await
@@ -1619,17 +1652,24 @@ mod tests {
             .unwrap();
 
         // Release Bob's acceptor so connect completes.
-        // The connect_task.await below provides synchronization — by the time
-        // it returns, Alice's SMSG handler has fired and the path_cmd_loop has
-        // had the opportunity to process (and silently drop) the send.
         drop(release_tx);
         let _path = connect_task.await.unwrap().unwrap();
 
-        // Bob should have received Pending + Complete events, but NO Data event
-        // (the send while pending should have been silently dropped).
-        // Note: Bob's handler is BlockingAcceptor, not a collector. We can't
-        // inspect Bob's events. But we can verify via the path_cmd_loop behavior.
-        // The key assertion is that this test doesn't hang or panic.
+        // Send a fence SMSG to Bob to ensure the path_cmd_loop has processed
+        // (and silently dropped) Alice's pending-path send.
+        sup.smsg(&alice, &bob, "FENCE").await.unwrap();
+        // Use a short yield loop — Bob processes SMSG inline on his task.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        // Bob should NOT have received any Data events — the send on a
+        // pending path must be silently dropped by path_cmd_loop.
+        assert_eq!(
+            bob_data_count.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "Data should not be delivered on a Pending path"
+        );
 
         sup.shutdown().await;
     }
