@@ -1325,6 +1325,11 @@ mod tests {
         let _path = sup.connect(&alice, &alice).await.unwrap();
         // Alice should get Pending (as target) and one Complete (deduped).
         wait_for(2000, || alice_handle.path_event_count() >= 2).await;
+
+        // Send a fence SMSG so we know all prior signals have been delivered.
+        let msg_count_before = alice_handle.count();
+        sup.smsg(&alice, &alice, "FENCE").await.unwrap();
+        wait_for(2000, || alice_handle.count() > msg_count_before).await;
         assert_eq!(alice_handle.path_event_count(), 2);
 
         let paths = sup.query_paths().await;
@@ -1716,6 +1721,15 @@ mod tests {
         // Now release Bob's acceptor so connect completes.
         drop(release_tx);
         let _path = connect_task.await.unwrap().unwrap();
+
+        // Second assertion after connect completes: path_cmd_loop is FIFO, so
+        // by the time the path transitioned to Established the earlier Send
+        // (issued while Pending) has already been evaluated and dropped.
+        assert_eq!(
+            bob_data_count.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "Data should not be delivered retroactively after path becomes Established"
+        );
 
         sup.shutdown().await;
     }

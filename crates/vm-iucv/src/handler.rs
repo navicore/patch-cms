@@ -56,6 +56,10 @@ impl MachineContext {
     }
 
     /// Sever an established path from this machine's side.
+    ///
+    /// The command is enqueued in the path command channel and processed
+    /// asynchronously. If this machine is not a party to the path, the
+    /// command is silently ignored and the path remains intact.
     pub fn sever_path(&self, path: PathId) -> Result<()> {
         self.path_cmd_tx
             .try_send(PathCommand::Sever {
