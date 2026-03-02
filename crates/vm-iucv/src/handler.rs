@@ -71,6 +71,11 @@ impl MachineContext {
     }
 
     /// Send data on an established path.
+    ///
+    /// The command is enqueued in the path command channel and processed
+    /// asynchronously. If the path is not in `Established` state when
+    /// processed (e.g., still `Pending` or already severed/removed), the
+    /// data is silently discarded.
     pub fn iucv_send(&self, path: PathId, data: IucvBuffer) -> Result<()> {
         self.path_cmd_tx
             .try_send(PathCommand::Send {

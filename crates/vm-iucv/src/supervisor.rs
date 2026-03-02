@@ -428,9 +428,6 @@ impl Supervisor {
             return Err(err);
         }
 
-        // Success — defuse the guard so the Established entry persists.
-        cancel_guard.defuse();
-
         // Notify both sides (best-effort: may be dropped if channel full).
         let machines = self.machines.read().await;
         if let Some(entry) = machines.get(from) {
@@ -448,6 +445,10 @@ impl Supervisor {
             }
         }
 
+        // Defuse the guard after all await points so the Established entry
+        // is cleaned up if this future is cancelled mid-notification.
+        cancel_guard.defuse();
+
         Ok(path_id)
     }
 
@@ -455,6 +456,10 @@ impl Supervisor {
     ///
     /// The path entry is removed after notifying both sides, so a subsequent
     /// `sever()` on the same path returns `PathNotFound`.
+    ///
+    /// **Note:** This method returns `PathNotFound` (RC=36) for both paths that
+    /// never existed and paths that were already severed. Callers that need to
+    /// distinguish these cases must track path lifecycle externally.
     pub async fn sever(&self, path: PathId) -> Result<()> {
         self.drain_orphaned_paths().await;
         let (machine_a, machine_b) = {
@@ -1673,12 +1678,10 @@ mod tests {
         })
         .await;
 
-        // Yield to give path_cmd_loop time to dequeue and process the Send.
+        // Give path_cmd_loop time to dequeue and process the Send.
         // Bob is still blocking in on_connection_pending, so the path is
         // guaranteed to be in Pending state when path_cmd_loop processes it.
-        for _ in 0..50 {
-            tokio::task::yield_now().await;
-        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // Assert BEFORE releasing Bob: path is guaranteed still Pending,
         // so path_cmd_loop must have silently dropped the Send.
