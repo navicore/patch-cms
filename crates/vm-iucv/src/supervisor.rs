@@ -1585,6 +1585,9 @@ mod tests {
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
         let bob_data_count: Arc<std::sync::atomic::AtomicUsize> =
             Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // Alice signals when she has called iucv_send.
+        let alice_sent: Arc<std::sync::atomic::AtomicBool> =
+            Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         struct BlockingAcceptor {
             ready: std::sync::mpsc::Sender<PathId>,
@@ -1609,13 +1612,17 @@ mod tests {
             }
         }
 
-        // Alice sends IUCV data whenever she receives an SMSG with a path id.
-        struct SmsgTriggeredSend;
+        // Alice sends IUCV data whenever she receives an SMSG with a path id,
+        // and signals via an atomic flag when done.
+        struct SmsgTriggeredSend {
+            sent: Arc<std::sync::atomic::AtomicBool>,
+        }
         impl MachineHandler for SmsgTriggeredSend {
             fn on_smsg(&mut self, ctx: &MachineContext, msg: SmsgMessage) {
                 if let Ok(pid) = msg.text().parse::<u32>() {
                     let buf = IucvBuffer::new(b"DATA".to_vec()).unwrap();
                     let _ = ctx.iucv_send(PathId(pid), buf);
+                    self.sent.store(true, std::sync::atomic::Ordering::Release);
                 }
             }
         }
@@ -1625,7 +1632,15 @@ mod tests {
         let bob = MachineId::new("BOB").unwrap();
 
         let bob_data = Arc::clone(&bob_data_count);
-        sup.ipl(&alice, SmsgTriggeredSend).await.unwrap();
+        let alice_sent_clone = Arc::clone(&alice_sent);
+        sup.ipl(
+            &alice,
+            SmsgTriggeredSend {
+                sent: alice_sent_clone,
+            },
+        )
+        .await
+        .unwrap();
         sup.ipl(
             &bob,
             BlockingAcceptor {
@@ -1651,25 +1666,31 @@ mod tests {
             .await
             .unwrap();
 
-        // Release Bob's acceptor so connect completes.
-        drop(release_tx);
-        let _path = connect_task.await.unwrap().unwrap();
+        // Wait for Alice to confirm she called iucv_send (PathCommand::Send
+        // is now enqueued in path_cmd_tx).
+        wait_for(2000, || {
+            alice_sent.load(std::sync::atomic::Ordering::Acquire)
+        })
+        .await;
 
-        // Send a fence SMSG to Bob to ensure the path_cmd_loop has processed
-        // (and silently dropped) Alice's pending-path send.
-        sup.smsg(&alice, &bob, "FENCE").await.unwrap();
-        // Use a short yield loop — Bob processes SMSG inline on his task.
-        for _ in 0..10 {
+        // Yield to give path_cmd_loop time to dequeue and process the Send.
+        // Bob is still blocking in on_connection_pending, so the path is
+        // guaranteed to be in Pending state when path_cmd_loop processes it.
+        for _ in 0..50 {
             tokio::task::yield_now().await;
         }
 
-        // Bob should NOT have received any Data events — the send on a
-        // pending path must be silently dropped by path_cmd_loop.
+        // Assert BEFORE releasing Bob: path is guaranteed still Pending,
+        // so path_cmd_loop must have silently dropped the Send.
         assert_eq!(
             bob_data_count.load(std::sync::atomic::Ordering::Relaxed),
             0,
             "Data should not be delivered on a Pending path"
         );
+
+        // Now release Bob's acceptor so connect completes.
+        drop(release_tx);
+        let _path = connect_task.await.unwrap().unwrap();
 
         sup.shutdown().await;
     }
