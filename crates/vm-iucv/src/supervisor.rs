@@ -546,13 +546,20 @@ impl Supervisor {
             let mut severed = Vec::new();
             paths.retain(|&pid, entry| {
                 if entry.machine_a == *id || entry.machine_b == *id {
-                    let peer = if entry.machine_a == *id {
-                        entry.machine_b.clone()
-                    } else {
-                        entry.machine_a.clone()
-                    };
-                    severed.push((pid, peer));
-                    false // remove
+                    // Only notify peers for Established paths. Pending paths
+                    // are removed silently — the peer never received
+                    // ConnectionComplete, so sending ConnectionSevered would
+                    // be confusing. The in-flight connect() will fail at the
+                    // establish phase with MachineNotFound instead.
+                    if entry.state == PathState::Established {
+                        let peer = if entry.machine_a == *id {
+                            entry.machine_b.clone()
+                        } else {
+                            entry.machine_a.clone()
+                        };
+                        severed.push((pid, peer));
+                    }
+                    false // remove regardless of state
                 } else {
                     true // keep
                 }
@@ -560,7 +567,7 @@ impl Supervisor {
             severed
         };
 
-        // Notify peers (best-effort).
+        // Notify peers of Established paths (best-effort).
         if !to_notify.is_empty() {
             let machines = self.machines.read().await;
             for (pid, peer) in &to_notify {
@@ -1284,6 +1291,10 @@ mod tests {
             crate::collector::PathEvent::Pending { path: p, from }
             if *p == path && from.as_str() == "ALICE"
         )));
+        assert!(bob_events.iter().any(|e| matches!(e,
+            crate::collector::PathEvent::Complete { path: p, peer }
+            if *p == path && peer.as_str() == "ALICE"
+        )));
 
         sup.shutdown().await;
     }
@@ -1857,12 +1868,17 @@ mod tests {
         sup.smsg(&bob, &alice, &path.as_u32().to_string())
             .await
             .unwrap();
-        // Send a "fence" SMSG to Bob (not a path ID, so no side effects).
-        // When Bob receives it, we know the runtime has processed all prior
-        // messages including Alice's SMSG and the resulting path_cmd_loop work.
+
+        // Use a fence SMSG to Bob to confirm the router delivered Alice's
+        // trigger (both go through the same FIFO router channel). Once Bob
+        // receives the fence, Alice's on_smsg has completed and iucv_send
+        // has enqueued the PathCommand::Send. Then sleep to give
+        // path_cmd_loop time to process it — path_cmd_tx is an independent
+        // channel with no happens-before relationship to the router.
         let msg_count_before = bob_handle.count();
         sup.smsg(&alice, &bob, "FENCE").await.unwrap();
         wait_for(2000, || bob_handle.count() > msg_count_before).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // Bob should NOT have received any new Data events.
         let count_after = bob_handle
