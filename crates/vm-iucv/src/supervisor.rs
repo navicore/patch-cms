@@ -266,6 +266,14 @@ impl Supervisor {
         // Sever all paths involving this machine, notify peers.
         self.sever_paths_for_machine(id).await;
 
+        // Second pass: a concurrent connect() that passed its existence check
+        // before our machines.write() removal may have inserted a new path
+        // entry between our first sever pass and now. Its establish phase
+        // will fail (machines.read won't find id), but the guard cleanup
+        // could leave a Pending entry that the first pass missed. Drain any
+        // stragglers.
+        self.sever_paths_for_machine(id).await;
+
         let MachineEntry {
             signal_tx,
             task_handle,
@@ -533,32 +541,29 @@ impl Supervisor {
     ///
     /// Removes path entries after notifying peers to prevent leaks.
     async fn sever_paths_for_machine(&self, id: &MachineId) {
-        let to_sever: Vec<(PathId, MachineId)> = {
+        let to_notify: Vec<(PathId, MachineId)> = {
             let mut paths = self.paths.write().await;
-            let involved: Vec<PathId> = paths
-                .iter()
-                .filter(|(_, e)| e.machine_a == *id || e.machine_b == *id)
-                .map(|(pid, _)| *pid)
-                .collect();
-
-            let mut severed = Vec::with_capacity(involved.len());
-            for pid in involved {
-                if let Some(entry) = paths.remove(&pid) {
+            let mut severed = Vec::new();
+            paths.retain(|&pid, entry| {
+                if entry.machine_a == *id || entry.machine_b == *id {
                     let peer = if entry.machine_a == *id {
-                        entry.machine_b
+                        entry.machine_b.clone()
                     } else {
-                        entry.machine_a
+                        entry.machine_a.clone()
                     };
                     severed.push((pid, peer));
+                    false // remove
+                } else {
+                    true // keep
                 }
-            }
+            });
             severed
         };
 
         // Notify peers (best-effort).
-        if !to_sever.is_empty() {
+        if !to_notify.is_empty() {
             let machines = self.machines.read().await;
-            for (pid, peer) in &to_sever {
+            for (pid, peer) in &to_notify {
                 if let Some(entry) = machines.get(peer) {
                     let _ = entry.signal_tx.try_send(MachineSignal::ConnectionSevered {
                         path: *pid,
@@ -1355,6 +1360,76 @@ mod tests {
         // Both machines logged off during shutdown.
         let err = sup.connect(&alice, &bob).await.unwrap_err();
         assert_eq!(err.rc(), 12); // MachineNotFound
+    }
+
+    // multi_thread required: BlockingAcceptor blocks the Tokio worker thread.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn connect_cancelled_cleans_up_pending_entry() {
+        // Bob blocks in on_connection_pending. We cancel the connect() future
+        // before releasing Bob, verifying PendingPathGuard cleans up the entry.
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+
+        struct BlockOnAccept {
+            ready: std::sync::mpsc::Sender<()>,
+            release: std::sync::mpsc::Receiver<()>,
+        }
+        impl MachineHandler for BlockOnAccept {
+            fn on_smsg(&mut self, _ctx: &MachineContext, _msg: SmsgMessage) {}
+            fn on_connection_pending(
+                &mut self,
+                _ctx: &MachineContext,
+                _path: PathId,
+                _from: &MachineId,
+            ) -> bool {
+                let _ = self.ready.send(());
+                let _ = self.release.recv();
+                true
+            }
+        }
+
+        let sup = Arc::new(Supervisor::new());
+        let alice = MachineId::new("ALICE").unwrap();
+        let bob = MachineId::new("BOB").unwrap();
+
+        let (h_alice, _) = collector();
+        sup.ipl(&alice, h_alice).await.unwrap();
+        sup.ipl(
+            &bob,
+            BlockOnAccept {
+                ready: ready_tx,
+                release: release_rx,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Spawn connect — it will block until Bob accepts.
+        let sup2 = Arc::clone(&sup);
+        let alice2 = alice.clone();
+        let bob2 = bob.clone();
+        let connect_handle = tokio::spawn(async move { sup2.connect(&alice2, &bob2).await });
+
+        // Wait for Bob to enter on_connection_pending.
+        ready_rx.recv().unwrap();
+
+        // Cancel the connect future while the path is Pending.
+        connect_handle.abort();
+        let _ = connect_handle.await;
+
+        // Release Bob so his task unblocks.
+        drop(release_tx);
+
+        // Drain orphaned paths by calling query_paths.
+        // The cancelled guard should have enqueued the PathId for cleanup.
+        let paths = sup.query_paths().await;
+        assert!(
+            paths.is_empty(),
+            "PendingPathGuard should have cleaned up the entry; found {:?}",
+            paths
+        );
+
+        sup.shutdown().await;
     }
 
     #[tokio::test]
