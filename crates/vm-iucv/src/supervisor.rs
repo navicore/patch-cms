@@ -200,7 +200,15 @@ impl Supervisor {
         if !orphaned.is_empty() {
             let mut paths = self.paths.write().await;
             for id in orphaned {
-                paths.remove(&id);
+                // Only remove entries still in Pending state. Orphaned entries
+                // originate from PendingPathGuard and were always Pending. After
+                // u32 counter wrap, a new connect() could reuse the same PathId
+                // for a valid Established path — removing it would be destructive.
+                if let Some(entry) = paths.get(&id) {
+                    if entry.state == PathState::Pending {
+                        paths.remove(&id);
+                    }
+                }
             }
         }
     }
@@ -407,9 +415,10 @@ impl Supervisor {
             return Err(IucvError::ConnectionRefused(to.as_str().to_string()));
         }
 
-        // Transition to Established. Re-check machine existence in the same
-        // critical section to close the TOCTOU window where logoff(to) could
-        // run between the initial existence check and this transition.
+        // Transition to Established and notify both sides in the same critical
+        // section. Holding machines.read + paths.write through notification
+        // prevents logoff(to) from racing in and delivering ConnectionSevered
+        // before ConnectionComplete (the FIFO channel would see Severed→Complete).
         let establish_err = {
             let machines = self.machines.read().await;
             let mut paths = self.paths.write().await;
@@ -423,6 +432,21 @@ impl Supervisor {
                     Some(IucvError::MachineNotFound(from.as_str().to_string()))
                 } else {
                     entry.state = PathState::Established;
+                    // Notify while holding locks (try_send is non-blocking).
+                    if let Some(m) = machines.get(from) {
+                        let _ = m.signal_tx.try_send(MachineSignal::ConnectionComplete {
+                            path: path_id,
+                            peer: to.clone(),
+                        });
+                    }
+                    if from != to {
+                        if let Some(m) = machines.get(to) {
+                            let _ = m.signal_tx.try_send(MachineSignal::ConnectionComplete {
+                                path: path_id,
+                                peer: from.clone(),
+                            });
+                        }
+                    }
                     None // success
                 }
             } else if !machines.contains_key(from) {
@@ -439,25 +463,7 @@ impl Supervisor {
             return Err(err);
         }
 
-        // Notify both sides (best-effort: may be dropped if channel full).
-        let machines = self.machines.read().await;
-        if let Some(entry) = machines.get(from) {
-            let _ = entry.signal_tx.try_send(MachineSignal::ConnectionComplete {
-                path: path_id,
-                peer: to.clone(),
-            });
-        }
-        if from != to {
-            if let Some(entry) = machines.get(to) {
-                let _ = entry.signal_tx.try_send(MachineSignal::ConnectionComplete {
-                    path: path_id,
-                    peer: from.clone(),
-                });
-            }
-        }
-
-        // Defuse the guard after all await points so the Established entry
-        // is cleaned up if this future is cancelled mid-notification.
+        // Defuse the guard — no await points between establish+notify and here.
         cancel_guard.defuse();
 
         Ok(path_id)
@@ -470,12 +476,16 @@ impl Supervisor {
     /// SEVER semantics. For self-connections (`from` is both sides), no
     /// callback is delivered.
     ///
+    /// Only `Established` paths can be severed. Attempting to sever a
+    /// `Pending` path (one where `connect()` has not yet completed) returns
+    /// `PathNotFound` (RC=36).
+    ///
     /// The path entry is removed, so a subsequent `sever()` on the same path
     /// returns `PathNotFound`.
     ///
     /// **Note:** This method returns `PathNotFound` (RC=36) for both paths that
-    /// never existed and paths that were already severed. Callers that need to
-    /// distinguish these cases must track path lifecycle externally.
+    /// never existed, paths still pending, and paths already severed. Callers
+    /// that need to distinguish these cases must track path lifecycle externally.
     pub async fn sever(&self, path: PathId, from: &MachineId) -> Result<()> {
         self.drain_orphaned_paths().await;
         let peer = {
@@ -483,6 +493,9 @@ impl Supervisor {
             let entry = paths
                 .get(&path)
                 .ok_or(IucvError::PathNotFound(path.as_u32()))?;
+            if entry.state == PathState::Pending {
+                return Err(IucvError::PathNotFound(path.as_u32()));
+            }
             let peer = if entry.machine_a == *from {
                 entry.machine_b.clone()
             } else if entry.machine_b == *from {
@@ -718,6 +731,9 @@ async fn path_cmd_loop(
                 let notify = {
                     let mut paths = paths.write().await;
                     if let Some(entry) = paths.get(&path) {
+                        if entry.state == PathState::Pending {
+                            continue; // cannot sever a pending path
+                        }
                         let peer = if entry.machine_a == from {
                             entry.machine_b.clone()
                         } else if entry.machine_b == from {
