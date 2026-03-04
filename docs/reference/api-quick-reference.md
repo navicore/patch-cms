@@ -32,7 +32,7 @@ All `MachineContext` methods are synchronous (non-async) and use `try_send`.
 | Callback | Signature | Default |
 |---|---|---|
 | `on_ipl` | `(&mut self, &MachineContext)` | No-op |
-| `on_smsg` | `(&mut self, &MachineContext, SmsgMessage)` | **Required** |
+| `on_smsg` | `(&mut self, &MachineContext, SmsgMessage)` | Required        |
 | `on_connection_pending` | `(&mut self, &MachineContext, PathId, &MachineId) -> bool` | `true` |
 | `on_connection_complete` | `(&mut self, &MachineContext, PathId, &MachineId)` | No-op |
 | `on_connection_severed` | `(&mut self, &MachineContext, PathId, &MachineId)` | No-op |

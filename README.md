@@ -1,5 +1,7 @@
 # patch-cms
 
+**[Documentation](https://www.navicore.tech/patch-cms/)**
+
 A Rust reimplementation of the IBM VM/CMS environment — starting with the XEDIT
 editor and the REXX macro language, building toward the CMS file system,
 Hartmann pipelines, and VM inter-machine messaging.
