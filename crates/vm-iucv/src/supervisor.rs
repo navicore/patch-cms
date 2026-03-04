@@ -349,6 +349,12 @@ impl Supervisor {
     /// `on_connection_pending` callback decides whether to accept or refuse.
     /// If accepted, both sides receive `on_connection_complete`. If refused,
     /// returns `ConnectionRefused`.
+    ///
+    /// **Note:** `Ok(path_id)` means the path is Established in the
+    /// supervisor registry, but `on_connection_complete` delivery to both
+    /// handlers is best-effort via `try_send`. If a machine's signal channel
+    /// is full, its callback is silently skipped. Callers must not assume
+    /// that handlers have been notified before sending data on the path.
     pub async fn connect(&self, from: &MachineId, to: &MachineId) -> Result<PathId> {
         self.drain_orphaned_paths().await;
         // Validate both machines exist and get target's signal sender.
