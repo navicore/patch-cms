@@ -7,6 +7,7 @@ license.workspace = true
 
 [features]
 test-util = []
+examples = ["test-util", "tokio/rt-multi-thread", "tokio/macros"]
 
 [dependencies]
 tokio = { version = "1", features = ["sync", "rt"] }
@@ -17,3 +18,23 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 # module) for integration tests. This is Cargo's standard pattern for
 # feature-gated test utilities — see tokio, axum, etc.
 vm-iucv = { path = ".", features = ["test-util"] }
+
+[[example]]
+name = "hello_smsg"
+required-features = ["examples"]
+
+[[example]]
+name = "echo_server"
+required-features = ["examples"]
+
+[[example]]
+name = "iucv_chat"
+required-features = ["examples"]
+
+[[example]]
+name = "connection_gating"
+required-features = ["examples"]
+
+[[example]]
+name = "multi_machine_pipeline"
+required-features = ["examples"]

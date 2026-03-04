@@ -1,0 +1,25 @@
+[book]
+title = "patch-xedit"
+authors = ["navicore"]
+description = "Documentation for patch-xedit — VM/CMS inspired text editor and actor framework"
+src = "docs"
+language = "en"
+
+[build]
+build-dir = "book"
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/navicore/patch-xedit"
+edit-url-template = "https://github.com/navicore/patch-xedit/edit/main/docs/{path}"
+site-url = "/patch-xedit/"
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+enable = true
+limit-results = 30
+boost-hierarchy = 2
