@@ -1,0 +1,5 @@
+/* REXX — PROFILE EXEC: auto-runs on IPL */
+say '***'
+say '*** Welcome to CMS Machine Environment'
+say '*** Type LOGOFF to exit'
+say '***'

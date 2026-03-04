@@ -1,0 +1,11 @@
+/* REXX — SMSGTEST: send an arbitrary SMSG */
+parse arg userid text
+if userid = '' | text = '' then do
+    say 'Usage: SMSGTEST userid text...'
+    exit 24
+end
+'SMSG' userid text
+if rc = 0 then
+    say 'Message sent to' userid
+else
+    say 'SMSG failed, RC='rc

@@ -1,0 +1,6 @@
+/* REXX — WHOAMI: display machine identity via GLOBALV */
+'GLOBALV GET LMSGSRC'
+if rc = 0 then
+    say 'Last message was from:' lmsgsrc.1
+else
+    say 'No messages received yet'

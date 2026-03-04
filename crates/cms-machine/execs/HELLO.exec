@@ -1,0 +1,7 @@
+/* REXX — HELLO: send a greeting SMSG */
+parse arg userid .
+if userid = '' then do
+    say 'Usage: HELLO userid'
+    exit 24
+end
+'SMSG' userid 'Hello from CMS Machine!'

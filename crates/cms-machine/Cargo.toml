@@ -1,0 +1,19 @@
+[package]
+name = "cms-machine"
+description = "CMS machine environment — interactive REXX-driven actor system"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["rexx"]
+rexx = ["patch-rexx"]
+
+[dependencies]
+cms-core = { path = "../cms-core" }
+vm-iucv = { path = "../vm-iucv", features = ["test-util"] }
+patch-rexx = { version = "0.9", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+
+[dev-dependencies]
+tempfile = "3"
