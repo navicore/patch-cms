@@ -25,6 +25,10 @@ pub enum IucvError {
     MachinePanicked(String),
     /// Supervisor has shut down (RC=32)
     SupervisorDown,
+    /// Path not found (RC=36)
+    PathNotFound(u32),
+    /// Target refused the connection (RC=40)
+    ConnectionRefused(String),
 }
 
 impl fmt::Display for IucvError {
@@ -57,6 +61,12 @@ impl fmt::Display for IucvError {
             IucvError::SupervisorDown => {
                 write!(f, "DMSIUC032E Supervisor has shut down")
             }
+            IucvError::PathNotFound(id) => {
+                write!(f, "DMSIUC036E Path not found - {}", id)
+            }
+            IucvError::ConnectionRefused(s) => {
+                write!(f, "DMSIUC040E Connection refused - {}", s)
+            }
         }
     }
 }
@@ -76,6 +86,8 @@ impl IucvError {
             IucvError::ChannelBusy(_) => 20,
             IucvError::MachinePanicked(_) => 28,
             IucvError::SupervisorDown => 32,
+            IucvError::PathNotFound(_) => 36,
+            IucvError::ConnectionRefused(_) => 40,
         }
     }
 }
@@ -150,6 +162,20 @@ mod tests {
     }
 
     #[test]
+    fn error_display_path_not_found() {
+        let e = IucvError::PathNotFound(99);
+        assert!(e.to_string().contains("99"));
+        assert_eq!(e.rc(), 36);
+    }
+
+    #[test]
+    fn error_display_connection_refused() {
+        let e = IucvError::ConnectionRefused("TARGET".to_string());
+        assert!(e.to_string().contains("TARGET"));
+        assert_eq!(e.rc(), 40);
+    }
+
+    #[test]
     fn error_messages_have_ibm_prefix() {
         let errors: Vec<IucvError> = vec![
             IucvError::InvalidParameter("X".to_string()),
@@ -161,6 +187,8 @@ mod tests {
             IucvError::ChannelBusy("X".to_string()),
             IucvError::MachinePanicked("X".to_string()),
             IucvError::SupervisorDown,
+            IucvError::PathNotFound(1),
+            IucvError::ConnectionRefused("X".to_string()),
         ];
         for e in &errors {
             let msg = e.to_string();

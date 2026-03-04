@@ -1,17 +1,46 @@
 use crate::error::{IucvError, Result};
 use crate::machine_id::MachineId;
 use crate::message::SmsgMessage;
+use crate::path::{IucvBuffer, PathId};
 use tokio::sync::mpsc;
+
+/// Commands for path lifecycle, sent from MachineContext to the supervisor.
+pub(crate) enum PathCommand {
+    Sever {
+        path: PathId,
+        from: MachineId,
+    },
+    Send {
+        path: PathId,
+        from: MachineId,
+        data: IucvBuffer,
+    },
+    /// No-op sentinel: replies on the oneshot after all prior commands have
+    /// been processed. Used by tests to synchronize with `path_cmd_loop`.
+    #[cfg(any(test, feature = "test-util"))]
+    Fence {
+        reply: tokio::sync::oneshot::Sender<()>,
+    },
+}
 
 /// Runtime context passed to a machine handler during lifecycle callbacks.
 pub struct MachineContext {
     machine_id: MachineId,
     outbox: mpsc::Sender<SmsgMessage>,
+    path_cmd_tx: mpsc::Sender<PathCommand>,
 }
 
 impl MachineContext {
-    pub(crate) fn new(machine_id: MachineId, outbox: mpsc::Sender<SmsgMessage>) -> Self {
-        MachineContext { machine_id, outbox }
+    pub(crate) fn new(
+        machine_id: MachineId,
+        outbox: mpsc::Sender<SmsgMessage>,
+        path_cmd_tx: mpsc::Sender<PathCommand>,
+    ) -> Self {
+        MachineContext {
+            machine_id,
+            outbox,
+            path_cmd_tx,
+        }
     }
 
     /// The identity of this machine.
@@ -30,6 +59,46 @@ impl MachineContext {
             mpsc::error::TrySendError::Full(_) => IucvError::ChannelBusy("ROUTER".to_string()),
             mpsc::error::TrySendError::Closed(_) => IucvError::SupervisorDown,
         })
+    }
+
+    /// Sever an established path from this machine's side.
+    ///
+    /// The command is enqueued in the path command channel and processed
+    /// asynchronously. If this machine is not a party to the path, the
+    /// command is silently ignored and the path remains intact.
+    pub fn sever_path(&self, path: PathId) -> Result<()> {
+        self.path_cmd_tx
+            .try_send(PathCommand::Sever {
+                path,
+                from: self.machine_id.clone(),
+            })
+            .map_err(|e| match e {
+                mpsc::error::TrySendError::Full(_) => {
+                    IucvError::ChannelBusy("PATH_CMD".to_string())
+                }
+                mpsc::error::TrySendError::Closed(_) => IucvError::SupervisorDown,
+            })
+    }
+
+    /// Send data on an established path.
+    ///
+    /// The command is enqueued in the path command channel and processed
+    /// asynchronously. If the path is not in `Established` state when
+    /// processed (e.g., still `Pending` or already severed/removed), the
+    /// data is silently discarded.
+    pub fn iucv_send(&self, path: PathId, data: IucvBuffer) -> Result<()> {
+        self.path_cmd_tx
+            .try_send(PathCommand::Send {
+                path,
+                from: self.machine_id.clone(),
+                data,
+            })
+            .map_err(|e| match e {
+                mpsc::error::TrySendError::Full(_) => {
+                    IucvError::ChannelBusy("PATH_CMD".to_string())
+                }
+                mpsc::error::TrySendError::Closed(_) => IucvError::SupervisorDown,
+            })
     }
 }
 
@@ -53,6 +122,53 @@ pub trait MachineHandler: Send + 'static {
 
     /// Called for each incoming SMSG. Every handler must implement this.
     fn on_smsg(&mut self, ctx: &MachineContext, msg: SmsgMessage);
+
+    /// Called when another machine requests a connection.
+    /// Return true to accept, false to refuse.
+    ///
+    /// If the caller's `connect()` future is dropped after this callback
+    /// returns `true` but before establishment completes,
+    /// `on_connection_complete` will not be called. Handlers must tolerate
+    /// accepting a path that is never completed.
+    ///
+    /// **Warning:** This callback runs synchronously on the machine's Tokio
+    /// task. Blocking here (e.g., `std::sync::mpsc::Receiver::recv`,
+    /// `thread::sleep`, synchronous I/O) stalls the entire machine — no
+    /// further signals are processed until it returns. On a single-threaded
+    /// runtime, blocking will also deadlock the `connect()` caller since both
+    /// share the same worker thread.
+    fn on_connection_pending(
+        &mut self,
+        _ctx: &MachineContext,
+        _path: PathId,
+        _from: &MachineId,
+    ) -> bool {
+        true // default: accept all connections
+    }
+
+    /// Called when a connection is fully established (both sides accepted).
+    ///
+    /// Delivery is best-effort via `try_send`: if the machine's signal channel
+    /// is full, this callback may be silently skipped. Handlers should not
+    /// assume that every `connect()` that succeeds will produce a matching
+    /// `on_connection_complete` callback.
+    fn on_connection_complete(&mut self, _ctx: &MachineContext, _path: PathId, _peer: &MachineId) {}
+
+    /// Called when a path is severed (by either side or by logoff).
+    ///
+    /// Delivery is best-effort via `try_send`: if the machine's signal channel
+    /// is full, this callback may be silently skipped. Handlers requiring
+    /// guaranteed cleanup should use RAII guards rather than relying on this
+    /// callback.
+    ///
+    /// **Not called on the machine that is logging off.** When a machine logs
+    /// off, only its peers receive `on_connection_severed`; the logging-off
+    /// machine receives `on_logoff` instead. Handlers that perform path-level
+    /// cleanup should enumerate known paths in `on_logoff`.
+    fn on_connection_severed(&mut self, _ctx: &MachineContext, _path: PathId, _peer: &MachineId) {}
+
+    /// Called when data arrives on an established path.
+    fn on_iucv_data(&mut self, _ctx: &MachineContext, _path: PathId, _data: IucvBuffer) {}
 
     /// Called once when the machine is being logged off.
     ///

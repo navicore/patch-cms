@@ -1,16 +1,49 @@
 use crate::error::{IucvError, Result};
-use crate::handler::{MachineContext, MachineHandler};
+use crate::handler::{MachineContext, MachineHandler, PathCommand};
 use crate::machine_id::MachineId;
 use crate::message::SmsgMessage;
+use crate::path::{IucvBuffer, PathId};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 use tokio::task::JoinSet;
 
 /// Signal sent to a running machine task.
 enum MachineSignal {
     Smsg(SmsgMessage),
     Logoff,
+    ConnectionPending {
+        path: PathId,
+        from: MachineId,
+        accept_tx: oneshot::Sender<bool>,
+    },
+    ConnectionComplete {
+        path: PathId,
+        peer: MachineId,
+    },
+    ConnectionSevered {
+        path: PathId,
+        peer: MachineId,
+    },
+    IucvData {
+        path: PathId,
+        data: IucvBuffer,
+    },
+}
+
+/// State of an IUCV path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathState {
+    Pending,
+    Established,
+}
+
+/// Registry entry for an IUCV path.
+struct PathEntry {
+    machine_a: MachineId,
+    machine_b: MachineId,
+    state: PathState,
 }
 
 /// Entry for a running machine in the supervisor's registry.
@@ -31,8 +64,15 @@ struct MachineEntry {
 /// will panic if invoked outside a Tokio runtime.
 pub struct Supervisor {
     machines: Arc<RwLock<HashMap<MachineId, MachineEntry>>>,
+    paths: Arc<RwLock<HashMap<PathId, PathEntry>>>,
+    next_path_id: Arc<AtomicU32>,
+    /// Path IDs orphaned by cancelled `connect()` futures when the paths lock
+    /// was contended. Drained at the next `sever()`/`query_paths()`/`shutdown()`.
+    orphaned_paths: Arc<std::sync::Mutex<Vec<PathId>>>,
     router_tx: Mutex<Option<mpsc::Sender<SmsgMessage>>>,
+    path_cmd_tx: Mutex<Option<mpsc::Sender<PathCommand>>>,
     router_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    path_cmd_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl Drop for Supervisor {
@@ -44,14 +84,20 @@ impl Drop for Supervisor {
     /// **Always call [`shutdown().await`](Supervisor::shutdown) before dropping
     /// the `Supervisor`** to guarantee clean teardown.
     fn drop(&mut self) {
-        // 1. Drop the router sender so the router loop exits naturally.
+        // 1. Drop the router and path_cmd senders so loops exit naturally.
         if let Ok(mut guard) = self.router_tx.try_lock() {
             guard.take();
         }
-        // 2. Abort the router task. Note: abort() is non-blocking — the task's
-        //    lock guard is released only after the scheduler polls and drops
-        //    the future, which may not happen before step 3.
+        if let Ok(mut guard) = self.path_cmd_tx.try_lock() {
+            guard.take();
+        }
+        // 2. Abort background tasks.
         if let Ok(mut guard) = self.router_task.try_lock() {
+            if let Some(handle) = guard.take() {
+                handle.abort();
+            }
+        }
+        if let Ok(mut guard) = self.path_cmd_task.try_lock() {
             if let Some(handle) = guard.take() {
                 handle.abort();
             }
@@ -62,6 +108,38 @@ impl Drop for Supervisor {
         if let Ok(mut machines) = self.machines.try_write() {
             for (_key, entry) in machines.drain() {
                 entry.task_handle.abort();
+            }
+        }
+    }
+}
+
+/// Drop guard that removes a pending path entry if the `connect()` future is
+/// cancelled (dropped at an `.await` point). Call `defuse()` on the normal path
+/// to prevent cleanup.
+struct PendingPathGuard {
+    paths: Option<Arc<RwLock<HashMap<PathId, PathEntry>>>>,
+    orphaned: Arc<std::sync::Mutex<Vec<PathId>>>,
+    path_id: PathId,
+}
+
+impl PendingPathGuard {
+    fn defuse(mut self) {
+        self.paths.take();
+    }
+}
+
+impl Drop for PendingPathGuard {
+    fn drop(&mut self) {
+        if let Some(paths) = self.paths.take() {
+            if let Ok(mut guard) = paths.try_write() {
+                guard.remove(&self.path_id);
+            } else {
+                // Lock is contended — enqueue for deferred cleanup.
+                // Drained at the next sever/query_paths/shutdown call.
+                self.orphaned
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(self.path_id);
             }
         }
     }
@@ -86,15 +164,52 @@ impl Supervisor {
     /// Panics if called outside a Tokio runtime.
     pub fn new() -> Self {
         let machines = Arc::new(RwLock::new(HashMap::new()));
+        let paths = Arc::new(RwLock::new(HashMap::new()));
+        let next_path_id = Arc::new(AtomicU32::new(1));
         let (router_tx, router_rx) = mpsc::channel::<SmsgMessage>(256);
+        let (path_cmd_tx, path_cmd_rx) = mpsc::channel::<PathCommand>(256);
 
         let router_machines = Arc::clone(&machines);
         let router_handle = tokio::spawn(router_loop(router_rx, router_machines));
 
+        let pcmd_machines = Arc::clone(&machines);
+        let pcmd_paths = Arc::clone(&paths);
+        let path_cmd_handle = tokio::spawn(path_cmd_loop(path_cmd_rx, pcmd_machines, pcmd_paths));
+
         Supervisor {
             machines,
+            paths,
+            next_path_id,
+            orphaned_paths: Arc::new(std::sync::Mutex::new(Vec::new())),
             router_tx: Mutex::new(Some(router_tx)),
+            path_cmd_tx: Mutex::new(Some(path_cmd_tx)),
             router_task: Mutex::new(Some(router_handle)),
+            path_cmd_task: Mutex::new(Some(path_cmd_handle)),
+        }
+    }
+
+    /// Remove any path entries orphaned by cancelled `connect()` futures.
+    async fn drain_orphaned_paths(&self) {
+        let orphaned: Vec<PathId> = {
+            let mut guard = self
+                .orphaned_paths
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut *guard)
+        };
+        if !orphaned.is_empty() {
+            let mut paths = self.paths.write().await;
+            for id in orphaned {
+                // Only remove entries still in Pending state. Orphaned entries
+                // originate from PendingPathGuard and were always Pending. After
+                // u32 counter wrap, a new connect() could reuse the same PathId
+                // for a valid Established path — removing it would be destructive.
+                if let Some(entry) = paths.get(&id) {
+                    if entry.state == PathState::Pending {
+                        paths.remove(&id);
+                    }
+                }
+            }
         }
     }
 
@@ -105,6 +220,11 @@ impl Supervisor {
         // insertion (which would create a zombie machine with a stale sender).
         let guard = self.router_tx.lock().await;
         let router_tx = guard.as_ref().ok_or(IucvError::SupervisorDown)?.clone();
+        let pcmd_guard = self.path_cmd_tx.lock().await;
+        let path_cmd_tx = pcmd_guard
+            .as_ref()
+            .ok_or(IucvError::SupervisorDown)?
+            .clone();
 
         let mut machines = self.machines.write().await;
         if machines.contains_key(id) {
@@ -112,7 +232,7 @@ impl Supervisor {
         }
 
         let (signal_tx, signal_rx) = mpsc::channel::<MachineSignal>(64);
-        let ctx = MachineContext::new(id.clone(), router_tx);
+        let ctx = MachineContext::new(id.clone(), router_tx, path_cmd_tx);
         let task_handle = tokio::spawn(run_machine(handler, ctx, signal_rx));
         machines.insert(
             id.clone(),
@@ -142,6 +262,17 @@ impl Supervisor {
                 .remove(id)
                 .ok_or_else(|| IucvError::AlreadyLoggedOff(id.as_str().to_string()))?
         };
+
+        // Sever all paths involving this machine, notify peers.
+        self.sever_paths_for_machine(id).await;
+
+        // Second pass: a concurrent connect() that passed its existence check
+        // before our machines.write() removal may have inserted a new path
+        // entry between our first sever pass and now. Its establish phase
+        // will fail (machines.read won't find id), but the guard cleanup
+        // could leave a Pending entry that the first pass missed. Drain any
+        // stragglers.
+        self.sever_paths_for_machine(id).await;
 
         let MachineEntry {
             signal_tx,
@@ -212,6 +343,264 @@ impl Supervisor {
         names
     }
 
+    /// Initiate an IUCV connection from one machine to another.
+    ///
+    /// Returns the `PathId`. The path starts in Pending state; the target's
+    /// `on_connection_pending` callback decides whether to accept or refuse.
+    /// If accepted, both sides receive `on_connection_complete`. If refused,
+    /// returns `ConnectionRefused`.
+    ///
+    /// **Note:** `Ok(path_id)` means the path is Established in the
+    /// supervisor registry, but `on_connection_complete` delivery to both
+    /// handlers is best-effort via `try_send`. If a machine's signal channel
+    /// is full, its callback is silently skipped. Callers must not assume
+    /// that handlers have been notified before sending data on the path.
+    pub async fn connect(&self, from: &MachineId, to: &MachineId) -> Result<PathId> {
+        self.drain_orphaned_paths().await;
+        // Validate both machines exist and get target's signal sender.
+        let target_tx = {
+            let machines = self.machines.read().await;
+            if !machines.contains_key(from) {
+                return Err(IucvError::MachineNotFound(from.as_str().to_string()));
+            }
+            let target = machines
+                .get(to)
+                .ok_or_else(|| IucvError::MachineNotFound(to.as_str().to_string()))?;
+            target.signal_tx.clone()
+        };
+
+        // Generate a new PathId and create the pending entry.
+        // Check for collision in case the u32 counter has wrapped.
+        let path_id = PathId(self.next_path_id.fetch_add(1, Ordering::Relaxed));
+        {
+            let mut paths = self.paths.write().await;
+            if paths.contains_key(&path_id) {
+                return Err(IucvError::InvalidParameter(
+                    "PathId u32 counter wrapped; collision detected".to_string(),
+                ));
+            }
+            paths.insert(
+                path_id,
+                PathEntry {
+                    machine_a: from.clone(),
+                    machine_b: to.clone(),
+                    state: PathState::Pending,
+                },
+            );
+        }
+
+        // Drop guard: if this future is cancelled at any `.await` below,
+        // remove the pending path entry so it doesn't leak.
+        let paths_ref = Arc::clone(&self.paths);
+        let cancel_guard = PendingPathGuard {
+            paths: Some(paths_ref),
+            orphaned: Arc::clone(&self.orphaned_paths),
+            path_id,
+        };
+
+        // Send ConnectionPending to the target with a oneshot for the response.
+        let (accept_tx, accept_rx) = oneshot::channel();
+        let signal = MachineSignal::ConnectionPending {
+            path: path_id,
+            from: from.clone(),
+            accept_tx,
+        };
+        if let Err(e) = target_tx.try_send(signal) {
+            // Guard drops here and cleans up the pending entry.
+            return Err(match e {
+                mpsc::error::TrySendError::Full(_) => {
+                    IucvError::ChannelBusy(to.as_str().to_string())
+                }
+                mpsc::error::TrySendError::Closed(_) => {
+                    IucvError::DeliveryFailed(to.as_str().to_string())
+                }
+            });
+        }
+
+        // Wait for the target's accept/refuse decision.
+        // If the oneshot is dropped (target logged off or panicked), treat
+        // as delivery failure rather than masking it as ConnectionRefused.
+        let accepted = accept_rx
+            .await
+            .map_err(|_| IucvError::DeliveryFailed(to.as_str().to_string()))?;
+
+        if !accepted {
+            // Guard drops here and cleans up the pending entry.
+            return Err(IucvError::ConnectionRefused(to.as_str().to_string()));
+        }
+
+        // Transition to Established and notify both sides in the same critical
+        // section. Holding machines.read + paths.write through notification
+        // prevents logoff(to) from racing in and delivering ConnectionSevered
+        // before ConnectionComplete (the FIFO channel would see Severed→Complete).
+        let establish_err = {
+            let machines = self.machines.read().await;
+            let mut paths = self.paths.write().await;
+            if !machines.contains_key(to) {
+                // Target logged off during negotiation.
+                Some(IucvError::MachineNotFound(to.as_str().to_string()))
+            } else if let Some(entry) = paths.get_mut(&path_id) {
+                if !machines.contains_key(from) {
+                    // Initiator logged off; sever_paths_for_machine(from) is
+                    // blocked behind our paths.write() — don't establish.
+                    Some(IucvError::MachineNotFound(from.as_str().to_string()))
+                } else {
+                    entry.state = PathState::Established;
+                    // Notify while holding locks (try_send is non-blocking).
+                    if let Some(m) = machines.get(from) {
+                        let _ = m.signal_tx.try_send(MachineSignal::ConnectionComplete {
+                            path: path_id,
+                            peer: to.clone(),
+                        });
+                    }
+                    if from != to {
+                        if let Some(m) = machines.get(to) {
+                            let _ = m.signal_tx.try_send(MachineSignal::ConnectionComplete {
+                                path: path_id,
+                                peer: from.clone(),
+                            });
+                        }
+                    }
+                    None // success
+                }
+            } else if !machines.contains_key(from) {
+                // Initiator logged off — sever_paths_for_machine(from) removed the entry.
+                Some(IucvError::MachineNotFound(from.as_str().to_string()))
+            } else {
+                // Entry removed by some other concurrent operation.
+                Some(IucvError::PathNotFound(path_id.as_u32()))
+            }
+        };
+
+        if let Some(err) = establish_err {
+            // Guard drops here and cleans up any remaining entry.
+            return Err(err);
+        }
+
+        // Defuse the guard — no await points between establish+notify and here.
+        cancel_guard.defuse();
+
+        Ok(path_id)
+    }
+
+    /// Sever an existing path. Delivers `ConnectionSevered` to the peer.
+    ///
+    /// Only the passive side receives `on_connection_severed`; the severing
+    /// machine (`from`) gets `Ok(())` with no callback, matching real IUCV
+    /// SEVER semantics. For self-connections (`from` is both sides), no
+    /// callback is delivered.
+    ///
+    /// Only `Established` paths can be severed. Attempting to sever a
+    /// `Pending` path (one where `connect()` has not yet completed) returns
+    /// `PathNotFound` (RC=36).
+    ///
+    /// The path entry is removed, so a subsequent `sever()` on the same path
+    /// returns `PathNotFound`.
+    ///
+    /// **Note:** This method returns `PathNotFound` (RC=36) for paths that
+    /// never existed, paths still pending, paths already severed, and paths
+    /// where `from` is not a party. The last case avoids leaking path
+    /// existence to non-participants. Callers that need to distinguish these
+    /// cases must track path lifecycle externally.
+    pub async fn sever(&self, path: PathId, from: &MachineId) -> Result<()> {
+        self.drain_orphaned_paths().await;
+        let peer = {
+            let mut paths = self.paths.write().await;
+            let entry = paths
+                .get(&path)
+                .ok_or(IucvError::PathNotFound(path.as_u32()))?;
+            if entry.state == PathState::Pending {
+                return Err(IucvError::PathNotFound(path.as_u32()));
+            }
+            let peer = if entry.machine_a == *from {
+                entry.machine_b.clone()
+            } else if entry.machine_b == *from {
+                entry.machine_a.clone()
+            } else {
+                return Err(IucvError::PathNotFound(path.as_u32()));
+            };
+            paths.remove(&path);
+            peer
+        };
+
+        // Notify only the peer (severing machine gets Ok, no callback).
+        // For self-connections (from == peer), no notification is sent.
+        if *from != peer {
+            let machines = self.machines.read().await;
+            if let Some(entry) = machines.get(&peer) {
+                let _ = entry.signal_tx.try_send(MachineSignal::ConnectionSevered {
+                    path,
+                    peer: from.clone(),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Send a no-op sentinel through the path command channel and wait for
+    /// `path_cmd_loop` to process it. Guarantees all prior `PathCommand`s
+    /// (Send, Sever) have been fully handled before this returns.
+    #[cfg(any(test, feature = "test-util"))]
+    pub async fn fence_path_cmd(&self) {
+        let (tx, rx) = oneshot::channel();
+        if let Some(sender) = self.path_cmd_tx.lock().await.as_ref() {
+            let _ = sender.send(PathCommand::Fence { reply: tx }).await;
+            let _ = rx.await;
+        }
+    }
+
+    /// Return all active paths (Pending or Established).
+    pub async fn query_paths(&self) -> Vec<PathId> {
+        self.drain_orphaned_paths().await;
+        let paths = self.paths.read().await;
+        paths.keys().copied().collect()
+    }
+
+    /// Sever all paths involving a machine (called during logoff).
+    ///
+    /// Removes path entries after notifying peers to prevent leaks.
+    async fn sever_paths_for_machine(&self, id: &MachineId) {
+        let to_notify: Vec<(PathId, MachineId)> = {
+            let mut paths = self.paths.write().await;
+            let mut severed = Vec::new();
+            paths.retain(|&pid, entry| {
+                if entry.machine_a == *id || entry.machine_b == *id {
+                    // Only notify peers for Established paths. Pending paths
+                    // are removed silently — the peer never received
+                    // ConnectionComplete, so sending ConnectionSevered would
+                    // be confusing. The in-flight connect() will fail at the
+                    // establish phase with MachineNotFound instead.
+                    if entry.state == PathState::Established {
+                        let peer = if entry.machine_a == *id {
+                            entry.machine_b.clone()
+                        } else {
+                            entry.machine_a.clone()
+                        };
+                        severed.push((pid, peer));
+                    }
+                    false // remove regardless of state
+                } else {
+                    true // keep
+                }
+            });
+            severed
+        };
+
+        // Notify peers of Established paths (best-effort).
+        if !to_notify.is_empty() {
+            let machines = self.machines.read().await;
+            for (pid, peer) in &to_notify {
+                if let Some(entry) = machines.get(peer) {
+                    let _ = entry.signal_tx.try_send(MachineSignal::ConnectionSevered {
+                        path: *pid,
+                        peer: id.clone(),
+                    });
+                }
+            }
+        }
+    }
+
     /// Shut down all machines and the router task.
     ///
     /// Acquires `router_tx` then `machines` — matching the lock order in
@@ -226,13 +615,27 @@ impl Supervisor {
     /// Phase 2: joins all task handles concurrently via `JoinSet` so that
     /// shutdown latency is `O(max on_logoff time)` rather than `O(sum)`.
     pub async fn shutdown(&self) {
+        self.drain_orphaned_paths().await;
+        // Clear all paths without sending ConnectionSevered. Since shutdown
+        // logs off every machine, the on_connection_severed contract says
+        // "not called on the machine that is logging off" — all machines are
+        // logging off, so none should receive ConnectionSevered. Handlers
+        // that need path-level cleanup should enumerate known paths in
+        // on_logoff (per the documented contract).
+        {
+            let mut paths = self.paths.write().await;
+            paths.clear();
+        }
+
         // Acquire router_tx first (matching ipl() lock order), then machines.
         // Taking router_tx atomically with the drain prevents ipl() from
         // cloning a live sender while we are shutting down.
         let entries: Vec<(MachineId, MachineEntry)> = {
             let mut router_guard = self.router_tx.lock().await;
+            let mut pcmd_guard = self.path_cmd_tx.lock().await;
             let mut machines = self.machines.write().await;
             router_guard.take(); // mark shut down
+            pcmd_guard.take();
             machines.drain().collect()
         };
 
@@ -255,12 +658,19 @@ impl Supervisor {
             }
         }
 
-        // Wait for the router task to complete (router_tx was already taken above).
-        let handle = {
+        // Wait for background tasks to complete.
+        let router_handle = {
             let mut guard = self.router_task.lock().await;
             guard.take()
         };
-        if let Some(handle) = handle {
+        if let Some(handle) = router_handle {
+            let _ = handle.await;
+        }
+        let pcmd_handle = {
+            let mut guard = self.path_cmd_task.lock().await;
+            guard.take()
+        };
+        if let Some(handle) = pcmd_handle {
             let _ = handle.await;
         }
     }
@@ -289,6 +699,23 @@ async fn run_machine(
         match signal {
             MachineSignal::Smsg(msg) => handler.on_smsg(&ctx, msg),
             MachineSignal::Logoff => break,
+            MachineSignal::ConnectionPending {
+                path,
+                from,
+                accept_tx,
+            } => {
+                let accepted = handler.on_connection_pending(&ctx, path, &from);
+                let _ = accept_tx.send(accepted);
+            }
+            MachineSignal::ConnectionComplete { path, peer } => {
+                handler.on_connection_complete(&ctx, path, &peer);
+            }
+            MachineSignal::ConnectionSevered { path, peer } => {
+                handler.on_connection_severed(&ctx, path, &peer);
+            }
+            MachineSignal::IucvData { path, data } => {
+                handler.on_iucv_data(&ctx, path, data);
+            }
         }
     }
 
@@ -320,6 +747,86 @@ async fn router_loop(
             // Non-blocking: a full target channel drops the message rather
             // than stalling the router for every other machine.
             let _ = entry.signal_tx.try_send(MachineSignal::Smsg(msg));
+        }
+    }
+}
+
+/// Background task processing path commands from machine contexts.
+async fn path_cmd_loop(
+    mut rx: mpsc::Receiver<PathCommand>,
+    machines: Arc<RwLock<HashMap<MachineId, MachineEntry>>>,
+    paths: Arc<RwLock<HashMap<PathId, PathEntry>>>,
+) {
+    while let Some(cmd) = rx.recv().await {
+        match cmd {
+            PathCommand::Sever { path, from } => {
+                let notify = {
+                    let mut paths = paths.write().await;
+                    if let Some(entry) = paths.get(&path) {
+                        if entry.state == PathState::Pending {
+                            continue; // cannot sever a pending path
+                        }
+                        let peer = if entry.machine_a == from {
+                            entry.machine_b.clone()
+                        } else if entry.machine_b == from {
+                            entry.machine_a.clone()
+                        } else {
+                            continue; // not a party — entry stays in map
+                        };
+                        paths.remove(&path);
+                        Some((from, peer))
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some((severer, peer)) = notify {
+                    // Only notify the peer — the severing machine gets no
+                    // callback, matching IUCV SEVER semantics and logoff.
+                    // For self-connections (severer == peer), no notification.
+                    if severer != peer {
+                        let machines = machines.read().await;
+                        if let Some(entry) = machines.get(&peer) {
+                            let _ = entry.signal_tx.try_send(MachineSignal::ConnectionSevered {
+                                path,
+                                peer: severer.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+            PathCommand::Send { path, from, data } => {
+                let peer = {
+                    let paths = paths.read().await;
+                    if let Some(entry) = paths.get(&path) {
+                        if entry.state != PathState::Established {
+                            continue; // silently drop: not established
+                        }
+                        if entry.machine_a == from {
+                            Some(entry.machine_b.clone())
+                        } else if entry.machine_b == from {
+                            Some(entry.machine_a.clone())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(peer) = peer {
+                    let machines = machines.read().await;
+                    if let Some(entry) = machines.get(&peer) {
+                        let _ = entry
+                            .signal_tx
+                            .try_send(MachineSignal::IucvData { path, data });
+                    }
+                }
+            }
+            #[cfg(any(test, feature = "test-util"))]
+            PathCommand::Fence { reply } => {
+                let _ = reply.send(());
+            }
         }
     }
 }
@@ -768,6 +1275,996 @@ mod tests {
         let long_text = "x".repeat(237);
         let err = sup.smsg(&alice, &bob, &long_text).await.unwrap_err();
         assert_eq!(err.rc(), 24);
+
+        sup.shutdown().await;
+    }
+
+    // ---------------------------------------------------------------
+    // IUCV Path tests (Phase 10b)
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn connect_ok() {
+        let sup = Supervisor::new();
+        let alice = MachineId::new("ALICE").unwrap();
+        let bob = MachineId::new("BOB").unwrap();
+
+        let (h_alice, alice_handle) = collector();
+        let (h_bob, bob_handle) = collector();
+        sup.ipl(&alice, h_alice).await.unwrap();
+        sup.ipl(&bob, h_bob).await.unwrap();
+
+        let path = sup.connect(&alice, &bob).await.unwrap();
+        assert!(path.as_u32() > 0);
+
+        // Both sides should receive ConnectionComplete via collector.
+        wait_for(2000, || {
+            alice_handle.path_event_count() >= 1 && bob_handle.path_event_count() >= 2
+        })
+        .await;
+
+        // Bob gets Pending + Complete, Alice gets Complete.
+        let alice_events = alice_handle.path_events();
+        assert!(alice_events.iter().any(|e| matches!(e,
+            crate::collector::PathEvent::Complete { path: p, peer }
+            if *p == path && peer.as_str() == "BOB"
+        )));
+
+        let bob_events = bob_handle.path_events();
+        assert!(bob_events.iter().any(|e| matches!(e,
+            crate::collector::PathEvent::Pending { path: p, from }
+            if *p == path && from.as_str() == "ALICE"
+        )));
+        assert!(bob_events.iter().any(|e| matches!(e,
+            crate::collector::PathEvent::Complete { path: p, peer }
+            if *p == path && peer.as_str() == "ALICE"
+        )));
+
+        sup.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn connect_unknown_sender() {
+        let sup = Supervisor::new();
+        let alice = MachineId::new("ALICE").unwrap();
+        let ghost = MachineId::new("GHOST").unwrap();
+
+        let (h_alice, _) = collector();
+        sup.ipl(&alice, h_alice).await.unwrap();
+
+        // From unknown machine.
+        let err = sup.connect(&ghost, &alice).await.unwrap_err();
+        assert_eq!(err.rc(), 12);
+
+        sup.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn connect_unknown_target() {
+        let sup = Supervisor::new();
+        let alice = MachineId::new("ALICE").unwrap();
+        let ghost = MachineId::new("GHOST").unwrap();
+
+        let (h_alice, _) = collector();
+        sup.ipl(&alice, h_alice).await.unwrap();
+
+        // To unknown machine.
+        let err = sup.connect(&alice, &ghost).await.unwrap_err();
+        assert_eq!(err.rc(), 12);
+
+        sup.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn connect_to_self() {
+        let sup = Supervisor::new();
+        let alice = MachineId::new("ALICE").unwrap();
+
+        let (h_alice, alice_handle) = collector();
+        sup.ipl(&alice, h_alice).await.unwrap();
+
+        let _path = sup.connect(&alice, &alice).await.unwrap();
+        // Alice should get Pending (as target) and one Complete (deduped).
+        wait_for(2000, || alice_handle.path_event_count() >= 2).await;
+
+        // Send a fence SMSG so we know all prior signals have been delivered.
+        let msg_count_before = alice_handle.count();
+        sup.smsg(&alice, &alice, "FENCE").await.unwrap();
+        wait_for(2000, || alice_handle.count() > msg_count_before).await;
+        assert_eq!(alice_handle.path_event_count(), 2);
+
+        let paths = sup.query_paths().await;
+        assert_eq!(paths.len(), 1);
+
+        sup.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn connect_after_shutdown() {
+        let sup = Supervisor::new();
+        let alice = MachineId::new("ALICE").unwrap();
+        let bob = MachineId::new("BOB").unwrap();
+
+        let (h_alice, _) = collector();
+        let (h_bob, _) = collector();
+        sup.ipl(&alice, h_alice).await.unwrap();
+        sup.ipl(&bob, h_bob).await.unwrap();
+
+        sup.shutdown().await;
+
+        // Both machines logged off during shutdown.
+        let err = sup.connect(&alice, &bob).await.unwrap_err();
+        assert_eq!(err.rc(), 12); // MachineNotFound
+    }
+
+    // multi_thread required: BlockingAcceptor blocks the Tokio worker thread.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn connect_cancelled_cleans_up_pending_entry() {
+        // Bob blocks in on_connection_pending. We cancel the connect() future
+        // before releasing Bob, verifying PendingPathGuard cleans up the entry.
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+
+        struct BlockOnAccept {
+            ready: std::sync::mpsc::Sender<()>,
+            release: std::sync::mpsc::Receiver<()>,
+        }
+        impl MachineHandler for BlockOnAccept {
+            fn on_smsg(&mut self, _ctx: &MachineContext, _msg: SmsgMessage) {}
+            fn on_connection_pending(
+                &mut self,
+                _ctx: &MachineContext,
+                _path: PathId,
+                _from: &MachineId,
+            ) -> bool {
+                let _ = self.ready.send(());
+                let _ = self.release.recv();
+                true
+            }
+        }
+
+        let sup = Arc::new(Supervisor::new());
+        let alice = MachineId::new("ALICE").unwrap();
+        let bob = MachineId::new("BOB").unwrap();
+
+        let (h_alice, _) = collector();
+        sup.ipl(&alice, h_alice).await.unwrap();
+        sup.ipl(
+            &bob,
+            BlockOnAccept {
+                ready: ready_tx,
+                release: release_rx,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Spawn connect — it will block until Bob accepts.
+        let sup2 = Arc::clone(&sup);
+        let alice2 = alice.clone();
+        let bob2 = bob.clone();
+        let connect_handle = tokio::spawn(async move { sup2.connect(&alice2, &bob2).await });
+
+        // Wait for Bob to enter on_connection_pending.
+        ready_rx.recv().unwrap();
+
+        // Cancel the connect future while the path is Pending.
+        connect_handle.abort();
+        let _ = connect_handle.await;
+
+        // Release Bob so his task unblocks.
+        drop(release_tx);
+
+        // Drain orphaned paths by calling query_paths.
+        // The cancelled guard should have enqueued the PathId for cleanup.
+        let paths = sup.query_paths().await;
+        assert!(
+            paths.is_empty(),
+            "PendingPathGuard should have cleaned up the entry; found {:?}",
+            paths
+        );
+
+        sup.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn target_accepts_default() {
+        // Default collector handler accepts all connections.
+        let sup = Supervisor::new();
+        let alice = MachineId::new("ALICE").unwrap();
+        let bob = MachineId::new("BOB").unwrap();
+
+        let (h_alice, _) = collector();
+        let (h_bob, _) = collector();
+        sup.ipl(&alice, h_alice).await.unwrap();
+        sup.ipl(&bob, h_bob).await.unwrap();
+
+        let path = sup.connect(&alice, &bob).await.unwrap();
+        let paths = sup.query_paths().await;
+        assert!(paths.contains(&path));
+
+        sup.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn target_refuses() {
+        struct Refuser;
+        impl MachineHandler for Refuser {
+            fn on_smsg(&mut self, _ctx: &MachineContext, _msg: SmsgMessage) {}
+            fn on_connection_pending(
+                &mut self,
+                _ctx: &MachineContext,
+                _path: PathId,
+                _from: &MachineId,
+            ) -> bool {
+                false // refuse all connections
+            }
+        }
+
+        let sup = Supervisor::new();
+        let alice = MachineId::new("ALICE").unwrap();
+        let bob = MachineId::new("BOB").unwrap();
+
+        let (h_alice, _) = collector();
+        sup.ipl(&alice, h_alice).await.unwrap();
+        sup.ipl(&bob, Refuser).await.unwrap();
+
+        let err = sup.connect(&alice, &bob).await.unwrap_err();
+        assert_eq!(err.rc(), 40); // ConnectionRefused
+
+        // No paths should remain.
+        assert!(sup.query_paths().await.is_empty());
+
+        sup.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn connect_to_logged_off_machine() {
+        let sup = Supervisor::new();
+        let alice = MachineId::new("ALICE").unwrap();
+        let bob = MachineId::new("BOB").unwrap();
+
+        let (h_alice, _) = collector();
+        let (h_bob, _) = collector();
+        sup.ipl(&alice, h_alice).await.unwrap();
+        sup.ipl(&bob, h_bob).await.unwrap();
+
+        sup.logoff(&bob).await.unwrap();
+
+        let err = sup.connect(&alice, &bob).await.unwrap_err();
+        assert_eq!(err.rc(), 12); // MachineNotFound
+
+        sup.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn sever_by_initiator() {
+        let sup = Supervisor::new();
+        let alice = MachineId::new("ALICE").unwrap();
+        let bob = MachineId::new("BOB").unwrap();
+
+        let (h_alice, alice_handle) = collector();
+        let (h_bob, bob_handle) = collector();
+        sup.ipl(&alice, h_alice).await.unwrap();
+        sup.ipl(&bob, h_bob).await.unwrap();
+
+        let path = sup.connect(&alice, &bob).await.unwrap();
+        // Wait for connection to be fully established.
+        wait_for(2000, || {
+            alice_handle.path_event_count() >= 1 && bob_handle.path_event_count() >= 2
+        })
+        .await;
+
+        sup.sever(path, &alice).await.unwrap();
+
+        // Only the peer (Bob) should receive ConnectionSevered — Alice
+        // (the severer) gets Ok with no callback, matching IUCV SEVER semantics.
+        wait_for(2000, || {
+            bob_handle
+                .path_events()
+                .iter()
+                .any(|e| matches!(e, crate::collector::PathEvent::Severed { .. }))
+        })
+        .await;
+
+        // Alice should NOT have received a Severed event.
+        assert!(
+            !alice_handle
+                .path_events()
+                .iter()
+                .any(|e| matches!(e, crate::collector::PathEvent::Severed { .. })),
+            "Severing machine should not receive ConnectionSevered"
+        );
+
+        sup.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn sever_by_target() {
+        let sup = Supervisor::new();
+        let alice = MachineId::new("ALICE").unwrap();
+        let bob = MachineId::new("BOB").unwrap();
+
+        let (h_alice, alice_handle) = collector();
+        let (h_bob, bob_handle) = collector();
+        sup.ipl(&alice, h_alice).await.unwrap();
+        sup.ipl(&bob, h_bob).await.unwrap();
+
+        let path = sup.connect(&alice, &bob).await.unwrap();
+        wait_for(2000, || bob_handle.path_event_count() >= 2).await;
+
+        // Target severs — only Alice (the peer) should get notified.
+        sup.sever(path, &bob).await.unwrap();
+
+        wait_for(2000, || {
+            alice_handle
+                .path_events()
+                .iter()
+                .any(|e| matches!(e, crate::collector::PathEvent::Severed { .. }))
+        })
+        .await;
+
+        sup.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn sever_unknown_path() {
+        let sup = Supervisor::new();
+
+        let nobody = MachineId::new("NOBODY").unwrap();
+        let err = sup.sever(PathId(999), &nobody).await.unwrap_err();
+        assert_eq!(err.rc(), 36); // PathNotFound
+
+        sup.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn double_sever() {
+        let sup = Supervisor::new();
+        let alice = MachineId::new("ALICE").unwrap();
+        let bob = MachineId::new("BOB").unwrap();
+
+        let (h_alice, _) = collector();
+        let (h_bob, _) = collector();
+        sup.ipl(&alice, h_alice).await.unwrap();
+        sup.ipl(&bob, h_bob).await.unwrap();
+
+        let path = sup.connect(&alice, &bob).await.unwrap();
+        sup.sever(path, &alice).await.unwrap();
+
+        // Second sever should fail — entry was removed on first sever.
+        let err = sup.sever(path, &alice).await.unwrap_err();
+        assert_eq!(err.rc(), 36); // PathNotFound (entry removed)
+
+        sup.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn send_data_both_directions() {
+        // Handler that sends a payload on connect and records received data.
+        struct SendAndCollect {
+            outgoing: Vec<u8>,
+            received: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+        }
+        impl MachineHandler for SendAndCollect {
+            fn on_smsg(&mut self, _ctx: &MachineContext, _msg: SmsgMessage) {}
+            fn on_connection_complete(
+                &mut self,
+                ctx: &MachineContext,
+                path: PathId,
+                _peer: &MachineId,
+            ) {
+                let buf = IucvBuffer::new(self.outgoing.clone()).unwrap();
+                let _ = ctx.iucv_send(path, buf);
+            }
+            fn on_iucv_data(&mut self, _ctx: &MachineContext, _path: PathId, data: IucvBuffer) {
+                self.received
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(data.as_bytes().to_vec());
+            }
+        }
+
+        let alice_received: Arc<std::sync::Mutex<Vec<Vec<u8>>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let bob_received: Arc<std::sync::Mutex<Vec<Vec<u8>>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let sup = Supervisor::new();
+        let alice = MachineId::new("ALICE").unwrap();
+        let bob = MachineId::new("BOB").unwrap();
+
+        sup.ipl(
+            &alice,
+            SendAndCollect {
+                outgoing: b"FROM_A".to_vec(),
+                received: Arc::clone(&alice_received),
+            },
+        )
+        .await
+        .unwrap();
+        sup.ipl(
+            &bob,
+            SendAndCollect {
+                outgoing: b"FROM_B".to_vec(),
+                received: Arc::clone(&bob_received),
+            },
+        )
+        .await
+        .unwrap();
+
+        let _path = sup.connect(&alice, &bob).await.unwrap();
+
+        // Both sides should receive data from the other.
+        wait_for(2000, || {
+            !alice_received
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty()
+                && !bob_received
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_empty()
+        })
+        .await;
+
+        {
+            let a_data = alice_received.lock().unwrap_or_else(|e| e.into_inner());
+            assert_eq!(a_data[0], b"FROM_B");
+        }
+        {
+            let b_data = bob_received.lock().unwrap_or_else(|e| e.into_inner());
+            assert_eq!(b_data[0], b"FROM_A");
+        }
+
+        sup.shutdown().await;
+    }
+
+    // multi_thread required: BlockingAcceptor::on_connection_pending blocks
+    // via std::sync::mpsc::recv. On the default single-threaded runtime this
+    // would deadlock because connect() awaits the oneshot on the same worker
+    // thread that the Bob task is blocking.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_on_pending_path() {
+        // Bob blocks in on_connection_pending, keeping the path Pending,
+        // and records all IUCV data events for later assertion.
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<PathId>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let bob_data_count: Arc<std::sync::atomic::AtomicUsize> =
+            Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // Alice signals when she has called iucv_send.
+        let alice_sent: Arc<std::sync::atomic::AtomicBool> =
+            Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        struct BlockingAcceptor {
+            ready: std::sync::mpsc::Sender<PathId>,
+            release: std::sync::mpsc::Receiver<()>,
+            data_count: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl MachineHandler for BlockingAcceptor {
+            fn on_smsg(&mut self, _ctx: &MachineContext, _msg: SmsgMessage) {}
+            fn on_connection_pending(
+                &mut self,
+                _ctx: &MachineContext,
+                path: PathId,
+                _from: &MachineId,
+            ) -> bool {
+                let _ = self.ready.send(path);
+                let _ = self.release.recv();
+                true
+            }
+            fn on_iucv_data(&mut self, _ctx: &MachineContext, _path: PathId, _data: IucvBuffer) {
+                self.data_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
+        // Alice sends IUCV data whenever she receives an SMSG with a path id,
+        // and signals via an atomic flag when done.
+        struct SmsgTriggeredSend {
+            sent: Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl MachineHandler for SmsgTriggeredSend {
+            fn on_smsg(&mut self, ctx: &MachineContext, msg: SmsgMessage) {
+                if let Ok(pid) = msg.text().parse::<u32>() {
+                    let buf = IucvBuffer::new(b"DATA".to_vec()).unwrap();
+                    let _ = ctx.iucv_send(PathId(pid), buf);
+                    self.sent.store(true, std::sync::atomic::Ordering::Release);
+                }
+            }
+        }
+
+        let sup = Arc::new(Supervisor::new());
+        let alice = MachineId::new("ALICE").unwrap();
+        let bob = MachineId::new("BOB").unwrap();
+
+        let bob_data = Arc::clone(&bob_data_count);
+        let alice_sent_clone = Arc::clone(&alice_sent);
+        sup.ipl(
+            &alice,
+            SmsgTriggeredSend {
+                sent: alice_sent_clone,
+            },
+        )
+        .await
+        .unwrap();
+        sup.ipl(
+            &bob,
+            BlockingAcceptor {
+                ready: ready_tx,
+                release: release_rx,
+                data_count: bob_data,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Spawn connect in background — it blocks until Bob accepts.
+        let sup2 = Arc::clone(&sup);
+        let alice2 = alice.clone();
+        let bob2 = bob.clone();
+        let connect_task = tokio::spawn(async move { sup2.connect(&alice2, &bob2).await });
+
+        // Wait for Bob to enter on_connection_pending (path is now Pending).
+        let pending_path = ready_rx.recv().unwrap();
+
+        // Tell Alice to send data on the pending path via SMSG trigger.
+        sup.smsg(&bob, &alice, &pending_path.as_u32().to_string())
+            .await
+            .unwrap();
+
+        // Wait for Alice to confirm she called iucv_send (PathCommand::Send
+        // is now enqueued in path_cmd_tx).
+        wait_for(2000, || {
+            alice_sent.load(std::sync::atomic::Ordering::Acquire)
+        })
+        .await;
+
+        // Fence the path_cmd channel: guarantees path_cmd_loop has processed
+        // all prior commands (including Alice's Send) before we assert.
+        // Bob is still blocking in on_connection_pending, so the path is
+        // guaranteed to be in Pending state when path_cmd_loop processes it.
+        sup.fence_path_cmd().await;
+
+        // Assert BEFORE releasing Bob: path is guaranteed still Pending,
+        // so path_cmd_loop must have silently dropped the Send.
+        assert_eq!(
+            bob_data_count.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "Data should not be delivered on a Pending path"
+        );
+
+        // Now release Bob's acceptor so connect completes.
+        drop(release_tx);
+        let _path = connect_task.await.unwrap().unwrap();
+
+        // Second assertion after connect completes: path_cmd_loop is FIFO, so
+        // by the time the path transitioned to Established the earlier Send
+        // (issued while Pending) has already been evaluated and dropped.
+        assert_eq!(
+            bob_data_count.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "Data should not be delivered retroactively after path becomes Established"
+        );
+
+        sup.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn send_on_severed_path() {
+        struct SendOnSmsg;
+        impl MachineHandler for SendOnSmsg {
+            fn on_smsg(&mut self, ctx: &MachineContext, msg: SmsgMessage) {
+                if let Ok(pid) = msg.text().parse::<u32>() {
+                    let buf = IucvBuffer::new(b"AFTER_SEVER".to_vec()).unwrap();
+                    let _ = ctx.iucv_send(PathId(pid), buf);
+                }
+            }
+        }
+
+        let sup = Supervisor::new();
+        let alice = MachineId::new("ALICE").unwrap();
+        let bob = MachineId::new("BOB").unwrap();
+
+        sup.ipl(&alice, SendOnSmsg).await.unwrap();
+        let (h_bob, bob_handle) = collector();
+        sup.ipl(&bob, h_bob).await.unwrap();
+
+        let path = sup.connect(&alice, &bob).await.unwrap();
+        wait_for(2000, || bob_handle.path_event_count() >= 2).await;
+
+        // Sever the path (Alice severs; Bob gets notified).
+        sup.sever(path, &alice).await.unwrap();
+        wait_for(2000, || {
+            bob_handle
+                .path_events()
+                .iter()
+                .any(|e| matches!(e, crate::collector::PathEvent::Severed { .. }))
+        })
+        .await;
+
+        let count_before = bob_handle
+            .path_events()
+            .iter()
+            .filter(|e| matches!(e, crate::collector::PathEvent::Data { .. }))
+            .count();
+
+        // Tell Alice to send data on the severed path.
+        sup.smsg(&bob, &alice, &path.as_u32().to_string())
+            .await
+            .unwrap();
+
+        // Use a fence SMSG to Bob to confirm the router delivered Alice's
+        // trigger (both go through the same FIFO router channel). Once Bob
+        // receives the fence, Alice's on_smsg has completed and iucv_send
+        // has enqueued the PathCommand::Send.
+        let msg_count_before = bob_handle.count();
+        sup.smsg(&alice, &bob, "FENCE").await.unwrap();
+        wait_for(2000, || bob_handle.count() > msg_count_before).await;
+
+        // Fence the path_cmd channel: guarantees path_cmd_loop has processed
+        // all prior commands (including Alice's Send on the severed path).
+        sup.fence_path_cmd().await;
+
+        // Bob should NOT have received any new Data events.
+        let count_after = bob_handle
+            .path_events()
+            .iter()
+            .filter(|e| matches!(e, crate::collector::PathEvent::Data { .. }))
+            .count();
+        assert_eq!(count_before, count_after);
+
+        sup.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn send_large_buffer() {
+        struct SendOnConnect {
+            data: Vec<u8>,
+        }
+        impl MachineHandler for SendOnConnect {
+            fn on_smsg(&mut self, _ctx: &MachineContext, _msg: SmsgMessage) {}
+            fn on_connection_complete(
+                &mut self,
+                ctx: &MachineContext,
+                path: PathId,
+                _peer: &MachineId,
+            ) {
+                let buf = IucvBuffer::new(self.data.clone()).unwrap();
+                let _ = ctx.iucv_send(path, buf);
+            }
+        }
+
+        let sup = Supervisor::new();
+        let alice = MachineId::new("ALICE").unwrap();
+        let bob = MachineId::new("BOB").unwrap();
+
+        // Send near-max IUCV buffer (65535 bytes).
+        let big_data = vec![0xABu8; 65535];
+        sup.ipl(
+            &alice,
+            SendOnConnect {
+                data: big_data.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        let (h_bob, bob_handle) = collector();
+        sup.ipl(&bob, h_bob).await.unwrap();
+
+        let _path = sup.connect(&alice, &bob).await.unwrap();
+
+        wait_for(2000, || {
+            bob_handle
+                .path_events()
+                .iter()
+                .any(|e| matches!(e, crate::collector::PathEvent::Data { .. }))
+        })
+        .await;
+
+        let bob_events = bob_handle.path_events();
+        let data_event = bob_events
+            .iter()
+            .find(|e| matches!(e, crate::collector::PathEvent::Data { .. }));
+        if let Some(crate::collector::PathEvent::Data { data, .. }) = data_event {
+            assert_eq!(data.len(), 65535);
+            assert_eq!(data.as_bytes()[0], 0xAB);
+        } else {
+            panic!("Expected Data event");
+        }
+
+        sup.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn logoff_severs_paths() {
+        let sup = Supervisor::new();
+        let alice = MachineId::new("ALICE").unwrap();
+        let bob = MachineId::new("BOB").unwrap();
+
+        let (h_alice, _) = collector();
+        let (h_bob, bob_handle) = collector();
+        sup.ipl(&alice, h_alice).await.unwrap();
+        sup.ipl(&bob, h_bob).await.unwrap();
+
+        let path = sup.connect(&alice, &bob).await.unwrap();
+        wait_for(2000, || bob_handle.path_event_count() >= 2).await;
+
+        // Alice logs off — path should be severed.
+        sup.logoff(&alice).await.unwrap();
+
+        // Bob should receive ConnectionSevered.
+        wait_for(2000, || {
+            bob_handle
+                .path_events()
+                .iter()
+                .any(|e| matches!(e, crate::collector::PathEvent::Severed { .. }))
+        })
+        .await;
+
+        // Path should no longer be active.
+        let active = sup.query_paths().await;
+        assert!(!active.contains(&path));
+
+        sup.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn peer_receives_severed_on_logoff() {
+        let sup = Supervisor::new();
+        let alice = MachineId::new("ALICE").unwrap();
+        let bob = MachineId::new("BOB").unwrap();
+
+        let (h_alice, alice_handle) = collector();
+        let (h_bob, _) = collector();
+        sup.ipl(&alice, h_alice).await.unwrap();
+        sup.ipl(&bob, h_bob).await.unwrap();
+
+        let path = sup.connect(&alice, &bob).await.unwrap();
+        wait_for(2000, || alice_handle.path_event_count() >= 1).await;
+
+        // Bob logs off — Alice (the initiator/peer) should be notified.
+        sup.logoff(&bob).await.unwrap();
+
+        wait_for(2000, || {
+            alice_handle.path_events().iter().any(|e| {
+                matches!(e,
+                    crate::collector::PathEvent::Severed { path: p, peer }
+                    if *p == path && peer.as_str() == "BOB"
+                )
+            })
+        })
+        .await;
+
+        sup.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_severs_all_paths() {
+        let sup = Supervisor::new();
+        let alice = MachineId::new("ALICE").unwrap();
+        let bob = MachineId::new("BOB").unwrap();
+        let carol = MachineId::new("CAROL").unwrap();
+
+        let (h_alice, alice_handle) = collector();
+        let (h_bob, bob_handle) = collector();
+        let (h_carol, carol_handle) = collector();
+        sup.ipl(&alice, h_alice).await.unwrap();
+        sup.ipl(&bob, h_bob).await.unwrap();
+        sup.ipl(&carol, h_carol).await.unwrap();
+
+        let _p1 = sup.connect(&alice, &bob).await.unwrap();
+        let _p2 = sup.connect(&bob, &carol).await.unwrap();
+
+        assert_eq!(sup.query_paths().await.len(), 2);
+
+        sup.shutdown().await;
+
+        assert!(sup.query_paths().await.is_empty());
+
+        // No machine should have received ConnectionSevered from shutdown.
+        // The documented contract says on_connection_severed is "not called
+        // on the machine that is logging off" — and shutdown logs off all.
+        for (name, handle) in [
+            ("ALICE", &alice_handle),
+            ("BOB", &bob_handle),
+            ("CAROL", &carol_handle),
+        ] {
+            assert!(
+                !handle
+                    .path_events()
+                    .iter()
+                    .any(|e| matches!(e, crate::collector::PathEvent::Severed { .. })),
+                "{} should not receive ConnectionSevered during shutdown",
+                name
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sever_path_from_handler() {
+        struct SeverOnSmsg;
+        impl MachineHandler for SeverOnSmsg {
+            fn on_smsg(&mut self, ctx: &MachineContext, msg: SmsgMessage) {
+                if let Ok(pid) = msg.text().parse::<u32>() {
+                    let _ = ctx.sever_path(PathId(pid));
+                }
+            }
+        }
+
+        let sup = Supervisor::new();
+        let alice = MachineId::new("ALICE").unwrap();
+        let bob = MachineId::new("BOB").unwrap();
+
+        sup.ipl(&alice, SeverOnSmsg).await.unwrap();
+        let (h_bob, bob_handle) = collector();
+        sup.ipl(&bob, h_bob).await.unwrap();
+
+        let path = sup.connect(&alice, &bob).await.unwrap();
+        wait_for(2000, || bob_handle.path_event_count() >= 2).await;
+
+        // Tell Alice to sever the path via SMSG.
+        sup.smsg(&bob, &alice, &path.as_u32().to_string())
+            .await
+            .unwrap();
+
+        // Bob should receive ConnectionSevered from the path_cmd_loop.
+        wait_for(2000, || {
+            bob_handle
+                .path_events()
+                .iter()
+                .any(|e| matches!(e, crate::collector::PathEvent::Severed { .. }))
+        })
+        .await;
+
+        sup.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn iucv_send_from_handler() {
+        struct SendOnSmsg;
+        impl MachineHandler for SendOnSmsg {
+            fn on_smsg(&mut self, ctx: &MachineContext, msg: SmsgMessage) {
+                if let Ok(pid) = msg.text().parse::<u32>() {
+                    let buf = IucvBuffer::new(b"FROM_HANDLER".to_vec()).unwrap();
+                    let _ = ctx.iucv_send(PathId(pid), buf);
+                }
+            }
+        }
+
+        let sup = Supervisor::new();
+        let alice = MachineId::new("ALICE").unwrap();
+        let bob = MachineId::new("BOB").unwrap();
+
+        sup.ipl(&alice, SendOnSmsg).await.unwrap();
+        let (h_bob, bob_handle) = collector();
+        sup.ipl(&bob, h_bob).await.unwrap();
+
+        let path = sup.connect(&alice, &bob).await.unwrap();
+        wait_for(2000, || bob_handle.path_event_count() >= 2).await;
+
+        // Tell Alice to send IUCV data via SMSG trigger.
+        sup.smsg(&bob, &alice, &path.as_u32().to_string())
+            .await
+            .unwrap();
+
+        // Bob should receive the IUCV data.
+        wait_for(2000, || {
+            bob_handle
+                .path_events()
+                .iter()
+                .any(|e| matches!(e, crate::collector::PathEvent::Data { .. }))
+        })
+        .await;
+
+        let events = bob_handle.path_events();
+        let data_event = events
+            .iter()
+            .find(|e| matches!(e, crate::collector::PathEvent::Data { .. }));
+        if let Some(crate::collector::PathEvent::Data { data, .. }) = data_event {
+            assert_eq!(data.as_bytes(), b"FROM_HANDLER");
+        } else {
+            panic!("Expected Data event");
+        }
+
+        sup.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn query_paths_filters_severed() {
+        let sup = Supervisor::new();
+        let alice = MachineId::new("ALICE").unwrap();
+        let bob = MachineId::new("BOB").unwrap();
+        let carol = MachineId::new("CAROL").unwrap();
+
+        let (h_alice, _) = collector();
+        let (h_bob, _) = collector();
+        let (h_carol, _) = collector();
+        sup.ipl(&alice, h_alice).await.unwrap();
+        sup.ipl(&bob, h_bob).await.unwrap();
+        sup.ipl(&carol, h_carol).await.unwrap();
+
+        let p1 = sup.connect(&alice, &bob).await.unwrap();
+        let p2 = sup.connect(&alice, &carol).await.unwrap();
+        assert_eq!(sup.query_paths().await.len(), 2);
+
+        // Sever one path.
+        sup.sever(p1, &alice).await.unwrap();
+
+        let paths = sup.query_paths().await;
+        assert_eq!(paths.len(), 1);
+        assert!(paths.contains(&p2));
+        assert!(!paths.contains(&p1));
+
+        sup.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn multiple_paths_between_same_machines() {
+        let sup = Supervisor::new();
+        let alice = MachineId::new("ALICE").unwrap();
+        let bob = MachineId::new("BOB").unwrap();
+
+        let (h_alice, _) = collector();
+        let (h_bob, _) = collector();
+        sup.ipl(&alice, h_alice).await.unwrap();
+        sup.ipl(&bob, h_bob).await.unwrap();
+
+        let p1 = sup.connect(&alice, &bob).await.unwrap();
+        let p2 = sup.connect(&alice, &bob).await.unwrap();
+        assert_ne!(p1, p2);
+
+        let paths = sup.query_paths().await;
+        assert_eq!(paths.len(), 2);
+
+        sup.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn logoff_severs_multiple_paths() {
+        let sup = Supervisor::new();
+        let alice = MachineId::new("ALICE").unwrap();
+        let bob = MachineId::new("BOB").unwrap();
+        let carol = MachineId::new("CAROL").unwrap();
+
+        let (h_alice, _) = collector();
+        let (h_bob, bob_handle) = collector();
+        let (h_carol, carol_handle) = collector();
+        sup.ipl(&alice, h_alice).await.unwrap();
+        sup.ipl(&bob, h_bob).await.unwrap();
+        sup.ipl(&carol, h_carol).await.unwrap();
+
+        let _p1 = sup.connect(&alice, &bob).await.unwrap();
+        let _p2 = sup.connect(&alice, &carol).await.unwrap();
+        wait_for(2000, || {
+            bob_handle.path_event_count() >= 2 && carol_handle.path_event_count() >= 2
+        })
+        .await;
+
+        assert_eq!(sup.query_paths().await.len(), 2);
+
+        // Alice logs off — both paths should be severed.
+        sup.logoff(&alice).await.unwrap();
+
+        wait_for(2000, || {
+            bob_handle
+                .path_events()
+                .iter()
+                .any(|e| matches!(e, crate::collector::PathEvent::Severed { .. }))
+                && carol_handle
+                    .path_events()
+                    .iter()
+                    .any(|e| matches!(e, crate::collector::PathEvent::Severed { .. }))
+        })
+        .await;
+
+        // No active paths remaining (all severed).
+        let active = sup.query_paths().await;
+        assert!(
+            active.is_empty(),
+            "Expected no active paths after logoff, got {}",
+            active.len()
+        );
 
         sup.shutdown().await;
     }
