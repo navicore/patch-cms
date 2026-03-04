@@ -491,9 +491,11 @@ impl Supervisor {
     /// The path entry is removed, so a subsequent `sever()` on the same path
     /// returns `PathNotFound`.
     ///
-    /// **Note:** This method returns `PathNotFound` (RC=36) for both paths that
-    /// never existed, paths still pending, and paths already severed. Callers
-    /// that need to distinguish these cases must track path lifecycle externally.
+    /// **Note:** This method returns `PathNotFound` (RC=36) for paths that
+    /// never existed, paths still pending, paths already severed, and paths
+    /// where `from` is not a party. The last case avoids leaking path
+    /// existence to non-participants. Callers that need to distinguish these
+    /// cases must track path lifecycle externally.
     pub async fn sever(&self, path: PathId, from: &MachineId) -> Result<()> {
         self.drain_orphaned_paths().await;
         let peer = {
@@ -528,6 +530,18 @@ impl Supervisor {
         }
 
         Ok(())
+    }
+
+    /// Send a no-op sentinel through the path command channel and wait for
+    /// `path_cmd_loop` to process it. Guarantees all prior `PathCommand`s
+    /// (Send, Sever) have been fully handled before this returns.
+    #[cfg(any(test, feature = "test-util"))]
+    pub async fn fence_path_cmd(&self) {
+        let (tx, rx) = oneshot::channel();
+        if let Some(sender) = self.path_cmd_tx.lock().await.as_ref() {
+            let _ = sender.send(PathCommand::Fence { reply: tx }).await;
+            let _ = rx.await;
+        }
     }
 
     /// Return all active paths (Pending or Established).
@@ -802,6 +816,10 @@ async fn path_cmd_loop(
                             .try_send(MachineSignal::IucvData { path, data });
                     }
                 }
+            }
+            #[cfg(any(test, feature = "test-util"))]
+            PathCommand::Fence { reply } => {
+                let _ = reply.send(());
             }
         }
     }
@@ -1796,10 +1814,11 @@ mod tests {
         })
         .await;
 
-        // Give path_cmd_loop time to dequeue and process the Send.
+        // Fence the path_cmd channel: guarantees path_cmd_loop has processed
+        // all prior commands (including Alice's Send) before we assert.
         // Bob is still blocking in on_connection_pending, so the path is
         // guaranteed to be in Pending state when path_cmd_loop processes it.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        sup.fence_path_cmd().await;
 
         // Assert BEFORE releasing Bob: path is guaranteed still Pending,
         // so path_cmd_loop must have silently dropped the Send.
@@ -1872,13 +1891,14 @@ mod tests {
         // Use a fence SMSG to Bob to confirm the router delivered Alice's
         // trigger (both go through the same FIFO router channel). Once Bob
         // receives the fence, Alice's on_smsg has completed and iucv_send
-        // has enqueued the PathCommand::Send. Then sleep to give
-        // path_cmd_loop time to process it — path_cmd_tx is an independent
-        // channel with no happens-before relationship to the router.
+        // has enqueued the PathCommand::Send.
         let msg_count_before = bob_handle.count();
         sup.smsg(&alice, &bob, "FENCE").await.unwrap();
         wait_for(2000, || bob_handle.count() > msg_count_before).await;
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Fence the path_cmd channel: guarantees path_cmd_loop has processed
+        // all prior commands (including Alice's Send on the severed path).
+        sup.fence_path_cmd().await;
 
         // Bob should NOT have received any new Data events.
         let count_after = bob_handle

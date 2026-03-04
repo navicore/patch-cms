@@ -15,6 +15,12 @@ pub(crate) enum PathCommand {
         from: MachineId,
         data: IucvBuffer,
     },
+    /// No-op sentinel: replies on the oneshot after all prior commands have
+    /// been processed. Used by tests to synchronize with `path_cmd_loop`.
+    #[cfg(any(test, feature = "test-util"))]
+    Fence {
+        reply: tokio::sync::oneshot::Sender<()>,
+    },
 }
 
 /// Runtime context passed to a machine handler during lifecycle callbacks.
@@ -119,6 +125,11 @@ pub trait MachineHandler: Send + 'static {
 
     /// Called when another machine requests a connection.
     /// Return true to accept, false to refuse.
+    ///
+    /// If the caller's `connect()` future is dropped after this callback
+    /// returns `true` but before establishment completes,
+    /// `on_connection_complete` will not be called. Handlers must tolerate
+    /// accepting a path that is never completed.
     ///
     /// **Warning:** This callback runs synchronously on the machine's Tokio
     /// task. Blocking here (e.g., `std::sync::mpsc::Receiver::recv`,
