@@ -5,7 +5,7 @@ use cms_core::command::ExecHandler;
 use cms_core::{CmsFileSystem, CommandProcessor, GlobalVars, NoExecHandler, NoSmsgSender};
 
 use patch_rexx::env::Environment;
-use patch_rexx::eval::Evaluator;
+use patch_rexx::eval::{Evaluator, ExecSignal};
 use patch_rexx::lexer::Lexer;
 use patch_rexx::parser::Parser;
 use patch_rexx::value::RexxValue;
@@ -15,14 +15,17 @@ use patch_rexx::value::RexxValue;
 ///
 /// This is the simple variant — each ADDRESS CMS command runs against a
 /// temporary CommandProcessor with no persistent filesystem or globalv state.
-/// SAY output goes directly to stdout (suitable for interactive sessions).
+///
+/// **Known limitation:** SAY output goes directly to stdout via the patch-rexx
+/// interpreter and is not captured in the returned message vector. This is
+/// acceptable for interactive sessions where stdout is the console.
 pub struct CmsRexxExecHandler;
 
 impl ExecHandler for CmsRexxExecHandler {
     fn execute_exec(&mut self, source: &str, args: &str) -> (i32, Vec<String>) {
         match run_rexx_exec(source, args, None, None) {
             Ok((rc, messages, _, _)) => (rc, messages),
-            Err(msg) => (28, vec![msg]),
+            Err((msg, _, _)) => (28, vec![msg]),
         }
     }
 }
@@ -56,12 +59,21 @@ impl ExecHandler for CmsRexxExecHandlerWithSwap {
                 self.globalv = gv_back;
                 (rc, messages)
             }
-            Err(msg) => (28, vec![msg]),
+            Err((msg, fs_back, gv_back)) => {
+                // Issue #4 fix: restore state even on error path
+                self.filesystem = fs_back;
+                self.globalv = gv_back;
+                (28, vec![msg])
+            }
         }
     }
 }
 
-type RexxExecResult = Result<(i32, Vec<String>, Option<CmsFileSystem>, Option<GlobalVars>), String>;
+/// Error type that preserves filesystem/globalv state for the caller to recover.
+type RexxExecResult = Result<
+    (i32, Vec<String>, Option<CmsFileSystem>, Option<GlobalVars>),
+    (String, Option<CmsFileSystem>, Option<GlobalVars>),
+>;
 
 fn run_rexx_exec(
     source: &str,
@@ -69,16 +81,19 @@ fn run_rexx_exec(
     filesystem: Option<CmsFileSystem>,
     globalv: Option<GlobalVars>,
 ) -> RexxExecResult {
-    // Parse the REXX source
+    // Parse the REXX source — errors here happen before state is wrapped,
+    // so return the original filesystem/globalv on the error path.
     let mut lexer = Lexer::new(source);
-    let tokens = lexer
-        .tokenize()
-        .map_err(|e| format!("REXX syntax error: {}", e))?;
+    let tokens = match lexer.tokenize() {
+        Ok(t) => t,
+        Err(e) => return Err((format!("REXX syntax error: {}", e), filesystem, globalv)),
+    };
 
     let mut parser = Parser::new(tokens);
-    let program = parser
-        .parse()
-        .map_err(|e| format!("REXX parse error: {}", e))?;
+    let program = match parser.parse() {
+        Ok(p) => p,
+        Err(e) => return Err((format!("REXX parse error: {}", e), filesystem, globalv)),
+    };
 
     // Set up the REXX environment with ADDRESS CMS
     let mut rexx_env = Environment::new();
@@ -99,9 +114,10 @@ fn run_rexx_exec(
     let gv_handle = Rc::clone(&shared_gv);
     let output_handle = Rc::clone(&output);
 
+    // Issue #2 fix: use vars to write GLOBALV GET results back to the REXX variable pool
     let handler = move |addr_env: &str,
                         command: &str,
-                        _vars: &mut patch_rexx::env::EnvVars<'_>|
+                        vars: &mut patch_rexx::env::EnvVars<'_>|
           -> Option<i32> {
         let addr_upper = addr_env.to_uppercase();
         if addr_upper != "CMS" && addr_upper != "COMMAND" {
@@ -120,8 +136,8 @@ fn run_rexx_exec(
         let mut gv_taken = GlobalVars::new();
         std::mem::swap(&mut *gv_handle.borrow_mut(), &mut gv_taken);
 
-        // Create temp processor (no EXEC handler — nested EXEC returns RC=28,
-        // matching real CMS behavior for deep nesting)
+        // Create temp processor — nested EXEC is not supported at this depth
+        // (NoExecHandler returns RC=28 if a nested EXEC is attempted).
         let mut temp_proc = CommandProcessor::with_smsg_sender(
             fs_taken,
             Box::new(NoExecHandler),
@@ -130,6 +146,22 @@ fn run_rexx_exec(
         *temp_proc.globalv_mut() = gv_taken;
 
         let result = temp_proc.execute(cmd_text);
+
+        // Write GLOBALV GET results back to the REXX variable pool.
+        // GLOBALV GET VARNAME retrieves the value and sets VARNAME in the
+        // caller's environment — this is the CMS convention.
+        if cmd_text.to_ascii_uppercase().starts_with("GLOBALV")
+            || cmd_text.to_ascii_uppercase().starts_with("GLOB")
+        {
+            let tokens: Vec<&str> = cmd_text.split_whitespace().collect();
+            if tokens.len() >= 3 && tokens[1].eq_ignore_ascii_case("GET") && result.rc == 0 {
+                let var_name = tokens[2].to_ascii_uppercase();
+                if let Some(val) = result.messages.first() {
+                    vars.set(&var_name, RexxValue::new(val));
+                }
+            }
+        }
+
         for msg in &result.messages {
             output_handle.borrow_mut().push(msg.clone());
         }
@@ -150,15 +182,26 @@ fn run_rexx_exec(
 
     drop(evaluator);
 
-    let messages = Rc::try_unwrap(output)
-        .map_err(|_| "REXX: internal state error (multiple references)".to_string())?
-        .into_inner();
+    // Unwrap shared state — guaranteed to succeed since evaluator is dropped
+    let messages = match Rc::try_unwrap(output) {
+        Ok(cell) => cell.into_inner(),
+        Err(_rc) => {
+            let fs_back = Rc::try_unwrap(shared_fs).ok().map(|c| c.into_inner());
+            let gv_back = Rc::try_unwrap(shared_gv).ok().map(|c| c.into_inner());
+            return Err((
+                "REXX: internal state error (multiple references)".to_string(),
+                fs_back,
+                gv_back,
+            ));
+        }
+    };
 
     let fs_back = Rc::try_unwrap(shared_fs).ok().map(|c| c.into_inner());
     let gv_back = Rc::try_unwrap(shared_gv).ok().map(|c| c.into_inner());
 
+    // Issue #1 fix: extract REXX exit code from ExecSignal
     let rc = match exec_result {
-        Ok(_) => 0,
+        Ok(signal) => extract_rc(&signal),
         Err(msg) => {
             let mut msgs = messages;
             msgs.push(msg);
@@ -167,6 +210,19 @@ fn run_rexx_exec(
     };
 
     Ok((rc, messages, fs_back, gv_back))
+}
+
+/// Extract a numeric return code from a REXX ExecSignal.
+///
+/// - `Exit(Some(value))` / `Return(Some(value))`: parse value as i32, default 0
+/// - `Normal` / `Exit(None)` / `Return(None)`: RC=0
+fn extract_rc(signal: &ExecSignal) -> i32 {
+    match signal {
+        ExecSignal::Exit(Some(val)) | ExecSignal::Return(Some(val)) => {
+            val.as_str().parse::<i32>().unwrap_or(0)
+        }
+        _ => 0,
+    }
 }
 
 #[cfg(test)]
@@ -209,6 +265,31 @@ say target
         assert_eq!(rc, 0);
     }
 
+    // Issue #1: exit code is propagated
+    #[test]
+    fn exit_code_propagated() {
+        let mut handler = CmsRexxExecHandler;
+        let source = "/* REXX */\nexit 4\n";
+        let (rc, _) = handler.execute_exec(source, "");
+        assert_eq!(rc, 4);
+    }
+
+    #[test]
+    fn exit_code_24_from_exec() {
+        let mut handler = CmsRexxExecHandler;
+        let source = "/* REXX */\nexit 24\n";
+        let (rc, _) = handler.execute_exec(source, "");
+        assert_eq!(rc, 24);
+    }
+
+    #[test]
+    fn exit_no_value_is_rc0() {
+        let mut handler = CmsRexxExecHandler;
+        let source = "/* REXX */\nexit\n";
+        let (rc, _) = handler.execute_exec(source, "");
+        assert_eq!(rc, 0);
+    }
+
     #[test]
     fn with_swap_globalv_persists() {
         let mut handler = CmsRexxExecHandlerWithSwap::new();
@@ -240,5 +321,44 @@ say target
         let (rc, msgs) = handler.execute_exec(source, "");
         assert_eq!(rc, 0);
         assert_eq!(msgs, vec!["apple"]);
+    }
+
+    // Issue #2: GLOBALV GET writes to REXX variable pool
+    #[test]
+    fn globalv_get_sets_rexx_variable() {
+        let mut handler = CmsRexxExecHandlerWithSwap::new();
+        handler.filesystem = Some(CmsFileSystem::new());
+        let mut gv = GlobalVars::new();
+        gv.set("COLOR", "blue");
+        handler.globalv = Some(gv);
+
+        // REXX program does GLOBALV GET COLOR, then uses the variable
+        let source = r#"/* REXX */
+'GLOBALV GET COLOR'
+if color = 'blue' then
+    exit 0
+else
+    exit 99
+"#;
+        let (rc, _) = handler.execute_exec(source, "");
+        assert_eq!(rc, 0, "GLOBALV GET should set the REXX variable 'color'");
+    }
+
+    // Issue #4: state preserved on error path
+    #[test]
+    fn with_swap_state_preserved_on_syntax_error() {
+        let mut handler = CmsRexxExecHandlerWithSwap::new();
+        let mut gv = GlobalVars::new();
+        gv.set("KEY", "preserved");
+        handler.filesystem = Some(CmsFileSystem::new());
+        handler.globalv = Some(gv);
+
+        let (rc, _) = handler.execute_exec("if then bad syntax", "");
+        assert_eq!(rc, 28);
+
+        // State must still be present
+        assert!(handler.filesystem.is_some(), "filesystem lost on error");
+        let gv = handler.globalv.as_ref().expect("globalv lost on error");
+        assert_eq!(gv.get("KEY"), Some("preserved"));
     }
 }
