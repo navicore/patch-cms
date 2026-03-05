@@ -44,18 +44,8 @@ pub fn run_console(
     output_rx: mpsc::Receiver<String>,
 ) {
     // Drain initial IPL output (logon banner, PROFILE EXEC output).
-    // IPL is not triggered by a $CON wake so no sentinel is sent — use a brief timeout.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
-    loop {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        match output_rx.recv_timeout(remaining) {
-            Ok(line) => println!("{}", line),
-            Err(_) => break,
-        }
-    }
+    // The handler sends BATCH_DONE after on_ipl completes.
+    drain_until_sentinel(&output_rx, std::time::Duration::from_secs(5));
 
     let stdin = io::stdin();
     let reader = stdin.lock();

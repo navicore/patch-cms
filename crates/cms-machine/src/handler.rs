@@ -124,6 +124,9 @@ impl MachineHandler for CmsMachineHandler {
                 let _ = self.output_tx.send(msg.clone());
             }
         }
+
+        // Signal IPL output is complete so the console can drain reliably
+        let _ = self.output_tx.send(Self::BATCH_DONE.to_string());
     }
 
     fn on_smsg(&mut self, ctx: &MachineContext, msg: SmsgMessage) {

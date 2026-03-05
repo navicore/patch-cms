@@ -155,8 +155,7 @@ fn run_rexx_exec(
             .first()
             .map(|t| t.to_ascii_uppercase())
             .unwrap_or_default();
-        let is_globalv = first_upper == "GLOBALV"
-            || (first_upper.len() >= 4 && "GLOBALV".starts_with(&first_upper));
+        let is_globalv = first_upper.len() >= 4 && "GLOBALV".starts_with(&first_upper);
         if is_globalv
             && tokens.len() >= 3
             && tokens[1].eq_ignore_ascii_case("GET")
