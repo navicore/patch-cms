@@ -45,7 +45,7 @@ pub fn run_console(
 ) {
     // Drain initial IPL output (logon banner, PROFILE EXEC output).
     // The handler sends BATCH_DONE after on_ipl completes.
-    drain_until_sentinel(&output_rx, std::time::Duration::from_secs(5));
+    drain_until_sentinel(&output_rx, std::time::Duration::from_secs(10));
 
     let stdin = io::stdin();
     let reader = stdin.lock();
@@ -90,8 +90,10 @@ pub fn run_console(
             continue;
         }
 
-        // Wait for batch-done sentinel (with timeout for safety)
-        drain_until_sentinel(&output_rx, std::time::Duration::from_secs(5));
+        // Wait for batch-done sentinel. Timeout is a safety net only — the
+        // sentinel is the real sync mechanism. Use a generous timeout so slow
+        // REXX EXECs (e.g., copying many files) don't cause premature Ready;.
+        drain_until_sentinel(&output_rx, std::time::Duration::from_secs(300));
 
         println!("Ready;");
         io::stdout().flush().ok();

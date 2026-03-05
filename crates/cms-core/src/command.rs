@@ -584,25 +584,18 @@ impl CommandProcessor {
             }
             GlobalvSubcommand::Get(names) => {
                 let mut messages = Vec::new();
-                let mut all_found = true;
                 for name in &names {
                     match self.globalv.get(name) {
                         Some(val) => messages.push(val.to_string()),
                         None => {
-                            all_found = false;
-                            break;
+                            return CmsCommandResult::error(
+                                4,
+                                format!("Variable {} not found", name),
+                            );
                         }
                     }
                 }
-                if all_found {
-                    CmsCommandResult::ok_with(messages)
-                } else {
-                    let missing = names
-                        .iter()
-                        .find(|n| self.globalv.get(n).is_none())
-                        .unwrap();
-                    CmsCommandResult::error(4, format!("Variable {} not found", missing))
-                }
+                CmsCommandResult::ok_with(messages)
             }
             GlobalvSubcommand::List(group) => {
                 let items = match group {

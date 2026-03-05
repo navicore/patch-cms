@@ -123,8 +123,9 @@ fn main() {
 
     let handler = CmsMachineHandler::new(filesystem, exec_handler, cmd_rx, output_tx);
 
-    // Boot machines
-    handle.block_on(async {
+    // Boot machines — IPL runs inside the async context, then console runs
+    // outside it so that handle.block_on() calls in run_console are safe.
+    let supervisor = handle.block_on(async {
         let supervisor = Supervisor::new();
 
         supervisor
@@ -137,7 +138,9 @@ fn main() {
             .await
             .expect("Failed to IPL user machine");
 
-        // Run console on the main thread
-        console::run_console(&handle, &supervisor, &con_id, &user_id, cmd_tx, output_rx);
+        supervisor
     });
+
+    // Run console on the main thread (outside async context)
+    console::run_console(&handle, &supervisor, &con_id, &user_id, cmd_tx, output_rx);
 }

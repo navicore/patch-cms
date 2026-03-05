@@ -2,7 +2,10 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use cms_core::command::ExecHandler;
-use cms_core::{CmsFileSystem, CommandProcessor, GlobalVars, NoExecHandler, NoSmsgSender};
+use cms_core::{
+    CmsCommand, CmsFileSystem, CommandProcessor, GlobalVars, GlobalvSubcommand, NoExecHandler,
+    NoSmsgSender,
+};
 
 use patch_rexx::env::Environment;
 use patch_rexx::eval::{Evaluator, ExecSignal};
@@ -150,19 +153,14 @@ fn run_rexx_exec(
         // Write GLOBALV GET results back to the REXX variable pool.
         // GLOBALV GET VAR1 VAR2 ... retrieves values and sets each variable
         // in the caller's environment — this is the CMS convention.
-        let tokens: Vec<&str> = cmd_text.split_whitespace().collect();
-        let first_upper = tokens
-            .first()
-            .map(|t| t.to_ascii_uppercase())
-            .unwrap_or_default();
-        let is_globalv = first_upper.len() >= 4 && "GLOBALV".starts_with(&first_upper);
-        if is_globalv
-            && tokens.len() >= 3
-            && tokens[1].eq_ignore_ascii_case("GET")
-            && result.rc == 0
-        {
-            for (var_tok, val) in tokens[2..].iter().zip(result.messages.iter()) {
-                vars.set(&var_tok.to_ascii_uppercase(), RexxValue::new(val));
+        // Uses parse_cms_command to avoid duplicating abbreviation logic.
+        if result.rc == 0 {
+            if let Ok(CmsCommand::Globalv(GlobalvSubcommand::Get(names))) =
+                cms_core::command::parse_cms_command(cmd_text)
+            {
+                for (name, val) in names.iter().zip(result.messages.iter()) {
+                    vars.set(&name.to_ascii_uppercase(), RexxValue::new(val));
+                }
             }
         }
 
@@ -200,8 +198,18 @@ fn run_rexx_exec(
         }
     };
 
-    let fs_back = Rc::try_unwrap(shared_fs).ok().map(|c| c.into_inner());
-    let gv_back = Rc::try_unwrap(shared_gv).ok().map(|c| c.into_inner());
+    // Safe: evaluator is dropped above, so all Rc clones from the command handler
+    // closure are gone. If this ever panics, a leaked Rc clone exists.
+    let fs_back = Some(
+        Rc::try_unwrap(shared_fs)
+            .unwrap_or_else(|_| panic!("filesystem Rc still shared after evaluator drop"))
+            .into_inner(),
+    );
+    let gv_back = Some(
+        Rc::try_unwrap(shared_gv)
+            .unwrap_or_else(|_| panic!("globalv Rc still shared after evaluator drop"))
+            .into_inner(),
+    );
 
     // Issue #1 fix: extract REXX exit code from ExecSignal
     let mut messages = messages;
@@ -386,6 +394,22 @@ else
 "#;
         let (rc, _) = handler.execute_exec(source, "");
         assert_eq!(rc, 0, "GLOBALV GET should set multiple REXX variables");
+    }
+
+    #[test]
+    fn nested_exec_returns_rc28() {
+        let mut handler = CmsRexxExecHandlerWithSwap::new();
+        handler.filesystem = Some(CmsFileSystem::new());
+        handler.globalv = Some(GlobalVars::new());
+
+        // REXX program tries to run an EXEC via ADDRESS CMS — the temp processor
+        // uses NoExecHandler, so it should return RC=28.
+        let source = r#"/* REXX */
+'EXEC NESTED'
+exit rc
+"#;
+        let (rc, _) = handler.execute_exec(source, "");
+        assert_eq!(rc, 28, "Nested EXEC should return RC=28");
     }
 
     // Issue #4: state preserved on error path
