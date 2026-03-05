@@ -153,8 +153,9 @@ fn run_rexx_exec(
         // Write GLOBALV GET results back to the REXX variable pool.
         // GLOBALV GET VAR1 VAR2 ... retrieves values and sets each variable
         // in the caller's environment — this is the CMS convention.
+        // RC=4 (partial miss) still writes the variables that were found.
         // Uses parse_cms_command to avoid duplicating abbreviation logic.
-        if result.rc == 0 {
+        if result.rc == 0 || result.rc == 4 {
             if let Ok(CmsCommand::Globalv(GlobalvSubcommand::Get(names))) =
                 cms_core::command::parse_cms_command(cmd_text)
             {
@@ -397,19 +398,55 @@ else
     }
 
     #[test]
-    fn nested_exec_returns_rc28() {
+    fn globalv_get_partial_miss_sets_found_vars() {
         let mut handler = CmsRexxExecHandlerWithSwap::new();
         handler.filesystem = Some(CmsFileSystem::new());
+        let mut gv = GlobalVars::new();
+        gv.set("COLOR", "blue");
+        // FRUIT is intentionally not set
+        handler.globalv = Some(gv);
+
+        // GLOBALV GET COLOR FRUIT — COLOR exists, FRUIT does not.
+        // COLOR should still be written back to the REXX variable pool.
+        let source = r#"/* REXX */
+'GLOBALV GET COLOR FRUIT'
+if color = 'blue' then
+    exit 0
+else
+    exit 99
+"#;
+        let (rc, _) = handler.execute_exec(source, "");
+        assert_eq!(
+            rc, 0,
+            "COLOR should be set in REXX pool despite FRUIT missing"
+        );
+    }
+
+    #[test]
+    fn nested_exec_returns_rc28() {
+        use cms_core::minidisk::AccessMode;
+
+        // Set up a filesystem with an A-disk containing a NESTED EXEC file,
+        // so cmd_exec finds the file and actually calls NoExecHandler.
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut fs = CmsFileSystem::new();
+        fs.access_disk('A', dir.path().join("a"), AccessMode::ReadWrite)
+            .unwrap();
+        let spec = cms_core::FileSpec::parse("NESTED EXEC A").unwrap();
+        fs.write_file(&spec, "/* REXX */\nsay 'nested'\n").unwrap();
+
+        let mut handler = CmsRexxExecHandlerWithSwap::new();
+        handler.filesystem = Some(fs);
         handler.globalv = Some(GlobalVars::new());
 
         // REXX program tries to run an EXEC via ADDRESS CMS — the temp processor
-        // uses NoExecHandler, so it should return RC=28.
+        // uses NoExecHandler (nested EXEC not supported), so it returns RC=28.
         let source = r#"/* REXX */
 'EXEC NESTED'
 exit rc
 "#;
         let (rc, _) = handler.execute_exec(source, "");
-        assert_eq!(rc, 28, "Nested EXEC should return RC=28");
+        assert_eq!(rc, 28, "Nested EXEC should return RC=28 from NoExecHandler");
     }
 
     // Issue #4: state preserved on error path
