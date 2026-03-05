@@ -38,9 +38,9 @@ impl ExecHandler for CmsRexxExecHandler {
 pub struct CmsRexxExecHandlerWithSwap {
     /// Shared filesystem — swapped out of the CommandProcessor before REXX
     /// execution and restored after.
-    pub filesystem: Option<CmsFileSystem>,
+    pub(crate) filesystem: Option<CmsFileSystem>,
     /// Shared globalv — swapped similarly.
-    pub globalv: Option<GlobalVars>,
+    pub(crate) globalv: Option<GlobalVars>,
 }
 
 impl CmsRexxExecHandlerWithSwap {
@@ -148,17 +148,22 @@ fn run_rexx_exec(
         let result = temp_proc.execute(cmd_text);
 
         // Write GLOBALV GET results back to the REXX variable pool.
-        // GLOBALV GET VARNAME retrieves the value and sets VARNAME in the
-        // caller's environment — this is the CMS convention.
-        if cmd_text.to_ascii_uppercase().starts_with("GLOBALV")
-            || cmd_text.to_ascii_uppercase().starts_with("GLOB")
+        // GLOBALV GET VAR1 VAR2 ... retrieves values and sets each variable
+        // in the caller's environment — this is the CMS convention.
+        let tokens: Vec<&str> = cmd_text.split_whitespace().collect();
+        let first_upper = tokens
+            .first()
+            .map(|t| t.to_ascii_uppercase())
+            .unwrap_or_default();
+        let is_globalv = first_upper == "GLOBALV"
+            || (first_upper.len() >= 4 && "GLOBALV".starts_with(&first_upper));
+        if is_globalv
+            && tokens.len() >= 3
+            && tokens[1].eq_ignore_ascii_case("GET")
+            && result.rc == 0
         {
-            let tokens: Vec<&str> = cmd_text.split_whitespace().collect();
-            if tokens.len() >= 3 && tokens[1].eq_ignore_ascii_case("GET") && result.rc == 0 {
-                let var_name = tokens[2].to_ascii_uppercase();
-                if let Some(val) = result.messages.first() {
-                    vars.set(&var_name, RexxValue::new(val));
-                }
+            for (var_tok, val) in tokens[2..].iter().zip(result.messages.iter()) {
+                vars.set(&var_tok.to_ascii_uppercase(), RexxValue::new(val));
             }
         }
 
@@ -200,12 +205,12 @@ fn run_rexx_exec(
     let gv_back = Rc::try_unwrap(shared_gv).ok().map(|c| c.into_inner());
 
     // Issue #1 fix: extract REXX exit code from ExecSignal
+    let mut messages = messages;
     let rc = match exec_result {
-        Ok(signal) => extract_rc(&signal),
+        Ok(signal) => extract_rc(&signal, &mut messages),
         Err(msg) => {
-            let mut msgs = messages;
-            msgs.push(msg);
-            return Ok((28, msgs, fs_back, gv_back));
+            messages.push(msg);
+            return Ok((28, messages, fs_back, gv_back));
         }
     };
 
@@ -214,12 +219,19 @@ fn run_rexx_exec(
 
 /// Extract a numeric return code from a REXX ExecSignal.
 ///
-/// - `Exit(Some(value))` / `Return(Some(value))`: parse value as i32, default 0
+/// - `Exit(Some(value))` / `Return(Some(value))`: parse as i32; RC=20 if non-numeric
 /// - `Normal` / `Exit(None)` / `Return(None)`: RC=0
-fn extract_rc(signal: &ExecSignal) -> i32 {
+fn extract_rc(signal: &ExecSignal, messages: &mut Vec<String>) -> i32 {
     match signal {
         ExecSignal::Exit(Some(val)) | ExecSignal::Return(Some(val)) => {
-            val.as_str().parse::<i32>().unwrap_or(0)
+            let s = val.as_str();
+            match s.parse::<i32>() {
+                Ok(n) => n,
+                Err(_) => {
+                    messages.push(format!("DMSERR020E Non-numeric return code: {}", s));
+                    20
+                }
+            }
         }
         _ => 0,
     }
@@ -291,6 +303,19 @@ say target
     }
 
     #[test]
+    fn exit_non_numeric_is_rc20() {
+        let mut handler = CmsRexxExecHandler;
+        let source = "/* REXX */\nexit 'FAIL'\n";
+        let (rc, msgs) = handler.execute_exec(source, "");
+        assert_eq!(rc, 20);
+        assert!(
+            msgs.iter().any(|m| m.contains("Non-numeric")),
+            "Expected non-numeric error, got: {:?}",
+            msgs,
+        );
+    }
+
+    #[test]
     fn with_swap_globalv_persists() {
         let mut handler = CmsRexxExecHandlerWithSwap::new();
         handler.filesystem = Some(CmsFileSystem::new());
@@ -342,6 +367,26 @@ else
 "#;
         let (rc, _) = handler.execute_exec(source, "");
         assert_eq!(rc, 0, "GLOBALV GET should set the REXX variable 'color'");
+    }
+
+    #[test]
+    fn globalv_get_multi_var_writeback() {
+        let mut handler = CmsRexxExecHandlerWithSwap::new();
+        handler.filesystem = Some(CmsFileSystem::new());
+        let mut gv = GlobalVars::new();
+        gv.set("COLOR", "blue");
+        gv.set("FRUIT", "apple");
+        handler.globalv = Some(gv);
+
+        let source = r#"/* REXX */
+'GLOBALV GET COLOR FRUIT'
+if color = 'blue' & fruit = 'apple' then
+    exit 0
+else
+    exit 99
+"#;
+        let (rc, _) = handler.execute_exec(source, "");
+        assert_eq!(rc, 0, "GLOBALV GET should set multiple REXX variables");
     }
 
     // Issue #4: state preserved on error path

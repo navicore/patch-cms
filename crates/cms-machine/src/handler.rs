@@ -72,6 +72,10 @@ impl CmsMachineHandler {
         Self::new(filesystem, Box::new(NoExecHandler), cmd_rx, output_tx)
     }
 
+    /// Sentinel value sent after all commands in a batch have been processed.
+    /// The console thread waits for this instead of using a timed sleep.
+    pub const BATCH_DONE: &'static str = "\x00BATCH_DONE";
+
     fn drain_commands(&mut self, ctx: &MachineContext) {
         let rx = match self.cmd_rx.as_ref() {
             Some(rx) => rx,
@@ -89,6 +93,9 @@ impl CmsMachineHandler {
             // Drain outbound SMSGs produced by this command
             self.drain_outbound_smsgs(ctx);
         }
+
+        // Signal that all commands in this batch are done
+        let _ = self.output_tx.send(Self::BATCH_DONE.to_string());
     }
 
     fn drain_outbound_smsgs(&self, ctx: &MachineContext) {

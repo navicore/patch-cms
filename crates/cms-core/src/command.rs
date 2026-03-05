@@ -68,7 +68,7 @@ pub enum CmsCommand {
 pub enum GlobalvSubcommand {
     Select(String),
     Set { name: String, value: String },
-    Get(String),
+    Get(Vec<String>),
     List(Option<String>),
     Delete(String),
     Purge,
@@ -310,9 +310,8 @@ fn parse_globalv(rest: &str) -> Result<CmsCommand, CmsError> {
                     "GLOBALV GET requires a variable name".to_string(),
                 ));
             }
-            Ok(CmsCommand::Globalv(GlobalvSubcommand::Get(
-                tokens[1].to_string(),
-            )))
+            let names: Vec<String> = tokens[1..].iter().map(|s| s.to_string()).collect();
+            Ok(CmsCommand::Globalv(GlobalvSubcommand::Get(names)))
         }
         "LIST" => {
             let group = if tokens.len() >= 2 {
@@ -583,10 +582,28 @@ impl CommandProcessor {
                 self.globalv.set(&name, &value);
                 CmsCommandResult::ok()
             }
-            GlobalvSubcommand::Get(name) => match self.globalv.get(&name) {
-                Some(val) => CmsCommandResult::ok_with(vec![val.to_string()]),
-                None => CmsCommandResult::error(4, format!("Variable {} not found", name)),
-            },
+            GlobalvSubcommand::Get(names) => {
+                let mut messages = Vec::new();
+                let mut all_found = true;
+                for name in &names {
+                    match self.globalv.get(name) {
+                        Some(val) => messages.push(val.to_string()),
+                        None => {
+                            all_found = false;
+                            break;
+                        }
+                    }
+                }
+                if all_found {
+                    CmsCommandResult::ok_with(messages)
+                } else {
+                    let missing = names
+                        .iter()
+                        .find(|n| self.globalv.get(n).is_none())
+                        .unwrap();
+                    CmsCommandResult::error(4, format!("Variable {} not found", missing))
+                }
+            }
             GlobalvSubcommand::List(group) => {
                 let items = match group {
                     Some(ref g) => self.globalv.list_group(g),

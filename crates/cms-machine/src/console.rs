@@ -5,6 +5,32 @@ use tokio::runtime::Handle;
 use vm_iucv::machine_id::MachineId;
 use vm_iucv::supervisor::Supervisor;
 
+use crate::handler::CmsMachineHandler;
+
+/// Drain and print output lines until the batch-done sentinel arrives or timeout.
+fn drain_until_sentinel(output_rx: &mpsc::Receiver<String>, timeout: std::time::Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            // Timeout — drain whatever is left without blocking
+            while let Ok(line) = output_rx.try_recv() {
+                if line == CmsMachineHandler::BATCH_DONE {
+                    return;
+                }
+                println!("{}", line);
+            }
+            return;
+        }
+        match output_rx.recv_timeout(remaining) {
+            Ok(line) if line == CmsMachineHandler::BATCH_DONE => return,
+            Ok(line) => println!("{}", line),
+            Err(mpsc::RecvTimeoutError::Timeout) => return,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+        }
+    }
+}
+
 /// Run the interactive CMS console.
 ///
 /// Reads lines from stdin, sends them to the CMS machine handler via channels,
@@ -17,10 +43,18 @@ pub fn run_console(
     cmd_tx: mpsc::Sender<String>,
     output_rx: mpsc::Receiver<String>,
 ) {
-    // Drain initial IPL output (logon banner, PROFILE EXEC output)
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    while let Ok(line) = output_rx.try_recv() {
-        println!("{}", line);
+    // Drain initial IPL output (logon banner, PROFILE EXEC output).
+    // IPL is not triggered by a $CON wake so no sentinel is sent — use a brief timeout.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match output_rx.recv_timeout(remaining) {
+            Ok(line) => println!("{}", line),
+            Err(_) => break,
+        }
     }
 
     let stdin = io::stdin();
@@ -66,13 +100,8 @@ pub fn run_console(
             continue;
         }
 
-        // Brief pause to let the handler process
-        std::thread::sleep(std::time::Duration::from_millis(10));
-
-        // Drain output
-        while let Ok(line) = output_rx.try_recv() {
-            println!("{}", line);
-        }
+        // Wait for batch-done sentinel (with timeout for safety)
+        drain_until_sentinel(&output_rx, std::time::Duration::from_secs(5));
 
         println!("Ready;");
         io::stdout().flush().ok();
