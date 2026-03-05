@@ -10,7 +10,7 @@ use crate::minidisk::AccessMode;
 
 /// Trait for executing REXX EXEC files. Consumers provide their own implementation
 /// that wires up to `patch-rexx` or another interpreter.
-pub trait ExecHandler {
+pub trait ExecHandler: Send {
     /// Execute a REXX source string with the given argument string.
     /// Returns `(return_code, output_messages)`.
     fn execute_exec(&mut self, source: &str, args: &str) -> (i32, Vec<String>);
@@ -22,6 +22,25 @@ pub struct NoExecHandler;
 impl ExecHandler for NoExecHandler {
     fn execute_exec(&mut self, _source: &str, _args: &str) -> (i32, Vec<String>) {
         (28, vec!["EXEC handler not available".to_string()])
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SmsgSender trait — decouples cms-core from vm-iucv messaging
+// ---------------------------------------------------------------------------
+
+/// Trait for sending SMSG messages. Consumers provide their own implementation
+/// that wires up to the vm-iucv actor framework.
+pub trait SmsgSender: Send {
+    fn send_smsg(&self, target: &str, text: &str) -> (i32, String);
+}
+
+/// Default sender when no SMSG facility is available — always returns RC=28.
+pub struct NoSmsgSender;
+
+impl SmsgSender for NoSmsgSender {
+    fn send_smsg(&self, _target: &str, _text: &str) -> (i32, String) {
+        (28, "SMSG facility not available".to_string())
     }
 }
 
@@ -41,6 +60,7 @@ pub enum CmsCommand {
     Access { path: String, mode: String },
     Release(char),
     Exec { name: String, args: String },
+    Smsg { userid: String, text: String },
 }
 
 /// Sub-commands for GLOBALV.
@@ -48,7 +68,7 @@ pub enum CmsCommand {
 pub enum GlobalvSubcommand {
     Select(String),
     Set { name: String, value: String },
-    Get(String),
+    Get(Vec<String>),
     List(Option<String>),
     Delete(String),
     Purge,
@@ -99,6 +119,7 @@ const CMS_COMMAND_TABLE: &[(&str, usize)] = &[
     ("LISTFILE", 4), // LIST
     ("RELEASE", 3),  // REL
     ("RENAME", 3),   // REN
+    ("SMSG", 2),     // SM
     ("STATE", 2),    // ST
 ];
 
@@ -144,6 +165,7 @@ pub fn parse_cms_command(input: &str) -> Result<CmsCommand, CmsError> {
         "COPYFILE" => parse_copyfile(rest),
         "ERASE" => parse_erase(rest),
         "RENAME" => parse_rename(rest),
+        "SMSG" => parse_smsg(rest),
         "GLOBALV" => parse_globalv(rest),
         "ACCESS" => parse_access(rest),
         "RELEASE" => parse_release(rest),
@@ -233,6 +255,25 @@ fn parse_rename(rest: &str) -> Result<CmsCommand, CmsError> {
     Ok(CmsCommand::Rename { from, to })
 }
 
+fn parse_smsg(rest: &str) -> Result<CmsCommand, CmsError> {
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let userid = match parts.next() {
+        Some(u) if !u.is_empty() => u.to_ascii_uppercase(),
+        _ => {
+            return Err(CmsError::InvalidCommand(
+                "SMSG requires a userid and text".to_string(),
+            ))
+        }
+    };
+    let text = parts.next().unwrap_or("").trim().to_string();
+    if text.is_empty() {
+        return Err(CmsError::InvalidCommand(
+            "SMSG requires message text".to_string(),
+        ));
+    }
+    Ok(CmsCommand::Smsg { userid, text })
+}
+
 fn parse_globalv(rest: &str) -> Result<CmsCommand, CmsError> {
     let tokens: Vec<&str> = rest.split_whitespace().collect();
     if tokens.is_empty() {
@@ -269,9 +310,8 @@ fn parse_globalv(rest: &str) -> Result<CmsCommand, CmsError> {
                     "GLOBALV GET requires a variable name".to_string(),
                 ));
             }
-            Ok(CmsCommand::Globalv(GlobalvSubcommand::Get(
-                tokens[1].to_string(),
-            )))
+            let names: Vec<String> = tokens[1..].iter().map(|s| s.to_string()).collect();
+            Ok(CmsCommand::Globalv(GlobalvSubcommand::Get(names)))
         }
         "LIST" => {
             let group = if tokens.len() >= 2 {
@@ -350,6 +390,7 @@ pub struct CommandProcessor {
     filesystem: CmsFileSystem,
     globalv: GlobalVars,
     exec_handler: Box<dyn ExecHandler>,
+    smsg_sender: Box<dyn SmsgSender>,
 }
 
 impl CommandProcessor {
@@ -359,6 +400,7 @@ impl CommandProcessor {
             filesystem,
             globalv: GlobalVars::new(),
             exec_handler: Box::new(NoExecHandler),
+            smsg_sender: Box::new(NoSmsgSender),
         }
     }
 
@@ -368,6 +410,21 @@ impl CommandProcessor {
             filesystem,
             globalv: GlobalVars::new(),
             exec_handler: handler,
+            smsg_sender: Box::new(NoSmsgSender),
+        }
+    }
+
+    /// Create a new command processor with both an EXEC handler and SMSG sender.
+    pub fn with_smsg_sender(
+        filesystem: CmsFileSystem,
+        handler: Box<dyn ExecHandler>,
+        sender: Box<dyn SmsgSender>,
+    ) -> Self {
+        CommandProcessor {
+            filesystem,
+            globalv: GlobalVars::new(),
+            exec_handler: handler,
+            smsg_sender: sender,
         }
     }
 
@@ -385,6 +442,26 @@ impl CommandProcessor {
 
     pub fn globalv_mut(&mut self) -> &mut GlobalVars {
         &mut self.globalv
+    }
+
+    /// Temporarily take the exec handler, replacing it with `NoExecHandler`.
+    pub fn take_exec_handler(&mut self) -> Box<dyn ExecHandler> {
+        std::mem::replace(&mut self.exec_handler, Box::new(NoExecHandler))
+    }
+
+    /// Set a new exec handler, returning the old one.
+    pub fn set_exec_handler(&mut self, handler: Box<dyn ExecHandler>) -> Box<dyn ExecHandler> {
+        std::mem::replace(&mut self.exec_handler, handler)
+    }
+
+    /// Temporarily take the SMSG sender, replacing it with `NoSmsgSender`.
+    pub fn take_smsg_sender(&mut self) -> Box<dyn SmsgSender> {
+        std::mem::replace(&mut self.smsg_sender, Box::new(NoSmsgSender))
+    }
+
+    /// Set a new SMSG sender, returning the old one.
+    pub fn set_smsg_sender(&mut self, sender: Box<dyn SmsgSender>) -> Box<dyn SmsgSender> {
+        std::mem::replace(&mut self.smsg_sender, sender)
     }
 
     /// Main entry point: parse and execute a command line.
@@ -427,6 +504,7 @@ impl CommandProcessor {
             CmsCommand::Access { path, mode } => self.cmd_access(path, mode),
             CmsCommand::Release(letter) => self.cmd_release(letter),
             CmsCommand::Exec { name, args } => self.cmd_exec(name, args),
+            CmsCommand::Smsg { userid, text } => self.cmd_smsg(userid, text),
         }
     }
 
@@ -504,10 +582,25 @@ impl CommandProcessor {
                 self.globalv.set(&name, &value);
                 CmsCommandResult::ok()
             }
-            GlobalvSubcommand::Get(name) => match self.globalv.get(&name) {
-                Some(val) => CmsCommandResult::ok_with(vec![val.to_string()]),
-                None => CmsCommandResult::error(4, format!("Variable {} not found", name)),
-            },
+            GlobalvSubcommand::Get(names) => {
+                let mut messages = Vec::new();
+                let mut missing = false;
+                for name in &names {
+                    match self.globalv.get(name) {
+                        Some(val) => messages.push(val.to_string()),
+                        None => {
+                            missing = true;
+                            break;
+                        }
+                    }
+                }
+                // Return found values even on partial miss (CMS convention:
+                // variables retrieved before the first miss are set).
+                CmsCommandResult {
+                    rc: if missing { 4 } else { 0 },
+                    messages,
+                }
+            }
             GlobalvSubcommand::List(group) => {
                 let items = match group {
                     Some(ref g) => self.globalv.list_group(g),
@@ -567,6 +660,15 @@ impl CommandProcessor {
     fn cmd_release(&mut self, letter: char) -> CmsCommandResult {
         self.filesystem.release_disk(letter);
         CmsCommandResult::ok()
+    }
+
+    fn cmd_smsg(&self, userid: String, text: String) -> CmsCommandResult {
+        let (rc, msg) = self.smsg_sender.send_smsg(&userid, &text);
+        if rc == 0 {
+            CmsCommandResult::ok()
+        } else {
+            CmsCommandResult::error(rc, msg)
+        }
     }
 
     fn cmd_exec(&mut self, name: String, args: String) -> CmsCommandResult {
@@ -944,5 +1046,117 @@ mod tests {
         let (_dir, mut proc) = setup_processor();
         let result = proc.run_profile();
         assert!(result.is_none());
+    }
+
+    // -- SMSG tests --
+
+    #[test]
+    fn parse_smsg() {
+        let cmd = parse_cms_command("SMSG OPER Hello world").unwrap();
+        match cmd {
+            CmsCommand::Smsg { userid, text } => {
+                assert_eq!(userid, "OPER");
+                assert_eq!(text, "Hello world");
+            }
+            _ => panic!("Expected SMSG"),
+        }
+    }
+
+    #[test]
+    fn parse_smsg_abbreviated() {
+        let cmd = parse_cms_command("sm OPER Hi").unwrap();
+        assert!(matches!(cmd, CmsCommand::Smsg { .. }));
+    }
+
+    #[test]
+    fn parse_smsg_missing_text() {
+        let err = parse_cms_command("SMSG OPER").unwrap_err();
+        assert!(matches!(err, CmsError::InvalidCommand(_)));
+    }
+
+    #[test]
+    fn parse_smsg_missing_args() {
+        let err = parse_cms_command("SMSG").unwrap_err();
+        assert!(matches!(err, CmsError::InvalidCommand(_)));
+    }
+
+    use std::sync::{Arc, Mutex};
+
+    struct MockSmsgSender {
+        sent: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    impl SmsgSender for MockSmsgSender {
+        fn send_smsg(&self, target: &str, text: &str) -> (i32, String) {
+            self.sent
+                .lock()
+                .unwrap()
+                .push((target.to_string(), text.to_string()));
+            (0, String::new())
+        }
+    }
+
+    #[test]
+    fn cmd_smsg_with_mock_sender() {
+        let dir = TempDir::new().unwrap();
+        let mut fs = CmsFileSystem::new();
+        fs.access_disk('A', dir.path().join("a"), AccessMode::ReadWrite)
+            .unwrap();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let sender = MockSmsgSender {
+            sent: Arc::clone(&sent),
+        };
+        let mut proc =
+            CommandProcessor::with_smsg_sender(fs, Box::new(NoExecHandler), Box::new(sender));
+        let result = proc.execute("SMSG OPER Hello from test");
+        assert_eq!(result.rc, 0);
+        let msgs = sent.lock().unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].0, "OPER");
+        assert_eq!(msgs[0].1, "Hello from test");
+    }
+
+    #[test]
+    fn cmd_smsg_no_sender_rc28() {
+        let (_dir, mut proc) = setup_processor();
+        let result = proc.execute("SMSG OPER Hello");
+        assert_eq!(result.rc, 28);
+    }
+
+    // -- take/set roundtrip tests --
+
+    #[test]
+    fn take_set_exec_handler_roundtrip() {
+        let (_dir, mut proc) = setup_processor();
+        let handler = proc.take_exec_handler();
+        // After take, handler is NoExecHandler — verify it returns RC=28
+        let result = proc.execute("EXEC ANYTHING");
+        assert_eq!(result.rc, 3); // not found, but handler would be 28 if found
+        proc.set_exec_handler(handler);
+    }
+
+    #[test]
+    fn take_set_smsg_sender_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let mut fs = CmsFileSystem::new();
+        fs.access_disk('A', dir.path().join("a"), AccessMode::ReadWrite)
+            .unwrap();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let sender = MockSmsgSender {
+            sent: Arc::clone(&sent),
+        };
+        let mut proc =
+            CommandProcessor::with_smsg_sender(fs, Box::new(NoExecHandler), Box::new(sender));
+
+        let taken = proc.take_smsg_sender();
+        // After take, NoSmsgSender is active
+        let result = proc.execute("SMSG OPER test");
+        assert_eq!(result.rc, 28);
+
+        // Restore
+        proc.set_smsg_sender(taken);
+        let result = proc.execute("SMSG OPER test2");
+        assert_eq!(result.rc, 0);
+        assert_eq!(sent.lock().unwrap().len(), 1);
     }
 }

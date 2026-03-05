@@ -168,6 +168,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cms-machine"
+version = "0.1.0"
+dependencies = [
+ "cms-core",
+ "patch-rexx",
+ "tempfile",
+ "tokio",
+ "vm-iucv",
+]
+
+[[package]]
 name = "cms-pipelines"
 version = "0.1.0"
 
