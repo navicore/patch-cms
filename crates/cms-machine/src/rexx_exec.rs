@@ -141,6 +141,9 @@ fn run_rexx_exec(
 
         // Create temp processor — nested EXEC is not supported at this depth
         // (NoExecHandler returns RC=28 if a nested EXEC is attempted).
+        // SMSG commands also return RC=28 (NoSmsgSender) — the temp processor
+        // has no connection to the actor system. Threading the SMSG channel
+        // requires architectural changes (tracked as a known limitation).
         let mut temp_proc = CommandProcessor::with_smsg_sender(
             fs_taken,
             Box::new(NoExecHandler),

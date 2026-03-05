@@ -34,11 +34,22 @@ async fn poll_output_until(
     }
 }
 
-/// Drain all pending output from the channel.
+/// Drain all pending output from the channel, waiting for the BATCH_DONE
+/// sentinel if one is expected. Falls back to a short timeout for operations
+/// that don't send a sentinel (e.g., inbound SMSG from non-$CON).
 async fn drain_output(output_rx: &mpsc::Receiver<String>) {
-    // Brief pause to let in-flight messages arrive
-    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    while output_rx.try_recv().is_ok() {}
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(200);
+    loop {
+        while let Ok(line) = output_rx.try_recv() {
+            if line == CmsMachineHandler::BATCH_DONE {
+                return;
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
 
 #[tokio::test]
