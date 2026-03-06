@@ -1,6 +1,88 @@
 # Quickstart
 
-## Add the dependency
+## Launch a CMS Machine
+
+```sh
+# Clone and build
+git clone https://github.com/navicore/patch-cms.git
+cd patch-cms
+cargo build -p cms-machine --release
+
+# Create a disk directory and launch
+mkdir -p /tmp/cms/a
+cargo run -p cms-machine -- --userid ALICE --disk /tmp/cms
+```
+
+You get an interactive CMS prompt with REXX scripting, spool commands,
+pipelines, and inter-machine messaging.
+
+## Your First REXX Program
+
+Create a file `/tmp/cms/a/GREET.exec`:
+
+```rexx
+/* REXX — send a greeting to another machine */
+parse arg userid .
+if userid = '' then do
+    say 'Usage: GREET userid'
+    exit 24
+end
+'SMSG' userid 'Hello from CMS!'
+if rc = 0 then say 'Sent.'
+else say 'Failed, RC='rc
+```
+
+At the CMS prompt:
+
+```
+GREET BOB
+```
+
+Any file named `*.exec` on your A-disk is callable as a command.
+
+## Try the Built-in Commands
+
+```
+GLOBALV SET COLOR blue        Set a persistent variable
+GLOBALV GET COLOR             Retrieve it
+PIPE literal hello | console  Run a pipeline
+SP PRT CLASS B                Configure the printer spool
+QUERY PRT                    Show printer queue
+LISTFILE * EXEC A            List all EXECs on A-disk
+```
+
+## Persistent State with GLOBALV
+
+REXX EXECs get a fresh interpreter each time, but GLOBALV variables
+persist across invocations:
+
+```rexx
+/* COUNTER EXEC */
+'GLOBALV SELECT COUNTER'
+'GLOBALV GET COUNT'
+if rc \= 0 then count = 0
+count = count + 1
+'GLOBALV SET COUNT' count
+say 'Counter:' count
+```
+
+Run `COUNTER` multiple times — the value increments.
+
+## Composing EXECs
+
+EXECs can call other EXECs:
+
+```rexx
+/* DISPATCH EXEC */
+do i = 1 to 3
+    'EXEC COUNTER'
+end
+'EXEC GREET BOB'
+```
+
+## Embedding the Library (Rust API)
+
+For embedding vm-iucv as a Rust library:
 
 ```toml
 [dependencies]
@@ -8,12 +90,7 @@ vm-iucv = { git = "https://github.com/navicore/patch-cms" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
-## Your first program
-
-Create a simple program that IPLs two machines and sends a message:
-
 ```rust
-use vm_iucv::collector::collector;
 use vm_iucv::handler::{MachineContext, MachineHandler};
 use vm_iucv::machine_id::MachineId;
 use vm_iucv::message::SmsgMessage;
@@ -30,12 +107,10 @@ impl MachineHandler for PrintHandler {
 #[tokio::main]
 async fn main() {
     let sup = Supervisor::new();
-
     let alice = MachineId::new("ALICE").unwrap();
     let bob = MachineId::new("BOB").unwrap();
 
-    let (handler, _handle) = collector();
-    sup.ipl(&alice, handler).await.unwrap();
+    sup.ipl(&alice, vm_iucv::collector::collector().0).await.unwrap();
     sup.ipl(&bob, PrintHandler).await.unwrap();
 
     sup.smsg(&alice, &bob, "Hello from ALICE!").await.unwrap();
@@ -47,47 +122,13 @@ async fn main() {
 }
 ```
 
-## Run the examples
-
-The repository includes several runnable examples:
-
-```sh
-# Clone the repository
-git clone https://github.com/navicore/patch-cms.git
-cd patch-cms
-
-# Run the simplest example
-cargo run -p vm-iucv --example hello_smsg --features examples
-
-# Run the echo server example
-cargo run -p vm-iucv --example echo_server --features examples
-
-# Run the IUCV chat example
-cargo run -p vm-iucv --example iucv_chat --features examples
-```
-
-## Run the CMS machine
-
-The CMS machine provides an interactive console with REXX scripting, spool
-commands, and pipelines:
-
-```sh
-# Create a disk directory and launch
-mkdir -p /tmp/cms/a
-cargo run -p cms-machine -- --userid ALICE --disk /tmp/cms
-
-# At the CMS prompt, try:
-# GLOBALV SET COLOR blue
-# GLOBALV GET COLOR
-# SP PRT CLASS B
-# PIPE literal hello | console
-# LOGOFF
-```
+See the [Examples](EXAMPLES.md) page for more Rust library examples
+(echo server, IUCV chat, connection gating, multi-machine pipeline).
 
 ## Next steps
 
-- Read the [Examples](EXAMPLES.md) page for annotated walkthroughs
-- See [vm-iucv Overview](vm-iucv/overview.md) for the actor framework
-- See [cms-core Overview](cms-core/overview.md) for the CMS command processor
-- See [cms-machine Overview](cms-machine/overview.md) for the interactive console
-- Check the [API Quick Reference](reference/api-quick-reference.md) for method tables
+- [Examples](EXAMPLES.md) — REXX and Rust examples with walkthroughs
+- [vm-iucv Overview](vm-iucv/overview.md) — the actor framework
+- [cms-core Overview](cms-core/overview.md) — CMS command processor
+- [cms-machine Overview](cms-machine/overview.md) — interactive console
+- [API Quick Reference](reference/api-quick-reference.md) — method tables

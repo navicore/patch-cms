@@ -1,0 +1,15 @@
+/* REXX — GREET: send a greeting to another machine and report status */
+parse arg userid .
+if userid = '' then do
+    say 'GREET: Send a greeting SMSG to another machine'
+    say 'Usage: GREET userid'
+    exit 24
+end
+
+say 'Sending greeting to' userid '...'
+'SMSG' userid 'Hello from CMS!'
+if rc = 0 then
+    say 'Greeting sent successfully.'
+else
+    say 'Could not reach' userid '— RC='rc
+exit rc

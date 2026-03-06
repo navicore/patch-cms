@@ -1,0 +1,14 @@
+/* REXX — UPPER: transform text to uppercase using CMS Pipelines */
+parse arg text
+if text = '' then do
+    say 'UPPER: Transform text to uppercase via PIPE'
+    say 'Usage: UPPER some text here'
+    exit 24
+end
+
+'PIPE literal' text '| console'
+if rc \= 0 then do
+    say 'Pipeline failed, RC='rc
+    exit rc
+end
+exit 0

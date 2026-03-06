@@ -1,0 +1,28 @@
+/* REXX — DISPATCH: compose multiple EXECs to demonstrate          */
+/* the REXX programming environment.                               */
+/*                                                                 */
+/* Runs COUNTER three times, sends GREET if a userid is given,     */
+/* and shows spool status — all from one EXEC.                     */
+/*                                                                 */
+/* Usage: DISPATCH [userid]                                        */
+
+parse arg userid .
+
+say '=== Running COUNTER three times ==='
+do i = 1 to 3
+    'EXEC COUNTER'
+end
+
+if userid \= '' then do
+    say ''
+    say '=== Sending greeting to' userid '==='
+    'EXEC GREET' userid
+end
+
+say ''
+say '=== Spool status ==='
+'EXEC SPOOLQ'
+
+say ''
+say '=== Done ==='
+exit 0

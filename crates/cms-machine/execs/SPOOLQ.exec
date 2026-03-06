@@ -1,0 +1,34 @@
+/* REXX — SPOOLQ: query and display spool file status              */
+/* Usage: SPOOLQ           — show all spool queues                 */
+/*        SPOOLQ RDR       — show reader queue only                */
+/*        SPOOLQ PRT       — show printer queue only               */
+/*        SPOOLQ PUN       — show punch queue only                 */
+
+parse upper arg device .
+
+if device = '' then do
+    say '--- Reader ---'
+    'QUERY RDR'
+    say ''
+    say '--- Printer ---'
+    'QUERY PRT'
+    say ''
+    say '--- Punch ---'
+    'QUERY PUN'
+end
+else do
+    select
+        when device = 'RDR' | device = 'READER' then
+            'QUERY RDR'
+        when device = 'PRT' | device = 'PRINTER' then
+            'QUERY PRT'
+        when device = 'PUN' | device = 'PUNCH' then
+            'QUERY PUN'
+        otherwise do
+            say 'Unknown device:' device
+            say 'Use RDR, PRT, or PUN'
+            exit 24
+        end
+    end
+end
+exit 0

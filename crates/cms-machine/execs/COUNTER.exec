@@ -1,0 +1,24 @@
+/* REXX — COUNTER: persistent counter using GLOBALV                */
+/* Demonstrates state that survives across EXEC invocations.       */
+/* Usage: COUNTER          — increment and display                 */
+/*        COUNTER RESET    — reset to zero                         */
+
+parse upper arg action .
+
+'GLOBALV SELECT COUNTER'
+
+if action = 'RESET' then do
+    'GLOBALV SET COUNT 0'
+    say 'Counter reset to 0.'
+    exit 0
+end
+
+/* Retrieve current value (may not exist yet) */
+'GLOBALV GET COUNT'
+if rc \= 0 then
+    count = 0
+
+count = count + 1
+'GLOBALV SET COUNT' count
+say 'Counter:' count
+exit 0
