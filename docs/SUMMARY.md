@@ -7,6 +7,14 @@
 - [Quickstart](quickstart.md)
 - [Examples](EXAMPLES.md)
 
+# Design
+
+- [Design Principles](design/overview.md)
+- [Why Rust](design/why-rust.md)
+- [REXX Integration](design/rexx-integration.md)
+- [Async Architecture](design/async-architecture.md)
+- [Trait Seams](design/trait-seams.md)
+
 # cms-core Guide
 
 - [Overview](cms-core/overview.md)
