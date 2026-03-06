@@ -3,9 +3,9 @@
 
 # patch-cms
 
-A Rust reimplementation of the IBM VM/CMS environment — starting with the XEDIT
-editor and the REXX macro language, building toward the CMS file system,
-Hartmann pipelines, and VM inter-machine messaging.
+A Rust reimplementation of the IBM VM/CMS environment — XEDIT editor, CMS file
+system, REXX scripting, spool subsystem, Hartmann pipelines, and VM
+inter-machine messaging.
 
 **Overview**
 
@@ -26,9 +26,11 @@ patch-cms/
 ├── crates/
 │   ├── xedit-core/          # Editor model — pure logic, no I/O dependencies
 │   ├── xedit-tui/           # Terminal UI — 3270-style block-mode rendering
-│   ├── cms-core/   (future) # CMS file system (fn ft fm), commands, EXEC processor
-│   ├── cms-pipelines/ (future) # Hartmann pipelines
-│   └── vm-iucv/    (future) # Inter-machine messaging (actor framework)
+│   ├── cms-core/            # CMS file system (fn ft fm), commands, EXEC processor
+│   ├── cms-spool/           # Reader/punch/printer spool subsystem
+│   ├── cms-pipelines/       # Hartmann pipelines
+│   ├── vm-iucv/             # Inter-machine messaging (actor framework)
+│   └── cms-machine/         # Interactive CMS machine binary
 ```
 
 **xedit-core** is a standalone library with zero I/O dependencies. The editor is
@@ -39,34 +41,48 @@ editor via EXTRACT variables and ADDRESS XEDIT commands.
 **xedit-tui** provides the interactive terminal experience: prefix area editing,
 command line, PF keys, and screen editing with overtype/insert modes.
 
+**cms-core** implements the CMS file system (`fn ft fm` naming), command
+processor with IBM-style abbreviation matching, GLOBALV variable storage, and
+EXEC resolution. Trait seams (`ExecHandler`, `SmsgSender`, `ExtCommandHandler`)
+decouple it from the REXX interpreter, actor framework, and extension commands.
+
+**cms-spool** provides virtual reader/punch/printer queues with SPOOL, QUERY,
+PURGE, SENDFILE, and RECEIVE commands.
+
+**cms-pipelines** implements Hartmann pipelines — the `PIPE` command with
+built-in stages (`literal`, `console`, `locate`, `nlocate`) and a two-pass
+executor.
+
+**vm-iucv** is a Tokio-based actor framework modeled after VM/CMS inter-machine
+communication: Supervisor lifecycle management, SMSG messaging, and IUCV
+bidirectional data paths.
+
+**cms-machine** wires everything together into an interactive CMS console with
+REXX scripting, spool commands, and pipelines — all programmable from the REPL.
+
 **Building and Running**
 
 ```sh
 # Build the workspace
 cargo build --workspace
 
-# Build with REXX macro support
-cargo build --workspace --features rexx
-
 # Run the TUI editor
 cargo run -p xedit-tui -- <filename>
 
+# Run the interactive CMS machine
+cargo run -p cms-machine -- --userid ALICE --disk /tmp/cms
+
 # Run all tests
-cargo test --all-features --workspace
+cargo test --workspace
 ```
 
 **Current Status**
 
-**XEDIT editor** (Phases 1-3 complete):
-- Editor core with full prefix command model (d, dd, i, a, c, cc, m, mm, ", "", >, <, /, f, p)
-- Target system: `:n`, `+n`, `-n`, `/string/`, `-/string/`, `*`, compound targets
-- Commands: LOCATE, CHANGE, DELETE, INPUT, FILE, SAVE, QUIT, GET, SORT, ALL, and more
-- Screen editing: 3270-style block mode with prefix area, data area, and command line
-- File ring for multiple open files
-- PF key assignments, command history, undo
-- REXX macro integration: EXTRACT variables, ADDRESS XEDIT command routing, PROFILE XEDIT, SET MACRO PATH
+**906 tests passing, zero clippy warnings.**
 
-**Coming next**: CMS file system, command processor, and Hartmann pipelines.
+Phases 1-13 complete. The editor is fully functional with REXX macros, CMS file
+system, spool subsystem, Hartmann pipelines, actor-based inter-machine messaging,
+and an interactive CMS console. Everything is programmable from REXX/REPL.
 
 **License**
 
