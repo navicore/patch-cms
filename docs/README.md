@@ -22,7 +22,7 @@ See [ROADMAP.md](ROADMAP.md) for the full vision and current progress.
 **Workspace Structure**
 
 ```
-patch-xedit/
+patch-cms/
 ├── crates/
 │   ├── xedit-core/          # Editor model — pure logic, no I/O dependencies
 │   ├── xedit-tui/           # Terminal UI — 3270-style block-mode rendering

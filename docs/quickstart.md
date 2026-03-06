@@ -4,7 +4,7 @@
 
 ```toml
 [dependencies]
-vm-iucv = { git = "https://github.com/navicore/patch-xedit" }
+vm-iucv = { git = "https://github.com/navicore/patch-cms" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
@@ -53,8 +53,8 @@ The repository includes several runnable examples:
 
 ```sh
 # Clone the repository
-git clone https://github.com/navicore/patch-xedit.git
-cd patch-xedit
+git clone https://github.com/navicore/patch-cms.git
+cd patch-cms
 
 # Run the simplest example
 cargo run -p vm-iucv --example hello_smsg --features examples
