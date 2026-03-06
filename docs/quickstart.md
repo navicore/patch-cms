@@ -66,8 +66,28 @@ cargo run -p vm-iucv --example echo_server --features examples
 cargo run -p vm-iucv --example iucv_chat --features examples
 ```
 
+## Run the CMS machine
+
+The CMS machine provides an interactive console with REXX scripting, spool
+commands, and pipelines:
+
+```sh
+# Create a disk directory and launch
+mkdir -p /tmp/cms/a
+cargo run -p cms-machine -- --userid ALICE --disk /tmp/cms
+
+# At the CMS prompt, try:
+# GLOBALV SET COLOR blue
+# GLOBALV GET COLOR
+# SP PRT CLASS B
+# PIPE literal hello | console
+# LOGOFF
+```
+
 ## Next steps
 
 - Read the [Examples](EXAMPLES.md) page for annotated walkthroughs
-- See [Overview](vm-iucv/overview.md) for architecture details
+- See [vm-iucv Overview](vm-iucv/overview.md) for the actor framework
+- See [cms-core Overview](cms-core/overview.md) for the CMS command processor
+- See [cms-machine Overview](cms-machine/overview.md) for the interactive console
 - Check the [API Quick Reference](reference/api-quick-reference.md) for method tables

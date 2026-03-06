@@ -7,6 +7,22 @@
 - [Quickstart](quickstart.md)
 - [Examples](EXAMPLES.md)
 
+# cms-core Guide
+
+- [Overview](cms-core/overview.md)
+
+# cms-spool Guide
+
+- [Overview](cms-spool/overview.md)
+
+# cms-pipelines Guide
+
+- [Overview](cms-pipelines/overview.md)
+
+# cms-machine Guide
+
+- [Overview](cms-machine/overview.md)
+
 # vm-iucv Guide
 
 - [Overview](vm-iucv/overview.md)
