@@ -1,4 +1,7 @@
-use cms_core::{CmsFileSystem, CommandProcessor, ExecHandler, NoExecHandler, SmsgSender};
+use cms_core::{
+    CmsFileSystem, CommandProcessor, ExecHandler, ExtCommandHandler, NoExecHandler, NoExtCommands,
+    SmsgSender,
+};
 use vm_iucv::handler::{MachineContext, MachineHandler};
 use vm_iucv::message::SmsgMessage;
 
@@ -43,18 +46,24 @@ impl CmsMachineHandler {
     ///
     /// - `filesystem`: The CMS filesystem with accessed minidisks.
     /// - `exec_handler`: REXX EXEC handler.
+    /// - `ext_handler`: Extension command handler (spool, pipelines).
     /// - `cmd_rx`: Receives command strings from the console thread.
     /// - `output_tx`: Sends output lines back to the console thread.
     pub fn new(
         filesystem: CmsFileSystem,
         exec_handler: Box<dyn ExecHandler>,
+        ext_handler: Box<dyn ExtCommandHandler>,
         cmd_rx: mpsc::Receiver<String>,
         output_tx: mpsc::Sender<String>,
     ) -> Self {
         let (smsg_tx, smsg_rx) = mpsc::channel();
         let sender = ChannelSmsgSender::new(smsg_tx);
-        let processor =
-            CommandProcessor::with_smsg_sender(filesystem, exec_handler, Box::new(sender));
+        let processor = CommandProcessor::with_ext_handler(
+            filesystem,
+            exec_handler,
+            Box::new(sender),
+            ext_handler,
+        );
         CmsMachineHandler {
             processor,
             cmd_rx: Some(cmd_rx),
@@ -63,13 +72,19 @@ impl CmsMachineHandler {
         }
     }
 
-    /// Create a handler with no EXEC support (for testing without REXX).
+    /// Create a handler with no EXEC or extension support (for testing without REXX).
     pub fn without_rexx(
         filesystem: CmsFileSystem,
         cmd_rx: mpsc::Receiver<String>,
         output_tx: mpsc::Sender<String>,
     ) -> Self {
-        Self::new(filesystem, Box::new(NoExecHandler), cmd_rx, output_tx)
+        Self::new(
+            filesystem,
+            Box::new(NoExecHandler),
+            Box::new(NoExtCommands),
+            cmd_rx,
+            output_tx,
+        )
     }
 
     /// Sentinel value sent after all commands in a batch have been processed.

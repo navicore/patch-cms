@@ -3,8 +3,8 @@ use std::rc::Rc;
 
 use cms_core::command::ExecHandler;
 use cms_core::{
-    CmsCommand, CmsFileSystem, CommandProcessor, GlobalVars, GlobalvSubcommand, NoExecHandler,
-    NoSmsgSender,
+    CmsCommand, CmsFileSystem, CommandProcessor, GlobalVars, GlobalvSubcommand, NoSmsgSender,
+    SmsgSender,
 };
 
 use patch_rexx::env::Environment;
@@ -26,9 +26,9 @@ pub struct CmsRexxExecHandler;
 
 impl ExecHandler for CmsRexxExecHandler {
     fn execute_exec(&mut self, source: &str, args: &str) -> (i32, Vec<String>) {
-        match run_rexx_exec(source, args, None, None) {
-            Ok((rc, messages, _, _)) => (rc, messages),
-            Err((msg, _, _)) => (28, vec![msg]),
+        match run_rexx_exec(source, args, None, None, None) {
+            Ok((rc, messages, _, _, _)) => (rc, messages),
+            Err((msg, _, _, _)) => (28, vec![msg]),
         }
     }
 }
@@ -37,18 +37,30 @@ impl ExecHandler for CmsRexxExecHandler {
 ///
 /// The handler receives mutable references to the parent processor's components
 /// by temporarily taking them during execution and restoring them after.
-#[derive(Default)]
+/// The CommandProcessor calls `provide_state`/`retrieve_state` around each EXEC.
 pub struct CmsRexxExecHandlerWithSwap {
     /// Shared filesystem — swapped out of the CommandProcessor before REXX
     /// execution and restored after.
     pub(crate) filesystem: Option<CmsFileSystem>,
     /// Shared globalv — swapped similarly.
     pub(crate) globalv: Option<GlobalVars>,
+    /// Shared SMSG sender — swapped similarly.
+    pub(crate) smsg_sender: Option<Box<dyn SmsgSender>>,
 }
 
 impl CmsRexxExecHandlerWithSwap {
     pub fn new() -> Self {
-        Self::default()
+        CmsRexxExecHandlerWithSwap {
+            filesystem: None,
+            globalv: None,
+            smsg_sender: None,
+        }
+    }
+}
+
+impl Default for CmsRexxExecHandlerWithSwap {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -56,26 +68,66 @@ impl ExecHandler for CmsRexxExecHandlerWithSwap {
     fn execute_exec(&mut self, source: &str, args: &str) -> (i32, Vec<String>) {
         let fs = self.filesystem.take();
         let gv = self.globalv.take();
-        match run_rexx_exec(source, args, fs, gv) {
-            Ok((rc, messages, fs_back, gv_back)) => {
+        let smsg = self.smsg_sender.take();
+        match run_rexx_exec(source, args, fs, gv, smsg) {
+            Ok((rc, messages, fs_back, gv_back, smsg_back)) => {
                 self.filesystem = fs_back;
                 self.globalv = gv_back;
+                self.smsg_sender = smsg_back;
                 (rc, messages)
             }
-            Err((msg, fs_back, gv_back)) => {
+            Err((msg, fs_back, gv_back, smsg_back)) => {
                 // Issue #4 fix: restore state even on error path
                 self.filesystem = fs_back;
                 self.globalv = gv_back;
+                self.smsg_sender = smsg_back;
                 (28, vec![msg])
             }
         }
     }
+
+    fn provide_state(
+        &mut self,
+        fs: CmsFileSystem,
+        gv: GlobalVars,
+    ) -> Option<(CmsFileSystem, GlobalVars)> {
+        self.filesystem = Some(fs);
+        self.globalv = Some(gv);
+        None // accepted
+    }
+
+    fn retrieve_state(&mut self) -> Option<(CmsFileSystem, GlobalVars)> {
+        match (self.filesystem.take(), self.globalv.take()) {
+            (Some(fs), Some(gv)) => Some((fs, gv)),
+            _ => None,
+        }
+    }
+
+    fn provide_smsg_sender(&mut self, sender: Box<dyn SmsgSender>) -> Option<Box<dyn SmsgSender>> {
+        self.smsg_sender = Some(sender);
+        None // accepted
+    }
+
+    fn retrieve_smsg_sender(&mut self) -> Option<Box<dyn SmsgSender>> {
+        self.smsg_sender.take()
+    }
 }
 
-/// Error type that preserves filesystem/globalv state for the caller to recover.
+/// Error type that preserves filesystem/globalv/smsg state for the caller to recover.
 type RexxExecResult = Result<
-    (i32, Vec<String>, Option<CmsFileSystem>, Option<GlobalVars>),
-    (String, Option<CmsFileSystem>, Option<GlobalVars>),
+    (
+        i32,
+        Vec<String>,
+        Option<CmsFileSystem>,
+        Option<GlobalVars>,
+        Option<Box<dyn SmsgSender>>,
+    ),
+    (
+        String,
+        Option<CmsFileSystem>,
+        Option<GlobalVars>,
+        Option<Box<dyn SmsgSender>>,
+    ),
 >;
 
 fn run_rexx_exec(
@@ -83,19 +135,34 @@ fn run_rexx_exec(
     args: &str,
     filesystem: Option<CmsFileSystem>,
     globalv: Option<GlobalVars>,
+    smsg_sender: Option<Box<dyn SmsgSender>>,
 ) -> RexxExecResult {
     // Parse the REXX source — errors here happen before state is wrapped,
     // so return the original filesystem/globalv on the error path.
     let mut lexer = Lexer::new(source);
     let tokens = match lexer.tokenize() {
         Ok(t) => t,
-        Err(e) => return Err((format!("REXX syntax error: {}", e), filesystem, globalv)),
+        Err(e) => {
+            return Err((
+                format!("REXX syntax error: {}", e),
+                filesystem,
+                globalv,
+                smsg_sender,
+            ))
+        }
     };
 
     let mut parser = Parser::new(tokens);
     let program = match parser.parse() {
         Ok(p) => p,
-        Err(e) => return Err((format!("REXX parse error: {}", e), filesystem, globalv)),
+        Err(e) => {
+            return Err((
+                format!("REXX parse error: {}", e),
+                filesystem,
+                globalv,
+                smsg_sender,
+            ))
+        }
     };
 
     // Set up the REXX environment with ADDRESS CMS
@@ -108,13 +175,15 @@ fn run_rexx_exec(
         evaluator.set_main_args(vec![RexxValue::new(args)]);
     }
 
-    // Wrap filesystem and globalv in Rc<RefCell<>> for the command handler closure
+    // Wrap filesystem, globalv, and smsg_sender in Rc<RefCell<>> for the closure
     let shared_fs = Rc::new(RefCell::new(filesystem.unwrap_or_default()));
     let shared_gv = Rc::new(RefCell::new(globalv.unwrap_or_default()));
+    let shared_smsg: Rc<RefCell<Option<Box<dyn SmsgSender>>>> = Rc::new(RefCell::new(smsg_sender));
     let output = Rc::new(RefCell::new(Vec::<String>::new()));
 
     let fs_handle = Rc::clone(&shared_fs);
     let gv_handle = Rc::clone(&shared_gv);
+    let smsg_handle = Rc::clone(&shared_smsg);
     let output_handle = Rc::clone(&output);
 
     // Issue #2 fix: use vars to write GLOBALV GET results back to the REXX variable pool
@@ -139,25 +208,20 @@ fn run_rexx_exec(
         let mut gv_taken = GlobalVars::new();
         std::mem::swap(&mut *gv_handle.borrow_mut(), &mut gv_taken);
 
-        // Create temp processor — nested EXEC is not supported at this depth
-        // (NoExecHandler returns RC=28 if a nested EXEC is attempted).
-        // SMSG commands also return RC=28 (NoSmsgSender) — the temp processor
-        // has no connection to the actor system. Threading the SMSG channel
-        // requires architectural changes (tracked as a known limitation).
-        let mut temp_proc = CommandProcessor::with_smsg_sender(
-            fs_taken,
-            Box::new(NoExecHandler),
-            Box::new(NoSmsgSender),
-        );
+        // Take SMSG sender for the temp processor
+        let smsg_taken: Box<dyn SmsgSender> = smsg_handle
+            .borrow_mut()
+            .take()
+            .unwrap_or_else(|| Box::new(NoSmsgSender));
+
+        // Create temp processor with nested EXEC support (one level) and SMSG
+        let nested_exec: Box<dyn ExecHandler> = Box::new(CmsRexxExecHandlerWithSwap::new());
+        let mut temp_proc = CommandProcessor::with_smsg_sender(fs_taken, nested_exec, smsg_taken);
         *temp_proc.globalv_mut() = gv_taken;
 
         let result = temp_proc.execute(cmd_text);
 
         // Write GLOBALV GET results back to the REXX variable pool.
-        // GLOBALV GET VAR1 VAR2 ... retrieves values and sets each variable
-        // in the caller's environment — this is the CMS convention.
-        // RC=4 (partial miss) still writes the variables that were found.
-        // Uses parse_cms_command to avoid duplicating abbreviation logic.
         if result.rc == 0 || result.rc == 4 {
             if let Ok(CmsCommand::Globalv(GlobalvSubcommand::Get(names))) =
                 cms_core::command::parse_cms_command(cmd_text)
@@ -175,6 +239,10 @@ fn run_rexx_exec(
         // Swap state back
         std::mem::swap(&mut *fs_handle.borrow_mut(), temp_proc.filesystem_mut());
         std::mem::swap(&mut *gv_handle.borrow_mut(), temp_proc.globalv_mut());
+
+        // Reclaim SMSG sender
+        let smsg_back = temp_proc.take_smsg_sender();
+        *smsg_handle.borrow_mut() = Some(smsg_back);
 
         Some(result.rc)
     };
@@ -194,10 +262,14 @@ fn run_rexx_exec(
         Err(_rc) => {
             let fs_back = Rc::try_unwrap(shared_fs).ok().map(|c| c.into_inner());
             let gv_back = Rc::try_unwrap(shared_gv).ok().map(|c| c.into_inner());
+            let smsg_back = Rc::try_unwrap(shared_smsg)
+                .ok()
+                .and_then(|c| c.into_inner());
             return Err((
                 "REXX: internal state error (multiple references)".to_string(),
                 fs_back,
                 gv_back,
+                smsg_back,
             ));
         }
     };
@@ -214,6 +286,9 @@ fn run_rexx_exec(
             .unwrap_or_else(|_| panic!("globalv Rc still shared after evaluator drop"))
             .into_inner(),
     );
+    let smsg_back = Rc::try_unwrap(shared_smsg)
+        .unwrap_or_else(|_| panic!("smsg_sender Rc still shared after evaluator drop"))
+        .into_inner();
 
     // Issue #1 fix: extract REXX exit code from ExecSignal
     let mut messages = messages;
@@ -221,11 +296,11 @@ fn run_rexx_exec(
         Ok(signal) => extract_rc(&signal, &mut messages),
         Err(msg) => {
             messages.push(msg);
-            return Ok((28, messages, fs_back, gv_back));
+            return Ok((28, messages, fs_back, gv_back, smsg_back));
         }
     };
 
-    Ok((rc, messages, fs_back, gv_back))
+    Ok((rc, messages, fs_back, gv_back, smsg_back))
 }
 
 /// Extract a numeric return code from a REXX ExecSignal.
@@ -426,30 +501,38 @@ else
     }
 
     #[test]
-    fn nested_exec_returns_rc28() {
+    fn nested_exec_works() {
         use cms_core::minidisk::AccessMode;
 
-        // Set up a filesystem with an A-disk containing a NESTED EXEC file,
-        // so cmd_exec finds the file and actually calls NoExecHandler.
+        // Set up a filesystem with an A-disk containing a NESTED EXEC file
+        // that sets a GLOBALV variable.
         let dir = tempfile::TempDir::new().unwrap();
         let mut fs = CmsFileSystem::new();
         fs.access_disk('A', dir.path().join("a"), AccessMode::ReadWrite)
             .unwrap();
-        let spec = cms_core::FileSpec::parse("NESTED EXEC A").unwrap();
-        fs.write_file(&spec, "/* REXX */\nsay 'nested'\n").unwrap();
+        let spec = cms_core::FileSpec::parse("INNER EXEC A").unwrap();
+        fs.write_file(&spec, "/* REXX */\n'GLOBALV SET NESTED yes'\n")
+            .unwrap();
 
         let mut handler = CmsRexxExecHandlerWithSwap::new();
         handler.filesystem = Some(fs);
         handler.globalv = Some(GlobalVars::new());
 
-        // REXX program tries to run an EXEC via ADDRESS CMS — the temp processor
-        // uses NoExecHandler (nested EXEC not supported), so it returns RC=28.
+        // Outer REXX calls EXEC INNER, then checks the GLOBALV it set
         let source = r#"/* REXX */
-'EXEC NESTED'
-exit rc
+'EXEC INNER'
+'GLOBALV GET NESTED'
+if nested = 'yes' then
+    exit 0
+else
+    exit 99
 "#;
         let (rc, _) = handler.execute_exec(source, "");
-        assert_eq!(rc, 28, "Nested EXEC should return RC=28 from NoExecHandler");
+        assert_eq!(rc, 0, "Nested EXEC should work and GLOBALV should persist");
+
+        // Verify globalv persists back to handler
+        let gv = handler.globalv.as_ref().unwrap();
+        assert_eq!(gv.get("NESTED"), Some("yes"));
     }
 
     // Issue #4: state preserved on error path

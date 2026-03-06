@@ -25,8 +25,9 @@ patch-xedit/
 │   ├── xedit-tui/                   # Terminal UI — 3270-style rendering
 │   ├── cms-core/                    # CMS file system, commands, EXEC processor
 │   ├── cms-spool/                   # Reader/punch/printer spool subsystem
-│   ├── cms-pipelines/     (future)  # Hartmann pipelines
-│   └── vm-iucv/           (future)  # Inter-machine messaging (actor framework)
+│   ├── cms-pipelines/               # Hartmann pipelines
+│   ├── vm-iucv/                     # Inter-machine messaging (actor framework)
+│   └── cms-machine/                 # Interactive CMS machine binary
 ```
 
 Key design principle: **trait-based seams**. XEDIT depends on a `FileSystem`
@@ -162,44 +163,64 @@ New crate: `cms-spool/` — 143 tests, zero clippy warnings.
 - [x] Transfer-to-reader with rollback on failure
 - [x] Orphaned entry cleanup in directory scans
 
-## Phase 9: CMS Pipelines (Hartmann Pipelines)
+## Phase 9: CMS Pipelines (Hartmann Pipelines) — DONE
 
-New crate: `cms-pipelines/`
+New crate: `cms-pipelines/` — 88 tests, zero clippy warnings.
 
-The most underappreciated tool in computing history.
+- [x] Pipeline parser: `PIPE stage1 args | stage2 | ...` syntax
+- [x] Two-pass executor: initialize → process → finish
+- [x] Multi-stream support (primary/secondary outputs with RC codes)
+- [x] Built-in stages: `literal`, `console`, `locate`, `nlocate`
+- [x] Stage trait with pass-through default for custom stages
+- [x] CMS-style RC codes (0/4/24/28/32)
 
-- `PIPE` command to define pipeline stages
-- Built-in stages: `< file`, `> file`, `locate`, `nlocate`, `change`,
-  `count`, `sort`, `unique`, `specs`, `pad`, `strip`, `xlate`, `console`,
-  `stack`, `stem`, `var`, `literal`, `chop`, `join`, `split`, `fanout`,
-  `faninany`, `gate`, etc.
-- Multi-stream pipelines (primary + secondary outputs)
-- Pipeline stages as Rust iterators/async streams
-- User-written stages in REXX
+## Phase 10: VM Inter-Machine Messaging (IUCV Actor Framework) — DONE
 
-### Example
-```
-pipe < data.txt | locate /ERROR/ | change /ERROR/WARNING/ | > fixed.txt
-pipe < log.txt | locate /ERROR/ | count lines | console
-```
+New crate: `vm-iucv/` — 77 tests, zero clippy warnings.
 
-## Phase 10: VM Inter-Machine Messaging (Actor Framework)
+- [x] Supervisor (Control Program): Tokio-based machine lifecycle management
+- [x] MachineHandler trait: `on_ipl`, `on_smsg`, `on_logoff` callbacks
+- [x] MachineContext: runtime API (`try_send_smsg`, `sever_path`, `iucv_send`)
+- [x] SMSG: single-line message delivery between machines
+- [x] IUCV paths: connection lifecycle (pending → established → severed)
+- [x] MachineId validation and routing
+- [x] Actor model: each machine is an isolated Tokio task
 
-New crate: `vm-iucv/`
+## Phase 11: Documentation — DONE
 
-- Typed message passing between CMS "machines"
-- Each CMS machine = a Tokio task with its own Environment
-- IUCV CONNECT / SEND / RECEIVE semantics
-- SMSG (single-line message) for simple communication
-- Map to: channels, network sockets, gRPC, NATS, etc.
-- This is the actor model — each machine is an isolated actor
-- Supervisor patterns for machine lifecycle
+mdBook reference documentation with CI integration.
 
-### Connection to Go CSP patterns
-- VM/CMS IUCV ~ Go channels between goroutines
-- Each CMS machine ~ a goroutine with isolated state
-- SMSG ~ simple channel send
-- IUCV paths ~ typed bidirectional channels
+- [x] mdBook setup (`book.toml`, `docs/SUMMARY.md`)
+- [x] Quick start guide and API reference
+- [x] vm-iucv module guide: overview, handlers, IUCV paths, SMSG messaging
+- [x] Error codes reference and glossary
+- [x] Examples: hello_smsg, echo_server, connection_gating, iucv_chat, multi_machine_pipeline
+- [x] GitHub Actions CI for automated mdBook builds
+
+## Phase 12: CMS Machine (Interactive Console) — DONE
+
+New crate: `cms-machine/` — 22 tests (18 unit + 4 integration), zero clippy warnings.
+
+- [x] `CmsMachineHandler`: wraps CommandProcessor, implements MachineHandler
+- [x] Interactive console: stdin → commands → handler → stdout
+- [x] BATCH_DONE sentinel: reliable sync between console and handler
+- [x] $CON wake pattern: console wakes machine via SMSG from $CON pseudo-machine
+- [x] Inbound SMSG: messages from other machines stored in GLOBALV LASTING
+- [x] ChannelSmsgSender: routes SMSG commands through actor framework
+- [x] REXX EXEC support: PROFILE EXEC on startup, ADDRESS CMS in REXX
+- [x] CLI: `--userid NAME`, `--disk PATH`, auto-mount A-Z disks
+- [x] LOGOFF command with supervisor shutdown
+
+## Phase 13: REXX/REPL Programming Environment — IN PROGRESS
+
+Wire all subsystems together so everything is programmable from REXX/REPL.
+
+- [ ] ExtCommandHandler trait in cms-core (extension point for spool/pipeline)
+- [ ] CmsRexxExecHandlerWithSwap: persistent state across REXX EXECs
+- [ ] SMSG from REXX: thread SmsgSender into REXX execution context
+- [ ] Nested EXEC: REXX calling EXEC that calls EXEC
+- [ ] Spool + pipeline commands available from REPL and REXX
+- [ ] Full wiring in main.rs and handler.rs
 
 ## Design Principles
 
@@ -223,9 +244,9 @@ New crate: `vm-iucv/`
 
 ## Current Status
 
-**700 tests passing, zero clippy warnings.**
+**895 tests passing, zero clippy warnings.**
 
-Phases 1-8 complete. The editor is fully functional with screen editing,
-REXX macros, CMS file system integration, multi-file ring support, and
-a persistent spool subsystem with reader/printer/punch queues. Phase 9
-(CMS Pipelines) is the next major milestone.
+Phases 1-12 complete. The editor is fully functional with REXX macros, CMS file
+system, spool subsystem, Hartmann pipelines, actor-based inter-machine messaging,
+and an interactive CMS console. Phase 13 wires the remaining subsystems together
+so everything is programmable from REXX/REPL without dropping into Rust.

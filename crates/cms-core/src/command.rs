@@ -14,6 +14,33 @@ pub trait ExecHandler: Send {
     /// Execute a REXX source string with the given argument string.
     /// Returns `(return_code, output_messages)`.
     fn execute_exec(&mut self, source: &str, args: &str) -> (i32, Vec<String>);
+
+    /// Accept filesystem and globalv state from the CommandProcessor before EXEC.
+    /// Returns `None` if accepted (swap handler), `Some(...)` to give them back (no swap).
+    fn provide_state(
+        &mut self,
+        fs: CmsFileSystem,
+        gv: GlobalVars,
+    ) -> Option<(CmsFileSystem, GlobalVars)> {
+        Some((fs, gv)) // default: return back, no swap
+    }
+
+    /// Retrieve filesystem and globalv state after EXEC completes.
+    /// Returns `None` if the handler doesn't support swap.
+    fn retrieve_state(&mut self) -> Option<(CmsFileSystem, GlobalVars)> {
+        None
+    }
+
+    /// Accept an SMSG sender from the CommandProcessor before EXEC.
+    /// Returns `None` if accepted, `Some(...)` to give it back.
+    fn provide_smsg_sender(&mut self, sender: Box<dyn SmsgSender>) -> Option<Box<dyn SmsgSender>> {
+        Some(sender) // default: return back, no swap
+    }
+
+    /// Retrieve the SMSG sender after EXEC completes.
+    fn retrieve_smsg_sender(&mut self) -> Option<Box<dyn SmsgSender>> {
+        None
+    }
 }
 
 /// Default handler when no REXX interpreter is available — always returns RC=28.
@@ -41,6 +68,27 @@ pub struct NoSmsgSender;
 impl SmsgSender for NoSmsgSender {
     fn send_smsg(&self, _target: &str, _text: &str) -> (i32, String) {
         (28, "SMSG facility not available".to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ExtCommandHandler trait — extension point for spool/pipeline commands
+// ---------------------------------------------------------------------------
+
+/// Trait for handling commands that live outside cms-core (e.g. spool, pipelines).
+/// The CommandProcessor calls this on unknown commands before the EXEC fallback.
+///
+/// Returns `Some((rc, messages))` if the command was handled, `None` to fall through.
+pub trait ExtCommandHandler: Send {
+    fn try_execute(&mut self, input: &str) -> Option<(i32, Vec<String>)>;
+}
+
+/// Default handler when no extension commands are available — always returns None.
+pub struct NoExtCommands;
+
+impl ExtCommandHandler for NoExtCommands {
+    fn try_execute(&mut self, _input: &str) -> Option<(i32, Vec<String>)> {
+        None
     }
 }
 
@@ -391,6 +439,7 @@ pub struct CommandProcessor {
     globalv: GlobalVars,
     exec_handler: Box<dyn ExecHandler>,
     smsg_sender: Box<dyn SmsgSender>,
+    ext_handler: Box<dyn ExtCommandHandler>,
 }
 
 impl CommandProcessor {
@@ -401,6 +450,7 @@ impl CommandProcessor {
             globalv: GlobalVars::new(),
             exec_handler: Box::new(NoExecHandler),
             smsg_sender: Box::new(NoSmsgSender),
+            ext_handler: Box::new(NoExtCommands),
         }
     }
 
@@ -411,6 +461,7 @@ impl CommandProcessor {
             globalv: GlobalVars::new(),
             exec_handler: handler,
             smsg_sender: Box::new(NoSmsgSender),
+            ext_handler: Box::new(NoExtCommands),
         }
     }
 
@@ -425,6 +476,23 @@ impl CommandProcessor {
             globalv: GlobalVars::new(),
             exec_handler: handler,
             smsg_sender: sender,
+            ext_handler: Box::new(NoExtCommands),
+        }
+    }
+
+    /// Create a new command processor with all four dependencies.
+    pub fn with_ext_handler(
+        filesystem: CmsFileSystem,
+        handler: Box<dyn ExecHandler>,
+        sender: Box<dyn SmsgSender>,
+        ext: Box<dyn ExtCommandHandler>,
+    ) -> Self {
+        CommandProcessor {
+            filesystem,
+            globalv: GlobalVars::new(),
+            exec_handler: handler,
+            smsg_sender: sender,
+            ext_handler: ext,
         }
     }
 
@@ -464,6 +532,19 @@ impl CommandProcessor {
         std::mem::replace(&mut self.smsg_sender, sender)
     }
 
+    /// Temporarily take the ext command handler, replacing it with `NoExtCommands`.
+    pub fn take_ext_handler(&mut self) -> Box<dyn ExtCommandHandler> {
+        std::mem::replace(&mut self.ext_handler, Box::new(NoExtCommands))
+    }
+
+    /// Set a new ext command handler, returning the old one.
+    pub fn set_ext_handler(
+        &mut self,
+        handler: Box<dyn ExtCommandHandler>,
+    ) -> Box<dyn ExtCommandHandler> {
+        std::mem::replace(&mut self.ext_handler, handler)
+    }
+
     /// Main entry point: parse and execute a command line.
     ///
     /// 1. Try to parse as a built-in command and dispatch.
@@ -472,7 +553,13 @@ impl CommandProcessor {
     pub fn execute(&mut self, input: &str) -> CmsCommandResult {
         match parse_cms_command(input) {
             Ok(cmd) => self.dispatch(cmd),
-            Err(CmsError::UnknownCommand(ref cmd_name)) => self.try_exec_fallback(cmd_name, input),
+            Err(CmsError::UnknownCommand(ref cmd_name)) => {
+                // Try extension commands (spool, pipelines) before EXEC fallback
+                if let Some((rc, messages)) = self.ext_handler.try_execute(input) {
+                    return CmsCommandResult { rc, messages };
+                }
+                self.try_exec_fallback(cmd_name, input)
+            }
             Err(e) => CmsCommandResult::error(24, e.to_string()),
         }
     }
@@ -483,12 +570,44 @@ impl CommandProcessor {
         let spec = FileSpec::parse("PROFILE EXEC *").ok()?;
         match self.filesystem.read_file(&spec) {
             Ok(source) => {
-                let (rc, messages) = self.exec_handler.execute_exec(&source, "");
+                let (rc, messages) = self.run_exec_with_swap(&source, "");
                 Some(CmsCommandResult { rc, messages })
             }
             Err(CmsError::FileNotFound(_)) | Err(CmsError::DiskNotAccessed(_)) => None,
             Err(e) => Some(CmsCommandResult::error(28, e.to_string())),
         }
+    }
+
+    /// Run an EXEC with state swap: move fs/gv/smsg out of the processor into
+    /// the exec handler, run the EXEC, then restore state.
+    fn run_exec_with_swap(&mut self, source: &str, args: &str) -> (i32, Vec<String>) {
+        // Swap filesystem and globalv into exec handler
+        let fs = std::mem::take(&mut self.filesystem);
+        let gv = std::mem::take(&mut self.globalv);
+        if let Some((fs_back, gv_back)) = self.exec_handler.provide_state(fs, gv) {
+            // Handler doesn't support swap — restore immediately
+            self.filesystem = fs_back;
+            self.globalv = gv_back;
+        }
+
+        // Swap SMSG sender into exec handler
+        let sender = std::mem::replace(&mut self.smsg_sender, Box::new(NoSmsgSender));
+        if let Some(sender_back) = self.exec_handler.provide_smsg_sender(sender) {
+            self.smsg_sender = sender_back;
+        }
+
+        let (rc, messages) = self.exec_handler.execute_exec(source, args);
+
+        // Restore state
+        if let Some((fs_back, gv_back)) = self.exec_handler.retrieve_state() {
+            self.filesystem = fs_back;
+            self.globalv = gv_back;
+        }
+        if let Some(sender_back) = self.exec_handler.retrieve_smsg_sender() {
+            self.smsg_sender = sender_back;
+        }
+
+        (rc, messages)
     }
 
     // --- dispatch built-in commands ---
@@ -680,7 +799,7 @@ impl CommandProcessor {
         };
         match self.filesystem.read_file(&spec) {
             Ok(source) => {
-                let (rc, messages) = self.exec_handler.execute_exec(&source, &args);
+                let (rc, messages) = self.run_exec_with_swap(&source, &args);
                 CmsCommandResult { rc, messages }
             }
             Err(CmsError::FileNotFound(_)) => {
@@ -710,7 +829,7 @@ impl CommandProcessor {
 
         match self.filesystem.read_file(&spec) {
             Ok(source) => {
-                let (rc, messages) = self.exec_handler.execute_exec(&source, args);
+                let (rc, messages) = self.run_exec_with_swap(&source, args);
                 CmsCommandResult { rc, messages }
             }
             Err(CmsError::FileNotFound(_)) | Err(CmsError::DiskNotAccessed(_)) => {
@@ -1124,6 +1243,56 @@ mod tests {
     }
 
     // -- take/set roundtrip tests --
+
+    // -- ExtCommandHandler tests --
+
+    struct MockExtHandler;
+
+    impl ExtCommandHandler for MockExtHandler {
+        fn try_execute(&mut self, input: &str) -> Option<(i32, Vec<String>)> {
+            let trimmed = input.trim();
+            let cmd_word = trimmed.split_whitespace().next().unwrap_or("");
+            if cmd_word.eq_ignore_ascii_case("MYCMD") {
+                Some((0, vec![format!("MYCMD handled: {}", trimmed)]))
+            } else {
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn ext_handler_intercepts_unknown_command() {
+        let dir = TempDir::new().unwrap();
+        let mut fs = CmsFileSystem::new();
+        fs.access_disk('A', dir.path().join("a"), AccessMode::ReadWrite)
+            .unwrap();
+        let mut proc = CommandProcessor::with_ext_handler(
+            fs,
+            Box::new(NoExecHandler),
+            Box::new(NoSmsgSender),
+            Box::new(MockExtHandler),
+        );
+        let result = proc.execute("MYCMD some args");
+        assert_eq!(result.rc, 0);
+        assert!(result.messages[0].contains("MYCMD handled"));
+    }
+
+    #[test]
+    fn ext_handler_falls_through_to_exec() {
+        let dir = TempDir::new().unwrap();
+        let mut fs = CmsFileSystem::new();
+        fs.access_disk('A', dir.path().join("a"), AccessMode::ReadWrite)
+            .unwrap();
+        let mut proc = CommandProcessor::with_ext_handler(
+            fs,
+            Box::new(NoExecHandler),
+            Box::new(NoSmsgSender),
+            Box::new(MockExtHandler),
+        );
+        // NOTMYCMD is not handled by ext handler, falls through to EXEC, not found → RC=3
+        let result = proc.execute("NOTMYCMD");
+        assert_eq!(result.rc, 3);
+    }
 
     #[test]
     fn take_set_exec_handler_roundtrip() {

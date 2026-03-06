@@ -3,6 +3,7 @@ use std::sync::mpsc;
 use cms_core::minidisk::AccessMode;
 use cms_core::{CmsFileSystem, FileSpec};
 use cms_machine::handler::CmsMachineHandler;
+use cms_machine::CmsExtCommandHandler;
 use vm_iucv::handler::{MachineContext, MachineHandler};
 use vm_iucv::machine_id::MachineId;
 use vm_iucv::message::SmsgMessage;
@@ -184,7 +185,7 @@ async fn inbound_smsg_sets_globalv() {
 
 #[cfg(feature = "rexx")]
 #[tokio::test]
-async fn rexx_exec_runs_via_console() {
+async fn rexx_exec_runs_via_console_with_swap() {
     let dir = tempfile::TempDir::new().unwrap();
     let mut fs = CmsFileSystem::new();
     fs.access_disk('A', dir.path().join("a"), AccessMode::ReadWrite)
@@ -198,8 +199,10 @@ async fn rexx_exec_runs_via_console() {
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let (output_tx, output_rx) = mpsc::channel();
 
-    let exec_handler = Box::new(cms_machine::rexx_exec::CmsRexxExecHandler);
-    let handler = CmsMachineHandler::new(fs, exec_handler, cmd_rx, output_tx);
+    // Use swap handler for persistent state
+    let exec_handler = Box::new(cms_machine::rexx_exec::CmsRexxExecHandlerWithSwap::new());
+    let ext_handler = Box::new(CmsExtCommandHandler::new("USER"));
+    let handler = CmsMachineHandler::new(fs, exec_handler, ext_handler, cmd_rx, output_tx);
 
     let sup = Supervisor::new();
     let con_id = MachineId::new("$CON").unwrap();
@@ -217,18 +220,137 @@ async fn rexx_exec_runs_via_console() {
     sup.smsg(&con_id, &user_id, "CMD").await.unwrap();
     drain_output(&output_rx).await;
 
-    // Verify GLOBALV was NOT set (simple CmsRexxExecHandler uses temp processor)
-    // This is expected MVP behavior — ADDRESS CMS commands run against a fresh context
+    // Verify GLOBALV WAS set (swap handler persists state)
     cmd_tx.send("GLOBALV GET GREETING".to_string()).unwrap();
     sup.smsg(&con_id, &user_id, "CMD").await.unwrap();
 
-    let lines = poll_output_until(&output_rx, |l| l.iter().any(|s| s.contains("RC="))).await;
+    let lines = poll_output_until(&output_rx, |l| l.contains(&"Hi there".to_string())).await;
 
-    // The GET will return RC=4 (not found) since the temp processor's state doesn't persist
-    // This is fine for MVP — full state sharing requires CmsRexxExecHandlerWithSwap
     assert!(
-        lines.iter().any(|l| l.contains("RC=")),
-        "Expected RC in output, got: {:?}",
+        lines.contains(&"Hi there".to_string()),
+        "Expected 'Hi there' in output (swap handler persists state), got: {:?}",
+        lines,
+    );
+
+    sup.shutdown().await;
+}
+
+#[cfg(feature = "rexx")]
+#[tokio::test]
+async fn spool_command_via_console() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut fs = CmsFileSystem::new();
+    fs.access_disk('A', dir.path().join("a"), AccessMode::ReadWrite)
+        .unwrap();
+
+    let (cmd_tx, cmd_rx) = mpsc::channel();
+    let (output_tx, output_rx) = mpsc::channel();
+
+    let exec_handler = Box::new(cms_machine::rexx_exec::CmsRexxExecHandlerWithSwap::new());
+    let ext_handler = Box::new(CmsExtCommandHandler::new("USER"));
+    let handler = CmsMachineHandler::new(fs, exec_handler, ext_handler, cmd_rx, output_tx);
+
+    let sup = Supervisor::new();
+    let con_id = MachineId::new("$CON").unwrap();
+    let user_id = MachineId::new("USER").unwrap();
+
+    sup.ipl(&con_id, ConHandler).await.unwrap();
+    sup.ipl(&user_id, handler).await.unwrap();
+
+    poll_output_until(&output_rx, |l| l.iter().any(|s| s.contains("CMS Machine"))).await;
+    drain_output(&output_rx).await;
+
+    // SP PRT CLASS B
+    cmd_tx.send("SP PRT CLASS B".to_string()).unwrap();
+    sup.smsg(&con_id, &user_id, "CMD").await.unwrap();
+
+    let lines = poll_output_until(&output_rx, |l| l.iter().any(|s| s.contains("PRINTER"))).await;
+
+    assert!(
+        lines.iter().any(|l| l.contains("PRINTER")),
+        "Expected PRINTER in spool output, got: {:?}",
+        lines,
+    );
+
+    sup.shutdown().await;
+}
+
+#[cfg(feature = "rexx")]
+#[tokio::test]
+async fn query_reader_via_console() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut fs = CmsFileSystem::new();
+    fs.access_disk('A', dir.path().join("a"), AccessMode::ReadWrite)
+        .unwrap();
+
+    let (cmd_tx, cmd_rx) = mpsc::channel();
+    let (output_tx, output_rx) = mpsc::channel();
+
+    let exec_handler = Box::new(cms_machine::rexx_exec::CmsRexxExecHandlerWithSwap::new());
+    let ext_handler = Box::new(CmsExtCommandHandler::new("USER"));
+    let handler = CmsMachineHandler::new(fs, exec_handler, ext_handler, cmd_rx, output_tx);
+
+    let sup = Supervisor::new();
+    let con_id = MachineId::new("$CON").unwrap();
+    let user_id = MachineId::new("USER").unwrap();
+
+    sup.ipl(&con_id, ConHandler).await.unwrap();
+    sup.ipl(&user_id, handler).await.unwrap();
+
+    poll_output_until(&output_rx, |l| l.iter().any(|s| s.contains("CMS Machine"))).await;
+    drain_output(&output_rx).await;
+
+    // Q R
+    cmd_tx.send("Q R".to_string()).unwrap();
+    sup.smsg(&con_id, &user_id, "CMD").await.unwrap();
+
+    let lines = poll_output_until(&output_rx, |l| l.iter().any(|s| s.contains("No files"))).await;
+
+    assert!(
+        lines.iter().any(|l| l.contains("No files")),
+        "Expected 'No files' in query output, got: {:?}",
+        lines,
+    );
+
+    sup.shutdown().await;
+}
+
+#[cfg(feature = "rexx")]
+#[tokio::test]
+async fn pipe_command_via_console() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut fs = CmsFileSystem::new();
+    fs.access_disk('A', dir.path().join("a"), AccessMode::ReadWrite)
+        .unwrap();
+
+    let (cmd_tx, cmd_rx) = mpsc::channel();
+    let (output_tx, output_rx) = mpsc::channel();
+
+    let exec_handler = Box::new(cms_machine::rexx_exec::CmsRexxExecHandlerWithSwap::new());
+    let ext_handler = Box::new(CmsExtCommandHandler::new("USER"));
+    let handler = CmsMachineHandler::new(fs, exec_handler, ext_handler, cmd_rx, output_tx);
+
+    let sup = Supervisor::new();
+    let con_id = MachineId::new("$CON").unwrap();
+    let user_id = MachineId::new("USER").unwrap();
+
+    sup.ipl(&con_id, ConHandler).await.unwrap();
+    sup.ipl(&user_id, handler).await.unwrap();
+
+    poll_output_until(&output_rx, |l| l.iter().any(|s| s.contains("CMS Machine"))).await;
+    drain_output(&output_rx).await;
+
+    // PIPE literal hello | console
+    cmd_tx
+        .send("PIPE literal hello | console".to_string())
+        .unwrap();
+    sup.smsg(&con_id, &user_id, "CMD").await.unwrap();
+
+    let lines = poll_output_until(&output_rx, |l| l.contains(&"hello".to_string())).await;
+
+    assert!(
+        lines.contains(&"hello".to_string()),
+        "Expected 'hello' in pipeline output, got: {:?}",
         lines,
     );
 

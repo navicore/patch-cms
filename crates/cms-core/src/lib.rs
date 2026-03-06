@@ -7,8 +7,8 @@ pub mod minidisk;
 pub mod xedit_adapter;
 
 pub use command::{
-    CmsCommand, CmsCommandResult, CommandProcessor, ExecHandler, GlobalvSubcommand, NoExecHandler,
-    NoSmsgSender, SmsgSender,
+    CmsCommand, CmsCommandResult, CommandProcessor, ExecHandler, ExtCommandHandler,
+    GlobalvSubcommand, NoExecHandler, NoExtCommands, NoSmsgSender, SmsgSender,
 };
 pub use error::{CmsError, Result};
 pub use filespec::FileSpec;

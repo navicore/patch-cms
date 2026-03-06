@@ -172,6 +172,8 @@ name = "cms-machine"
 version = "0.1.0"
 dependencies = [
  "cms-core",
+ "cms-pipelines",
+ "cms-spool",
  "patch-rexx",
  "tempfile",
  "tokio",

@@ -11,6 +11,8 @@ rexx = ["patch-rexx"]
 
 [dependencies]
 cms-core = { path = "../cms-core" }
+cms-spool = { path = "../cms-spool" }
+cms-pipelines = { path = "../cms-pipelines" }
 vm-iucv = { path = "../vm-iucv", features = ["test-util"] }
 patch-rexx = { version = "0.9", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

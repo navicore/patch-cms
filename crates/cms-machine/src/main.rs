@@ -114,14 +114,18 @@ fn main() {
     let (cmd_tx, cmd_rx) = mpsc::channel::<String>();
     let (output_tx, output_rx) = mpsc::channel::<String>();
 
-    // Create the EXEC handler
+    // Create the EXEC handler (swap variant for persistent state across EXECs)
     #[cfg(feature = "rexx")]
     let exec_handler: Box<dyn cms_core::ExecHandler> =
-        { Box::new(cms_machine::rexx_exec::CmsRexxExecHandler) };
+        { Box::new(cms_machine::rexx_exec::CmsRexxExecHandlerWithSwap::new()) };
     #[cfg(not(feature = "rexx"))]
     let exec_handler: Box<dyn cms_core::ExecHandler> = { Box::new(cms_core::NoExecHandler) };
 
-    let handler = CmsMachineHandler::new(filesystem, exec_handler, cmd_rx, output_tx);
+    // Create the extension command handler (spool + pipelines)
+    let ext_handler: Box<dyn cms_core::ExtCommandHandler> =
+        Box::new(cms_machine::CmsExtCommandHandler::new(&userid));
+
+    let handler = CmsMachineHandler::new(filesystem, exec_handler, ext_handler, cmd_rx, output_tx);
 
     // Boot machines — IPL runs inside the async context, then console runs
     // outside it so that handle.block_on() calls in run_console are safe.
