@@ -1,3 +1,8 @@
+<!-- ghmig:moved -->
+> **This repository has moved to [https://git.navicore.tech/navicore/patch-cms](https://git.navicore.tech/navicore/patch-cms).**
+>
+> The GitHub copy is archived and no longer maintained.
+
 # patch-cms
 
 **[Documentation](https://www.navicore.tech/patch-cms/)**
